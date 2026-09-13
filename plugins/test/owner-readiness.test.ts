@@ -678,3 +678,53 @@ test("unrelated inventory does not invalidate broker approval but native pins an
     .toEqual({ refused: "omp_native_consent_required" });
   expect(f.effects).toEqual([]);
 });
+
+test("broker recovery preserves the declared service contract revision", async () => {
+  const f = fixture(ACCOUNTS_PLUGIN_ID);
+  const policy = buildSharedBrokerPolicy({
+    scope: "instance",
+    pluginId: ACCOUNTS_PLUGIN_ID,
+    operationId: BROKER_OPERATION_ID,
+    ...pins,
+    input: { clientAccess: { literal: "{}" } },
+  });
+  const stopped = {
+    ...f.broker,
+    state: "stopped" as const,
+    configuration: { ...f.broker.configuration, enabled: false },
+  };
+  f.ctx.services.describeInstance = async () => stopped;
+  f.ctx.services.readInstanceConfiguration = async () => ({
+    description: stopped,
+    policy,
+  });
+  let configured: unknown = null;
+  f.ctx.services.configureInstance = async (args) => {
+    configured = args;
+    return {
+      ...stopped,
+      state: "starting" as const,
+      configuration: {
+        ...stopped.configuration,
+        revision: "recovered-broker",
+        enabled: true,
+      },
+    };
+  };
+
+  const review = await f.client.call("reviewAccountRuntime", {
+    expectedBrokerRevision: stopped.configuration.revision,
+  });
+  if ("refused" in review) throw new Error(review.refused);
+  expect(
+    await f.client.call("promoteAccountRuntime", {
+      containerId: target.containerId,
+      expectedBrokerRevision: stopped.configuration.revision,
+      reviewDigest: review.reviewDigest,
+    }),
+  ).toEqual({ revision: "recovered-broker" });
+  expect(configured).toMatchObject({
+    policy: { serviceId: BROKER_SERVICE_ID, revision: "1" },
+    enabled: true,
+  });
+});
