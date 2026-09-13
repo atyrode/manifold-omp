@@ -104,10 +104,9 @@ export async function readAccountSetup(
           : "caller_authority_unobserved";
       return { ...base, state: "refused", reason: base.callerRefusal };
     }
-    if (description.configuration?.enabled === false)
-      return { ...base, state: "refused", reason: "broker_disabled" };
     const current = await accountRuntimeReview(ctx, base.revision);
     const ready =
+      current.description.configuration?.enabled === true &&
       current.matches &&
       ["ready", "starting"].includes(current.description.state);
     return {
