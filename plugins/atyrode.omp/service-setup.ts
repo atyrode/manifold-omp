@@ -13,6 +13,8 @@ import {
   SIGN_IN_OPERATION_ID,
   GATEWAY_PLUGIN_ID,
   GATEWAY_OPERATION_ID,
+  BrokerClientAccessSchema,
+  type BrokerClientAccess,
   type ActionInput,
   type ActionResult,
 } from "../api/index.ts";
@@ -40,6 +42,7 @@ function expectBrokerRevision(actual: string | null, expected: string | null) {
 export async function accountRuntimeReview(
   ctx: OmpContext,
   expectedBrokerRevision: string | null,
+  requestedClientAccess?: BrokerClientAccess | null,
 ) {
   if (ctx.pluginId !== ACCOUNTS_PLUGIN_ID)
     throw new OmpRefusal("scope_refused");
@@ -73,11 +76,24 @@ export async function accountRuntimeReview(
   )
     throw new OmpRefusal("resources_changed");
   let clientAccess = "{}";
-  if (current.policy) {
+  let resolvedClientAccess: BrokerClientAccess | null = null;
+  if (requestedClientAccess !== undefined) {
+    resolvedClientAccess = requestedClientAccess;
+    clientAccess = JSON.stringify(requestedClientAccess ?? {});
+  } else if (current.policy) {
     const access = current.policy.runtime?.input.clientAccess;
     if (!access || !("literal" in access) || typeof access.literal !== "string")
       throw new OmpRefusal("resources_changed");
     clientAccess = access.literal;
+    let stored: unknown;
+    try { stored = JSON.parse(clientAccess); } catch { throw new OmpRefusal("resources_changed"); }
+    if (stored && typeof stored === "object" && !Array.isArray(stored) && Object.keys(stored).length === 0) {
+      resolvedClientAccess = null;
+    } else {
+      const parsed = BrokerClientAccessSchema.safeParse(stored);
+      if (!parsed.success) throw new OmpRefusal("resources_changed");
+      resolvedClientAccess = parsed.data;
+    }
   }
   const [broker, signIn] = await Promise.all([
     currentOperation(ctx, owner.machineId, BROKER_OPERATION_ID),
@@ -111,6 +127,7 @@ export async function accountRuntimeReview(
   const review = {
     expectedBrokerRevision,
     ownerMachineId: owner.machineId,
+    clientAccess: resolvedClientAccess,
     broker: broker.pins,
     signIn: signIn.pins,
     reviewDigest: digestOf({
@@ -137,17 +154,17 @@ export async function reviewAccountRuntime(
   ctx: OmpContext,
   args: ActionInput<"reviewAccountRuntime">,
 ): Promise<ActionResult<"reviewAccountRuntime">> {
-  return (await accountRuntimeReview(ctx, args.expectedBrokerRevision)).review;
+  return (await accountRuntimeReview(ctx, args.expectedBrokerRevision, args.clientAccess)).review;
 }
 export async function promoteAccountRuntime(
   ctx: OmpContext,
   args: ActionInput<"promoteAccountRuntime">,
 ): Promise<ActionResult<"promoteAccountRuntime">> {
   await authorizeContainer(ctx, args.containerId, true);
-  const first = await accountRuntimeReview(ctx, args.expectedBrokerRevision);
+  const first = await accountRuntimeReview(ctx, args.expectedBrokerRevision, args.clientAccess);
   if (first.review.reviewDigest !== args.reviewDigest)
     throw new OmpRefusal("review_changed");
-  const latest = await accountRuntimeReview(ctx, args.expectedBrokerRevision);
+  const latest = await accountRuntimeReview(ctx, args.expectedBrokerRevision, args.clientAccess);
   if (latest.review.reviewDigest !== first.review.reviewDigest)
     throw new OmpRefusal("resources_changed");
   await authorizeOwner(ctx, latest.review.ownerMachineId);

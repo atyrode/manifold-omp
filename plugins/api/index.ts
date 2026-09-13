@@ -11,6 +11,7 @@ import {
   RuntimeAccountPoolSchema,
   AccountReferenceSchema,
   AccountsObservationSchema,
+  BrokerClientAccessSchema,
 } from "./contracts.ts";
 import {
   ProbeIdentitiesSchema,
@@ -234,10 +235,13 @@ export const AccountSetupSchema = z.strictObject({
 });
 const accountReviewInput = z.strictObject({
   expectedBrokerRevision: id.nullable(),
+  // Omission retains working clients; null explicitly reviews removing their listener.
+  clientAccess: BrokerClientAccessSchema.nullable().optional(),
 });
 export const AccountRuntimeReviewSchema = z.strictObject({
   expectedBrokerRevision: id.nullable(),
   ownerMachineId: id,
+  clientAccess: BrokerClientAccessSchema.nullable(),
   broker: ResourcePinsSchema,
   signIn: ResourcePinsSchema,
   reviewDigest: digest,
