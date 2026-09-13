@@ -1,0 +1,16 @@
+{
+  "name": "@atyrode/manifold-omp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Typed caller API for the native OMP Manifold plugin family",
+  "exports": {
+    ".": "./plugins/api/index.ts"
+  },
+  "files": [
+    "plugins/api"
+  ],
+  "dependencies": {
+    "zod": "4.4.3"
+  }
+}

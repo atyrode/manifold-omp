@@ -1,0 +1,114 @@
+{
+  "id": "atyrode.omp.gateway",
+  "version": "0.1.0",
+  "title": "omp gateway",
+  "description": "Independent OMP gateway over governed native Manifold resources.",
+  "capabilities": ["containers:read", "containers:write", "jobs:read", "machines:run", "services:read", "services:configure"],
+  "entry": { "server": true },
+  "contributes": {
+    "panels": [],
+    "sections": [],
+    "elements": [],
+    "tools": [],
+    "events": []
+  },
+  "dependencies": {
+    "atyrode.omp": {
+      "type": "required",
+      "reason": "Required independent OMP family authority boundary."
+    },
+    "atyrode.omp.accounts": {
+      "type": "required",
+      "reason": "Required independent OMP family authority boundary."
+    }
+  },
+  "machine": {
+    "artifacts": {},
+    "tools": {},
+    "requiresResourceBindings": true,
+    "locations": {},
+    "operations": {
+      "atyrode.omp.gateway.serve": {
+        "argv": [
+          {
+            "literal": "/job/artifact"
+          }
+        ],
+        "input": {
+          "accountPool": {
+            "type": "string",
+            "required": true,
+            "maxLength": 65536
+          }
+        },
+        "environment": {
+          "SSL_CERT_FILE": "/runtime/bin/ca-certificates"
+        },
+        "runtimeTools": [
+          "bun",
+          "pi-natives",
+          "ca-certificates",
+          "system"
+        ],
+        "executable": {
+          "runtimeTool": "bun"
+        },
+        "inputFiles": {
+          "accountPool": {
+            "input": "accountPool"
+          },
+          "serviceBearer": {
+            "generated": "service-bearer"
+          },
+          "broker": {
+            "literal": "{\"url\": \"\", \"token\": \"\"}",
+            "jsonValues": [
+              {
+                "path": [
+                  "url"
+                ],
+                "serviceId": "atyrode.omp.accounts.broker",
+                "value": "url"
+              },
+              {
+                "path": [
+                  "token"
+                ],
+                "serviceId": "atyrode.omp.accounts.broker",
+                "value": "bearer"
+              }
+            ]
+          }
+        },
+        "providesService": true,
+        "services": [
+          {
+            "serviceId": "atyrode.omp.accounts.broker",
+            "revision": "1",
+            "operationIds": [
+              "gateway-snapshot",
+              "gateway-snapshot-stream",
+              "gateway-refresh",
+              "gateway-block",
+              "gateway-clear-blocks",
+              "gateway-disable",
+              "gateway-usage",
+              "gateway-usage-stale",
+              "gateway-usage-observed"
+            ]
+          }
+        ],
+        "locations": [],
+        "outputs": [],
+        "network": "host",
+        "limits": {
+          "timeoutMs": 86400000,
+          "memoryBytes": 2147483648,
+          "processes": 128,
+          "outputBytes": 4096
+        },
+        "stdin": false
+      }
+    }
+  }
+}
