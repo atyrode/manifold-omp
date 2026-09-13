@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { RemoteAuthCredentialStore as RemoteStore } from "@oh-my-pi/pi-ai/auth-broker/remote-store";
@@ -17,6 +18,7 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
   const removed = "synthetic-restart-removed";
   const marker = "synthetic-restart-marker";
   const token = "synthetic-restart-broker-bearer";
+  const bearerSha256 = createHash("sha256").update(token).digest("hex");
   const expires = Date.now() + 3_600_000;
   const credential = (access: string) => ({
     type: "oauth" as const, access, refresh: "synthetic-unused-refresh", expires,
@@ -43,7 +45,8 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
     for (let i = 0; i < 12; i++) storage.upsertCredential(selected, credential(`synthetic-before-${i}`));
     storage.upsertCredential(removed, credential("synthetic-removed"));
     storage.upsertCredential(marker, credential("synthetic-marker-before"));
-    broker = startAuthBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [token], disableRefresher: true });
+    broker = startAuthBroker({ storage, bind: "127.0.0.1:0", bearerTokens: ["synthetic-original-service"],
+      bearerTokenHashes: [bearerSha256], controlBearerToken: "synthetic-original-service", disableRefresher: true });
     const port = broker.port;
     const origin = broker.url;
     const fixtureFetch = ctx.fetchTo(origin);
@@ -85,7 +88,8 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
     storage.upsertCredential(selected, credential("synthetic-after-restart"));
     await storage.remove(removed);
     ctx.check(storage.getGeneration() < oldGeneration, "restart-generation-not-lower");
-    broker = startAuthBroker({ storage, bind: `127.0.0.1:${port}`, bearerTokens: [token], disableRefresher: true });
+    broker = startAuthBroker({ storage, bind: `127.0.0.1:${port}`, bearerTokens: ["synthetic-replacement-service"],
+      bearerTokenHashes: [bearerSha256], controlBearerToken: "synthetic-replacement-service", disableRefresher: true });
     ctx.check(broker.url === origin, "restart-origin-changed");
 
     // No direct refresh or consumer reconstruction: only automatic SSE reconnect.

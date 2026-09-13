@@ -7,6 +7,16 @@ export const ThinkingLevelSchema = z.enum(["minimal", "low", "medium", "high", "
 export type ThinkingLevel = z.infer<typeof ThinkingLevelSchema>;
 export const modelId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._/:-]{0,511}$/);
 
+/** Existing clients keep their loopback endpoint and verifier, never a serialized bearer. */
+export const BrokerClientAccessSchema = z.strictObject({
+  bind: z.string().regex(/^127\.0\.0\.1:([1-9][0-9]{3,4})$/).refine(value => {
+    const port = Number(value.slice(10));
+    return port >= 1024 && port <= 65535 && value === `127.0.0.1:${port}`;
+  }),
+  bearerSha256: z.string().length(64).regex(/^[0-9a-f]{64}$/),
+});
+export type BrokerClientAccess = z.infer<typeof BrokerClientAccessSchema>;
+
 const accountScope = z.string().min(1).max(1024);
 const identityKey = z.string().min(1).max(1024);
 const credentialId = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);

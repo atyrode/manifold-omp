@@ -1,23 +1,18 @@
 import { accessSync, constants, closeSync, fstatSync, openSync, readdirSync, readSync } from "node:fs";
+import { BrokerClientAccessSchema, type BrokerClientAccess } from "../../api/contracts.ts";
 
 const INPUT_LIMIT = 128 * 1024;
 const unavailable = (): Error => new Error("broker_unavailable");
 
-export interface BrokerClientAccess { bind: string; bearerSha256: string }
 export interface BrokerInputs { serviceBearer: string; clientAccess: BrokerClientAccess | undefined }
 
 export function parseClientAccess(value: unknown): BrokerClientAccess | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw unavailable();
   const fields = Object.keys(value);
   if (fields.length === 0) return undefined;
-  if (fields.length !== 2) throw unavailable();
-  const access = value as Record<string, unknown>;
-  if (typeof access.bind !== "string" || typeof access.bearerSha256 !== "string"
-    || access.bearerSha256.length !== 64 || !/^[0-9a-f]{64}$/.test(access.bearerSha256)) throw unavailable();
-  const match = /^127\.0\.0\.1:([1-9][0-9]{3,4})$/.exec(access.bind);
-  const port = match ? Number(match[1]) : 0;
-  if (port < 1024 || port > 65535 || access.bind !== `127.0.0.1:${port}`) throw unavailable();
-  return { bind: access.bind, bearerSha256: access.bearerSha256 };
+  const parsed = BrokerClientAccessSchema.safeParse(value);
+  if (!parsed.success) throw unavailable();
+  return parsed.data;
 }
 
 export function readSealedJSON(path: string): unknown {

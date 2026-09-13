@@ -346,18 +346,34 @@ try {
     check(digest(grantedRights) === digest(reviewedRights), "applied-consent-scope-differs-from-review");
 
     phase = "packed-broker-public-review";
-    const brokerReview = await call("reviewAccountRuntime", { expectedBrokerRevision: null });
+    const clientBearer = `synthetic-legacy-client-${randomUUID()}`;
+    const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response(null, { status: 503 }) });
+    const clientAccess = { bind: `127.0.0.1:${reservation.port}`,
+      bearerSha256: new Bun.CryptoHasher("sha256").update(clientBearer).digest("hex") };
+    reservation.stop(true);
+    const brokerReview = await call("reviewAccountRuntime", { expectedBrokerRevision: null, clientAccess });
     check(brokerReview.ownerMachineId === target.machineId && brokerReview.broker.installationRevision === ready.installation.revision
       && brokerReview.broker.artifactSha256 === ready.installation.artifactSha256
       && brokerReview.broker.resourceBindingDigest === ready.operations?.[BROKER_OPERATION_ID]?.resourceBindingDigest, "broker-review-pins-mismatch");
+    check(digest(brokerReview.clientAccess) === digest(clientAccess), "client-access-not-in-review");
+    await refused("promoteAccountRuntime", { containerId: target.containerId,
+      expectedBrokerRevision: null, clientAccess: null, reviewDigest: brokerReview.reviewDigest });
+    check((await instance()).state === "unconfigured", "changed-client-access-mutated-custody");
     const promoted = await call("promoteAccountRuntime", { containerId: target.containerId,
-      expectedBrokerRevision: null, reviewDigest: brokerReview.reviewDigest });
+      expectedBrokerRevision: null, clientAccess, reviewDigest: brokerReview.reviewDigest });
     phase = "packed-broker-worker-ready";
     await waitFor(async () => {
       const value = await instance();
       check(!["unavailable", "stopped"].includes(value.state), "packed-broker-worker-refused");
       return value.state === "ready" && value.configuration?.revision === promoted.revision;
     }, 60_000, 50);
+    const retainedAccess = await call("reviewAccountRuntime", { expectedBrokerRevision: promoted.revision });
+    check(digest(retainedAccess.clientAccess) === digest(clientAccess), "omitted-client-access-not-retained");
+    const legacySnapshot = await fetch(`http://${clientAccess.bind}/v1/snapshot`, {
+      headers: { authorization: `Bearer ${clientBearer}` }, signal: AbortSignal.timeout(5000),
+    });
+    check(legacySnapshot.status === 200, "unchanged-legacy-client-refused");
+    await legacySnapshot.body?.cancel();
     const fresh = await call("accounts", {});
     check(fresh.status === "fresh" && fresh.observedAt !== null && fresh.accounts.length === 0, "packed-broker-metadata-not-observed");
     const freshUsage = await call("usage", {});
