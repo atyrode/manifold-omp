@@ -312,6 +312,9 @@ export async function currentOperation(
   );
   if (ready.state !== "ready" || !ready.pins)
     throw new OmpRefusal(ready.reason ?? "resources_incomplete");
+  // Consumed resources are bound by the operation digest. This fresh observation's
+  // machine-wide inventory also includes unrelated services that may be quiesced.
+  delete observation.description.resources;
   return { ...observation, pins: ready.pins };
 }
 export async function describeDestination(

@@ -643,3 +643,38 @@ test("visible broker state remains authoritative for a non-root caller", async (
     reason: "account_owner_unavailable",
   });
 });
+
+test("unrelated inventory does not invalidate broker approval but native pins and consent still do", async () => {
+  const f = fixture(ACCOUNTS_PLUGIN_ID);
+  f.native.resources = {
+    tools: {},
+    services: { "unrelated.broker": "c".repeat(64) },
+    anchors: {},
+    serviceDefinitions: {
+      "unrelated.broker": { revision: "old", operationIds: ["metadata"] },
+    },
+  };
+  const expectedBrokerRevision = f.broker.configuration.revision;
+  const review = await f.client.call("reviewAccountRuntime", { expectedBrokerRevision });
+  if ("refused" in review) throw new Error(review.refused);
+  delete f.native.resources.services["unrelated.broker"];
+  delete f.native.resources.serviceDefinitions["unrelated.broker"];
+  const after = await f.client.call("reviewAccountRuntime", { expectedBrokerRevision });
+  if ("refused" in after) throw new Error(after.refused);
+  expect(after.reviewDigest).toBe(review.reviewDigest);
+
+  const approval = { containerId: target.containerId, expectedBrokerRevision,
+    reviewDigest: review.reviewDigest };
+  f.native.operations![BROKER_OPERATION_ID]!.resourceBindingDigest = "f".repeat(64);
+  expect(await f.client.call("promoteAccountRuntime", approval))
+    .toEqual({ refused: "omp_review_changed" });
+  f.native.operations![BROKER_OPERATION_ID]!.resourceBindingDigest = pins.resourceBindingDigest;
+  const writer = f.native.consents.find(consent => consent.cap === "locations:write")!;
+  writer.revision = "reapproved-writer";
+  expect(await f.client.call("promoteAccountRuntime", approval))
+    .toEqual({ refused: "omp_review_changed" });
+  writer.enabled = false;
+  expect(await f.client.call("promoteAccountRuntime", approval))
+    .toEqual({ refused: "omp_native_consent_required" });
+  expect(f.effects).toEqual([]);
+});
