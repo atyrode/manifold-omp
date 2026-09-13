@@ -47,8 +47,12 @@ export async function runProbe(kind: "inventory" | "benchmark"): Promise<never> 
     await context.ready;
     if (context.signal.aborted) throw new ProbeError("cancelled");
     const input = prepareProbeInputs(kind);
-    const result = kind === "inventory" ? await inventoryTarget(input.identities, context.signal) : await benchmarkTarget(input.benchmark!, context.signal);
-    if (context.signal.aborted) throw new ProbeError("cancelled");
+    // Probes use declarative service proxies, not WorkerContext calls. Releasing
+    // the unused channel before spawning OMP keeps its child lifecycle from
+    // cancelling the inventory job; Manifold still owns the complete cgroup.
+    context.close();
+    context = undefined;
+    const result = kind === "inventory" ? await inventoryTarget(input.identities, controller.signal) : await benchmarkTarget(input.benchmark!, controller.signal);
     emit(result);
     success = true;
   } catch (error) {
