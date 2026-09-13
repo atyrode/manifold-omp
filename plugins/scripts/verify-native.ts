@@ -273,10 +273,11 @@ try {
     const initialNative = JobDescriptionSchema.parse(await ownerAction(hub, "engine.jobs.describe", {
       machineId: target.machineId, pluginId: ACCOUNTS_PLUGIN_ID,
     }));
-    const origins = new Set(machineArtifacts(accountMachine).flatMap(artifact => artifact.url ? [new URL(artifact.url).origin] : []));
-    // GitHub's release download endpoint redirects to its asset CDN. Content is
-    // still admitted only against the immutable hashes in the installed bundle.
-    if (origins.has("https://github.com")) origins.add("https://release-assets.githubusercontent.com");
+    // CA data must arrive in the reviewed bundle, not expand the native owner's
+    // download authority beyond the existing binary/SDK publishers.
+    const origins = new Set(["https://github.com", "https://release-assets.githubusercontent.com", "https://registry.npmjs.org"]);
+    check(machineArtifacts(accountMachine).every(artifact => !artifact.url || origins.has(new URL(artifact.url).origin)),
+      "packed-runtime-expanded-download-authority");
     const ownerConfiguration = JobOwnerConfigSchema.parse({
       machineId: target.machineId, admissionPublicKey: initialNative.admissionPublicKey,
       stateDirectory, delegatedCgroup: ownerGroup, bubblewrap,
