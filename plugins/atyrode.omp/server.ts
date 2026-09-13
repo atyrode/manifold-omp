@@ -44,7 +44,13 @@ const implementations: RootHandlers = {
   reviewSession,
   prepareSession,
 };
-const workspaceCaps: readonly Cap[] = ["machines:run", "jobs:read"];
+const workspaceObservationCaps: readonly Cap[] = ["machines:run", "jobs:read"];
+// The write door may execute either mode; Native still rechecks the exact operation's refs.
+const workspaceExecutionCaps: readonly Cap[] = [
+  ...workspaceObservationCaps,
+  "locations:read",
+  "locations:create",
+];
 const observedRuntimeCaps: readonly Cap[] = [
   "machines:run",
   "jobs:read",
@@ -55,8 +61,8 @@ const delegates: Record<RootAction, readonly Cap[]> = {
   readDefaults: [],
   writeDefaults: [],
   describeDestination: ["machines:run", "jobs:read", "services:read"],
-  reviewWorkspace: workspaceCaps,
-  prepareWorkspace: workspaceCaps,
+  reviewWorkspace: workspaceObservationCaps,
+  prepareWorkspace: workspaceExecutionCaps,
   startInventory: [
     "machines:run",
     "jobs:read",
