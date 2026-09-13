@@ -414,6 +414,31 @@ try {
     }, 30_000, 50);
     check(stoppedJob.result && stoppedJob.result.startedAt !== null && stoppedJob.result.finishedAt !== null, "broker-stop-receipt-missing");
     check((await call("accounts", {})).status === "unavailable", "stopped-broker-still-readable");
+    phase = "packed-broker-reviewed-recovery";
+    const pausedSetup = await call("readAccountSetup", {});
+    check(pausedSetup.brokerState === "disabled" && pausedSetup.canReview && !pausedSetup.canSignIn,
+      "paused-broker-review-unavailable");
+    const pausedRevision = (await instance()).configuration!.revision;
+    await refused("prepareSignIn", { containerId: target.containerId, expectedBrokerRevision: pausedRevision });
+    const recoveryReview = await call("reviewAccountRuntime", { expectedBrokerRevision: pausedRevision });
+    check(digest(recoveryReview.clientAccess) === digest(clientAccess), "recovery-dropped-client-access");
+    const stillPaused = await instance();
+    check(stillPaused.state === "stopped" && !stillPaused.configuration!.enabled
+      && stillPaused.configuration!.revision === pausedRevision, "observation-resumed-paused-broker");
+    await refused("promoteAccountRuntime", { containerId: target.containerId,
+      expectedBrokerRevision: promoted.revision, reviewDigest: retainedAccess.reviewDigest });
+    const recovered = await call("promoteAccountRuntime", { containerId: target.containerId,
+      expectedBrokerRevision: pausedRevision, reviewDigest: recoveryReview.reviewDigest });
+    await waitFor(async () => {
+      const value = await instance();
+      return value.state === "ready" && value.configuration?.revision === recovered.revision;
+    }, 60_000, 50);
+    const recoveredSnapshot = await fetch(`http://${clientAccess.bind}/v1/snapshot`, {
+      headers: { authorization: `Bearer ${clientBearer}` }, signal: AbortSignal.timeout(5000),
+    });
+    check(recoveredSnapshot.status === 200, "recovery-broke-unchanged-legacy-client");
+    await recoveredSnapshot.body?.cancel();
+    check((await call("accounts", {})).status === "fresh", "recovered-broker-not-readable");
     check(!(await roster(hub)).some(row => row.manifest.id === "atyrode.code" || row.manifest.id.startsWith("atyrode.code.")),
       "positive-worker-introduced-code-dependency");
   } finally {

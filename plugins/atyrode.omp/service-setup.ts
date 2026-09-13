@@ -57,8 +57,6 @@ export async function accountRuntimeReview(
   if (!owner?.online || !description.connected)
     throw new OmpRefusal("account_owner_unavailable");
   await authorizeOwner(ctx, owner.machineId);
-  if (description.configuration && !description.configuration.enabled)
-    throw new OmpRefusal("broker_disabled");
   if (description.reason === "machine_draining")
     throw new OmpRefusal("machine_draining");
   const current = await ctx.services.readInstanceConfiguration({
@@ -194,6 +192,7 @@ export async function prepareSignIn(
   await authorizeTerminalSpawn(ctx, args.containerId);
   const first = await accountRuntimeReview(ctx, args.expectedBrokerRevision);
   if (
+    !first.description.configuration?.enabled ||
     !first.matches ||
     !["ready", "starting"].includes(first.description.state)
   )
