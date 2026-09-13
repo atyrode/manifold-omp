@@ -13,12 +13,14 @@ import {
   ServicePinSchema,
   InventoryReceiptSchema,
   BenchmarkReceiptSchema,
+  PROBE_MODEL_LIMIT,
   BenchmarkInputSchema,
   ProbeIdentitiesSchema,
   type ActionInput,
   type ActionResult,
   type Overlay,
   type RuntimeAccountPool,
+  type ProbeIdentity,
   type Target,
 } from "../api/index.ts";
 import { parseBenchmarkInput, probeAddress } from "../api/probe.ts";
@@ -38,6 +40,26 @@ import { bundledProbeModels } from "./sdk-metadata.macro.ts" with { type: "macro
 
 const registry = bundledProbeModels();
 const providers = Object.keys(registry);
+
+export function defaultInventoryIdentities(
+  catalog: Readonly<Record<string, readonly ProbeIdentity[]>>,
+  pool: RuntimeAccountPool,
+): ProbeIdentity[] {
+  // Smaller provider catalogs go first so one large aggregator cannot crowd every direct provider out.
+  const providers = Object.keys(pool).sort((left, right) => {
+    const bySize =
+      (catalog[left]?.length ?? 0) - (catalog[right]?.length ?? 0);
+    return bySize || (left < right ? -1 : left > right ? 1 : 0);
+  });
+  const identities: ProbeIdentity[] = [];
+  for (const provider of providers) {
+    for (const identity of catalog[provider] ?? []) {
+      identities.push(identity);
+      if (identities.length === PROBE_MODEL_LIMIT) return identities;
+    }
+  }
+  return identities;
+}
 const provenanceSchema = z.strictObject({
   target: TargetSchema,
   operationId: z.string(),
@@ -183,11 +205,8 @@ async function inventoryPreparation(
   const operationId = `${OMP_PLUGIN_ID}.inventory`;
   const current = await currentOperation(ctx, args.machineId, operationId);
   const gateway = await currentGateway(ctx, args.machineId);
-  const available = Object.keys(pool).flatMap(
-    (provider) => registry[provider] ?? [],
-  );
   const identities = ProbeIdentitiesSchema.parse(
-    args.modelIdentities ?? available,
+    args.modelIdentities ?? defaultInventoryIdentities(registry, pool),
   );
   const seen = new Set<string>();
   for (const identity of identities) {
@@ -195,7 +214,9 @@ async function inventoryPreparation(
     if (
       seen.has(key) ||
       !pool[identity.provider]?.length ||
-      !available.some((value) => digestOf(value) === digestOf(identity))
+      !(registry[identity.provider] ?? []).some(
+        (value) => digestOf(value) === digestOf(identity),
+      )
     )
       throw new OmpRefusal("invalid_model_identity");
     seen.add(key);
