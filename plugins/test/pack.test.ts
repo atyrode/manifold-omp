@@ -179,6 +179,22 @@ test("missing preparation and a forged tree digest fail closed", async () => {
   }
 }, 180_000);
 
+test("tampered bundled CA data preserves the complete prior family", async () => {
+  const destination = join(scratch, "tampered-ca-data");
+  const previous = await priorFamily(destination);
+  const file = join(fixture, "runtime-data", "certifi-2026.1.4-py3-none-any.whl");
+  const original = await readFile(file);
+  try {
+    const corrupted = Buffer.from(original);
+    corrupted[0] = corrupted[0]! ^ 1;
+    await writeFile(file, corrupted);
+    await expect(fixturePack(destination)).rejects.toThrow();
+    expect(await snapshot(destination)).toEqual(previous);
+  } finally {
+    await writeFile(file, original);
+  }
+}, 180_000);
+
 test("source, SDK, symlink and another run's staging destinations are refused without mutation", async () => {
   const sentinel = join(scratch, "unrelated", ".omp-publish-other");
   await mkdir(sentinel, { recursive: true });

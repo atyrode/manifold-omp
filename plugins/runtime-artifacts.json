@@ -9,6 +9,7 @@
       "version": "2026.1.4",
       "observedOn": "2026-09-12",
       "release": "https://pypi.org/pypi/certifi/2026.1.4/json",
+      "download": "https://files.pythonhosted.org/packages/e6/ad/3cc14f097111b4de0040c83a525973216457bbeeb63739ef1ed275c1c021/certifi-2026.1.4-py3-none-any.whl",
       "nixConvention": "https://github.com/NixOS/nixpkgs/blob/6aefcda9401be8acc2b74244fb3b37520ea1f0a8/pkgs/development/python-modules/certifi/default.nix",
       "integrity": "Certifi version follows the pinned Manifold Nixpkgs package. The immutable Python-hosted wheel SHA-256 and byte size match PyPI release metadata; the PEM and license entry SHA-256, aggregate expanded bytes and member count were derived from those exact downloaded bytes. Only the declared data files are extracted; no Python runtime or installer is required."
     },
@@ -17,7 +18,7 @@
   "tools": {
     "ca-certificates": {
       "linux-x64": {
-        "url": "https://files.pythonhosted.org/packages/e6/ad/3cc14f097111b4de0040c83a525973216457bbeeb63739ef1ed275c1c021/certifi-2026.1.4-py3-none-any.whl",
+        "bundleFile": "certifi-2026.1.4-py3-none-any.whl",
         "sha256": "9943707519e4add1115f44c2bc244f782c0249876bf51b6599fee1ffbedd685c",
         "format": "zip",
         "entry": [
@@ -44,7 +45,7 @@
         }
       },
       "linux-arm64": {
-        "url": "https://files.pythonhosted.org/packages/e6/ad/3cc14f097111b4de0040c83a525973216457bbeeb63739ef1ed275c1c021/certifi-2026.1.4-py3-none-any.whl",
+        "bundleFile": "certifi-2026.1.4-py3-none-any.whl",
         "sha256": "9943707519e4add1115f44c2bc244f782c0249876bf51b6599fee1ffbedd685c",
         "format": "zip",
         "entry": [

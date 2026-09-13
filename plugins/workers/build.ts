@@ -290,8 +290,8 @@ async function notices(importedFiles: Set<string>): Promise<Buffer> {
   return Buffer.from(sections.join("\n\n------------------------------------------------------------\n\n") + "\n");
 }
 
-/** Build one installation's workers, embedding only bounded JS/notices. Large native binaries
- * stay exact, hash-pinned published resources. No runtime package installation.
+/** Build one installation's workers, embedding bounded JS, notices and pinned data.
+ * Large native binaries stay exact, hash-pinned published resources. No runtime package installation.
  * Requires the frozen dependency install and pinned sibling Manifold checkout.
  * The packer enforces the final 16 MiB JSON budget after server/web bundling too.
  */
@@ -304,14 +304,29 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
   if (hash(await readFile(nativeLoader)) !== loaderSha256) throw new Error("Unreviewed native SDK loader bytes");
   const artifacts: WorkerArtifacts["artifacts"] = {};
   const tools: WorkerArtifacts["tools"] = {};
+  const members = new Map<string, Uint8Array>();
+  let embeddedBase64Bytes = 0;
   for (const [alias, layouts] of Object.entries(runtime.tools)) {
     if (target === "gateway" && alias === "omp") continue;
     if (target === "root" && alias === "pi-natives") continue;
     tools[alias] = {};
-    for (const platform of platforms) tools[alias]![platform] = MachineArtifactSchema.parse(layouts[platform]);
+    for (const platform of platforms) {
+      const declaration = MachineArtifactSchema.parse(layouts[platform]);
+      tools[alias]![platform] = declaration;
+      if (!declaration.bundleFile || members.has(declaration.bundleFile)) continue;
+      const directory = await realpath(join(root, "runtime-data"));
+      const file = await realpath(join(directory, declaration.bundleFile));
+      const metadata = await lstat(file);
+      if (!containsPath(directory, file) || !metadata.isFile() || metadata.size > declaration.maxBytes)
+        throw new Error(`Invalid bundled runtime data: ${alias}`);
+      const bytes = await readFile(file);
+      if (bytes.length > declaration.maxBytes || hash(bytes) !== declaration.sha256)
+        throw new Error(`Unreviewed bundled runtime data: ${alias}`);
+      embeddedBase64Bytes += 4 * Math.ceil(bytes.length / 3);
+      if (embeddedBase64Bytes > maxEmbeddedBytes) throw new Error("Bundled runtime data exceeds native aggregate limit");
+      members.set(declaration.bundleFile, bytes);
+    }
   }
-  const members = new Map<string, Uint8Array>();
-  let embeddedBase64Bytes = 0;
   for (const [name, source] of Object.entries(entrypoints[target])) {
     const importedFiles = new Set<string>();
     let usesNative = false;
