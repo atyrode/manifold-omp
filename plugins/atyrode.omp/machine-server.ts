@@ -5,6 +5,7 @@ import {
   formatManifoldUri,
   hasCap,
   InstanceServiceDescriptionSchema,
+  InstanceServicesDescriptionSchema,
   JobDescriptionSchema,
   JobDeploymentDescriptionSchema,
   PublicJobSchema,
@@ -331,15 +332,26 @@ export async function describeDestination(
     ),
   );
   const [broker, gatewayDescription] = await Promise.all([
-    ctx.services
-      .describeInstance({ serviceId: BROKER_SERVICE_ID })
-      .then((value) => InstanceServiceDescriptionSchema.parse(value)),
+    // Instance discovery hides absent and unauthorized services from non-owners.
+    // A hidden broker is not evidence about independent destination operations.
+    ctx.auth.isRoot
+      ? ctx.services
+          .describeInstance({ serviceId: BROKER_SERVICE_ID })
+          .then((value) => InstanceServiceDescriptionSchema.parse(value))
+      : ctx.services
+          .listInstances({})
+          .then((value) =>
+            InstanceServicesDescriptionSchema.parse(value).services.find(
+              (service) => service.serviceId === BROKER_SERVICE_ID,
+            ),
+          ),
     ctx.services.describe({ machineId: target.machineId }),
   ]);
   if (
-    broker.serviceId !== BROKER_SERVICE_ID ||
-    (broker.configuration &&
-      broker.configuration.pluginId !== ACCOUNTS_PLUGIN_ID)
+    broker &&
+    (broker.serviceId !== BROKER_SERVICE_ID ||
+      (broker.configuration &&
+        broker.configuration.pluginId !== ACCOUNTS_PLUGIN_ID))
   )
     throw new OmpRefusal("resources_changed");
   const gateway = gatewayDescription.services.find(
@@ -352,7 +364,7 @@ export async function describeDestination(
         (operation) => operation.operationId === operationId && operation.ready,
       ),
     );
-  const brokerCallerRefusal = broker.owner
+  const brokerCallerRefusal = broker?.owner
     ? await callerCapabilityRefusal(ctx, "services:read", {
         kind: "service",
         machineId: broker.owner.machineId,
@@ -363,26 +375,30 @@ export async function describeDestination(
   const services: ActionResult<"describeDestination">["services"] = [
     {
       serviceId: BROKER_SERVICE_ID,
-      state: !broker.configuration
-        ? "missing"
-        : !broker.configuration.enabled
-          ? "refused"
-          : !broker.connected || !broker.owner?.online
-            ? "offline"
-            : broker.state !== "ready"
-              ? "missing"
-              : brokerCallerRefusal
-                ? "refused"
-                : "ready",
-      reason: !broker.configuration
-        ? "broker_unconfigured"
-        : !broker.configuration.enabled
-          ? "broker_disabled"
-          : !broker.connected || !broker.owner?.online
-            ? "account_owner_unavailable"
-            : broker.state !== "ready"
-              ? "broker_unavailable"
-              : brokerCallerRefusal,
+      state: !broker
+        ? "refused"
+        : !broker.configuration
+          ? "missing"
+          : !broker.configuration.enabled
+            ? "refused"
+            : !broker.connected || !broker.owner?.online
+              ? "offline"
+              : broker.state !== "ready"
+                ? "missing"
+                : brokerCallerRefusal
+                  ? "refused"
+                  : "ready",
+      reason: !broker
+        ? "caller_authority_unobserved"
+        : !broker.configuration
+          ? "broker_unconfigured"
+          : !broker.configuration.enabled
+            ? "broker_disabled"
+            : !broker.connected || !broker.owner?.online
+              ? "account_owner_unavailable"
+              : broker.state !== "ready"
+                ? "broker_unavailable"
+                : brokerCallerRefusal,
     },
     {
       serviceId: "omp",

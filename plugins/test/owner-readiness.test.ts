@@ -594,3 +594,52 @@ test("readiness grades a retained installation's extra bound reference rather th
   ).rejects.toThrow("omp_caller_locations_create_required");
   expect(f.effects).toEqual([]);
 });
+
+test("a broker hidden from a caller does not erase independent folder readiness", async () => {
+  const f = fixture(OMP_PLUGIN_ID);
+  f.authority.isRoot = false;
+  f.authority.caps = CAPS.filter((cap) => cap !== "*");
+  f.ctx.services.describeInstance = async () => {
+    throw new Error("service_unauthorized");
+  };
+  f.ctx.services.listInstances = async () => ({
+    defaultOwner: null,
+    services: [],
+  });
+  const destination = await describeDestination(f.ctx, target);
+  expect(
+    destination.operations.find(
+      (operation) => operation.operationId === PREPARE_WORKSPACE_OPERATION_ID,
+    ),
+  ).toMatchObject({ nativeReady: true, state: "ready", callerRefusal: null });
+  expect(
+    destination.services.find(
+      (service) => service.serviceId === BROKER_SERVICE_ID,
+    ),
+  ).toEqual({
+    serviceId: BROKER_SERVICE_ID,
+    state: "refused",
+    reason: "caller_authority_unobserved",
+  });
+});
+
+test("visible broker state remains authoritative for a non-root caller", async () => {
+  const f = fixture(OMP_PLUGIN_ID);
+  f.authority.isRoot = false;
+  f.authority.caps = CAPS.filter((cap) => cap !== "*");
+  f.broker.owner.online = false;
+  f.ctx.services.listInstances = async () => ({
+    defaultOwner: null,
+    services: [f.broker],
+  });
+  const destination = await describeDestination(f.ctx, target);
+  expect(
+    destination.services.find(
+      (service) => service.serviceId === BROKER_SERVICE_ID,
+    ),
+  ).toEqual({
+    serviceId: BROKER_SERVICE_ID,
+    state: "offline",
+    reason: "account_owner_unavailable",
+  });
+});

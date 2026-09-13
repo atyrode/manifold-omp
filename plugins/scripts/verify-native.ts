@@ -31,7 +31,7 @@ try {
   const { installBundle } = await import("../../../manifold/packages/plugin-kit/src/install.ts");
   const { dispatch, ownerAction, roster } = await import("../../../manifold/packages/plugin-kit/src/hub.ts");
   phase = "import-native-fixture";
-  const { startServer, startAgent, waitFor, createContainer, enrollMachine } = await import("../../../manifold/packages/testkit/src/index.ts");
+  const { startServer, startAgent, waitFor, createContainer, enrollMachine, mintToken } = await import("../../../manifold/packages/testkit/src/index.ts");
   phase = "import-native-protocol";
   const { JobDescriptionSchema, JobDeploymentDescriptionSchema, JobDeploymentReviewSchema,
     JobDeploymentListResultSchema, JobDeploymentSchema, ListJobRunsResultSchema, MachineHalfSchema,
@@ -144,6 +144,18 @@ try {
     const target = { containerId: container.id, machineId: enrollment.machineId };
     const destination = await call("describeDestination", target);
     check(destination.state === "offline" && destination.operations.every(operation => operation.state === "offline"), "offline-destination-reported-ready");
+    phase = "non-owner-destination-without-broker";
+    const observer = await mintToken(server, {
+      principal: { kind: "human", name: "Readiness observer", color: "#336699" },
+      caps: ["containers:read", "machines:run", "jobs:read", "services:read"],
+    });
+    const observerReply = await dispatch(hub, observer.token, actionDoor("describeDestination"), target);
+    check(observerReply.ok, "broker-absence-erased-destination");
+    const observerDestination = actionSchemas.describeDestination.result.parse(observerReply.result);
+    check(observerDestination.operations.every(operation => operation.state === "offline")
+      && observerDestination.services.some(service => service.serviceId === BROKER_SERVICE_ID
+        && service.state === "refused" && service.reason === "caller_authority_unobserved"),
+    "non-owner-broker-absence-misrepresented");
     const accounts = await call("accounts", {});
     check(accounts.accounts.length === 0 && accounts.status === "unavailable", "unconfigured-broker-exposed-accounts");
     const usage = await call("usage", {});
