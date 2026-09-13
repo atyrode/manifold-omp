@@ -114,14 +114,9 @@ export async function accountRuntimeReview(
     current.policy !== null &&
     digestOf({ ...current.policy, revision: installedPolicy.revision }) ===
       digestOf(installedPolicy);
-  const recovering =
-    ["stopped", "unavailable"].includes(description.state) && matches;
-  const policy = recovering
-    ? {
-        ...installedPolicy,
-        revision: digestOf({ expectedBrokerRevision, policy: installedPolicy }),
-      }
-    : installedPolicy;
+  // Recovery restarts an instance configuration; it does not define a new broker API
+  // or invalidate native callers already bound to the declared service revision.
+  const policy = installedPolicy;
   const review = {
     expectedBrokerRevision,
     ownerMachineId: owner.machineId,

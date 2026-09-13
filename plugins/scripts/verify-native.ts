@@ -433,6 +433,9 @@ try {
       const value = await instance();
       return value.state === "ready" && value.configuration?.revision === recovered.revision;
     }, 60_000, 50);
+    const recoveredConfiguration = InstanceServiceConfigurationReadSchema.parse(
+      await ownerAction(hub, "engine.services.readInstanceConfiguration", { serviceId: BROKER_SERVICE_ID }));
+    check(recoveredConfiguration.policy?.revision === "1", "recovery-changed-broker-service-contract");
     const recoveredSnapshot = await fetch(`http://${clientAccess.bind}/v1/snapshot`, {
       headers: { authorization: `Bearer ${clientBearer}` }, signal: AbortSignal.timeout(5000),
     });
