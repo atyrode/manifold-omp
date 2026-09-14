@@ -32,7 +32,213 @@
     "sections": [],
     "elements": [],
     "tools": [],
-    "events": []
+    "events": [],
+    "harness": {
+      "id": "atyrode.omp",
+      "title": "OMP",
+      "profileSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "accountPool": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+            },
+            "additionalProperties": {
+              "maxItems": 1024,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "scope": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  },
+                  "credentialId": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "identityKey": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 1024
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "scope",
+                  "credentialId",
+                  "identityKey"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "overlay": {
+            "type": "object",
+            "properties": {
+              "modelRoles": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                },
+                "additionalProperties": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\/[A-Za-z0-9][A-Za-z0-9._/:-]{0,511}$"
+                }
+              },
+              "retry": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "modelFallback": {
+                    "type": "boolean"
+                  },
+                  "fallbackRevertPolicy": {
+                    "type": "string",
+                    "const": "cooldown-expiry"
+                  },
+                  "fallbackChains": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                    },
+                    "additionalProperties": {
+                      "maxItems": 64,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\/[A-Za-z0-9][A-Za-z0-9._/:-]{0,511}$"
+                      }
+                    }
+                  }
+                },
+                "required": [
+                  "enabled",
+                  "modelFallback"
+                ],
+                "additionalProperties": false
+              },
+              "task": {
+                "type": "object",
+                "properties": {
+                  "agentModelOverrides": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                    },
+                    "additionalProperties": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\/[A-Za-z0-9][A-Za-z0-9._/:-]{0,511}$"
+                        },
+                        {
+                          "type": "string",
+                          "pattern": "^@[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                        }
+                      ]
+                    }
+                  },
+                  "agentAdvisor": {
+                    "type": "object",
+                    "properties": {
+                      "task": {
+                        "type": "string",
+                        "enum": [
+                          "on",
+                          "off"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "task"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "prewalk": {
+                    "type": "boolean"
+                  }
+                },
+                "additionalProperties": false
+              },
+              "prewalk": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "enabled"
+                ],
+                "additionalProperties": false
+              },
+              "defaultThinkingLevel": {
+                "type": "string",
+                "enum": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              },
+              "advisor": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "enabled"
+                ],
+                "additionalProperties": false
+              },
+              "tier": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                },
+                "additionalProperties": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          "planYolo": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "accountPool",
+          "overlay",
+          "planYolo"
+        ],
+        "additionalProperties": false
+      },
+      "sessionRef": "typed"
+    }
   },
   "machine": {
     "artifacts": {},
@@ -646,6 +852,194 @@
           "memoryBytes": 8589934592,
           "processes": 512,
           "outputBytes": 1073741824
+        },
+        "stdin": false
+      },
+      "atyrode.omp.harness": {
+        "argv": [
+          {
+            "literal": "/runtime/bin/harness"
+          },
+          {
+            "literal": "launch"
+          },
+          {
+            "literal": "--plan-yolo",
+            "when": {
+              "input": "planYolo",
+              "equals": true
+            }
+          },
+          {
+            "literal": "--resume",
+            "when": {
+              "input": "resume",
+              "equals": true
+            }
+          }
+        ],
+        "input": {
+          "models": {
+            "type": "string",
+            "required": true,
+            "maxLength": 65536
+          },
+          "config": {
+            "type": "string",
+            "required": true,
+            "maxLength": 65536
+          },
+          "accountPool": {
+            "type": "string",
+            "required": true,
+            "maxLength": 65536
+          },
+          "hasPrompt": {
+            "type": "boolean",
+            "required": true
+          },
+          "prompt": {
+            "type": "string",
+            "required": true,
+            "maxLength": 16384
+          },
+          "planYolo": {
+            "type": "boolean",
+            "required": true
+          },
+          "sessionId": {
+            "type": "string",
+            "required": true,
+            "maxLength": 36
+          },
+          "resume": {
+            "type": "boolean",
+            "required": true
+          }
+        },
+        "environment": {
+          "SSL_CERT_FILE": "/runtime/bin/ca-certificates",
+          "GIT_SSL_CAINFO": "/runtime/bin/ca-certificates"
+        },
+        "runtimeTools": [
+          "omp",
+          "bun",
+          "ca-certificates",
+          "system",
+          "development",
+          "harness"
+        ],
+        "executable": {
+          "runtimeTool": "bun"
+        },
+        "inputFiles": {
+          "models": {
+            "input": "models",
+            "homePath": [
+              ".omp",
+              "agent",
+              "models.yml"
+            ],
+            "jsonValues": [
+              {
+                "path": [
+                  "providers",
+                  "*",
+                  "baseUrl"
+                ],
+                "serviceId": "omp",
+                "value": "url"
+              },
+              {
+                "path": [
+                  "providers",
+                  "*",
+                  "apiKey"
+                ],
+                "serviceId": "omp",
+                "value": "bearer"
+              }
+            ]
+          },
+          "config": {
+            "input": "config",
+            "homePath": [
+              ".omp",
+              "agent",
+              "config.yml"
+            ]
+          },
+          "sessionId": {
+            "input": "sessionId"
+          },
+          "prompt": {
+            "input": "prompt"
+          }
+        },
+        "services": [
+          {
+            "serviceId": "omp",
+            "revision": "1",
+            "operationIds": [
+              "models",
+              "stream"
+            ]
+          }
+        ],
+        "workingDirectory": {
+          "locationId": "atyrode.omp.workspace"
+        },
+        "locations": [
+          {
+            "locationId": "atyrode.omp.workspace",
+            "access": "write"
+          },
+          {
+            "locationId": "atyrode.omp.sessions",
+            "access": "write"
+          }
+        ],
+        "outputs": [],
+        "network": "host",
+        "limits": {
+          "timeoutMs": 86400000,
+          "memoryBytes": 8589934592,
+          "processes": 512,
+          "outputBytes": 1073741824
+        },
+        "stdin": true
+      },
+      "atyrode.omp.harness-sessions": {
+        "argv": [
+          {
+            "literal": "/runtime/bin/harness"
+          },
+          {
+            "literal": "sessions"
+          }
+        ],
+        "input": {},
+        "runtimeTools": [
+          "bun",
+          "system",
+          "harness"
+        ],
+        "executable": {
+          "runtimeTool": "bun"
+        },
+        "locations": [
+          {
+            "locationId": "atyrode.omp.sessions",
+            "access": "read"
+          }
+        ],
+        "outputs": [],
+        "network": "none",
+        "limits": {
+          "timeoutMs": 30000,
+          "memoryBytes": 268435456,
+          "processes": 16,
+          "outputBytes": 1048576
         },
         "stdin": false
       }

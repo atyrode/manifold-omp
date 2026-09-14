@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   PublicJobSchema,
@@ -22,6 +23,9 @@ import {
   RUNS_LOCATION_ID,
   parseSessionArchive,
   ProbeIdentitiesSchema,
+  PreparedHarnessSessionSchema,
+  OmpSessionRefSchema,
+  type OmpSessionRef,
   type ActionInput,
   type ActionResult,
   type Overlay,
@@ -488,6 +492,8 @@ export async function readBenchmark(
 async function sessionPreparation(
   ctx: OmpContext,
   args: ActionInput<"reviewSession">,
+  sessionId?: string,
+  resume = false,
 ) {
   await authorizeTarget(ctx, args);
   const defaults = await expectedDefaults(ctx, args.expectedDefaultsRevision);
@@ -495,10 +501,11 @@ async function sessionPreparation(
   const { pool, reference } = await checkedAccountPool(ctx, args.accountPool);
   checkOverlay(overlay, pool);
   const gateway = await currentGateway(ctx, args.machineId);
+  const operationId = `${OMP_PLUGIN_ID}.${sessionId ? "harness" : "launch"}`;
   const current = await currentOperation(
     ctx,
     args.machineId,
-    `${OMP_PLUGIN_ID}.launch`,
+    operationId,
   );
   const native = nativeModelConfiguration(pool);
   const input = boundedInput({
@@ -508,6 +515,7 @@ async function sessionPreparation(
     prompt: args.prompt,
     hasPrompt: args.prompt.length > 0,
     planYolo: args.planYolo,
+    ...(sessionId ? { sessionId, resume } : {}),
   });
   const destination = {
     containerId: args.containerId,
@@ -515,7 +523,7 @@ async function sessionPreparation(
   };
   const review = {
     destination,
-    operationId: `${OMP_PLUGIN_ID}.launch`,
+    operationId,
     pins: current.pins,
     defaultsRevision: defaults.revision,
     effectiveOverlay: overlay,
@@ -540,16 +548,18 @@ export async function reviewSession(
 ): Promise<ActionResult<"reviewSession">> {
   return (await sessionPreparation(ctx, args)).review;
 }
-export async function prepareSession(
+async function prepareReviewedSession(
   ctx: OmpContext,
   args: ActionInput<"prepareSession">,
+  sessionId?: string,
+  resume = false,
 ): Promise<ActionResult<"prepareSession">> {
   await authorizeTarget(ctx, args, true);
   await authorizeTerminalSpawn(ctx, args.containerId);
-  const first = await sessionPreparation(ctx, args);
+  const first = await sessionPreparation(ctx, args, sessionId, resume);
   if (first.review.reviewDigest !== args.reviewDigest)
     throw new OmpRefusal("review_changed");
-  const latest = await sessionPreparation(ctx, args);
+  const latest = await sessionPreparation(ctx, args, sessionId, resume);
   if (latest.review.reviewDigest !== first.review.reviewDigest)
     throw new OmpRefusal("resources_changed");
   return {
@@ -704,4 +714,32 @@ export async function cancelSession(
   const job = PublicJobSchema.parse(await ctx.jobs.status(node));
   checkJob(job, provenance, args.jobId);
   return { job };
+}
+
+export async function prepareSession(
+  ctx: OmpContext,
+  args: ActionInput<"prepareSession">,
+): Promise<ActionResult<"prepareSession">> {
+  return prepareReviewedSession(ctx, args);
+}
+
+/** Trusted harness entry, never an action argument. The UUID is reviewed as native
+ * operation input and the worker writes that exact ID into its OMP transcript. */
+export async function prepareHarnessSession(
+  ctx: OmpContext,
+  args: ActionInput<"reviewSession">,
+  existingSession?: OmpSessionRef,
+) {
+  const session = existingSession ? OmpSessionRefSchema.parse(existingSession) : undefined;
+  if (session && session.machineId !== args.machineId) throw new OmpRefusal("session_binding_changed");
+  const sessionId = session?.sessionId ?? randomUUID();
+  const resume = session !== undefined;
+  const review = await sessionPreparation(ctx, args, sessionId, resume);
+  const prepared = await prepareReviewedSession(
+    ctx, { ...args, reviewDigest: review.review.reviewDigest }, sessionId, resume,
+  );
+  return PreparedHarnessSessionSchema.parse({
+    ...prepared,
+    session: { harness: OMP_PLUGIN_ID, sessionId, machineId: prepared.destination.machineId },
+  });
 }

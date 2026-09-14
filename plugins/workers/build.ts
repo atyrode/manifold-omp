@@ -15,6 +15,7 @@ const entrypoints = {
   root: {
     inventory: "probe/inventory.ts",
     benchmark: "probe/benchmark.ts",
+    harness: "harness/entry.ts",
   },
   accounts: {
     broker: "broker/entry.ts",

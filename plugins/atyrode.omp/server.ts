@@ -14,6 +14,7 @@ import {
 import { describeDestination, type OmpContext } from "./machine-server.ts";
 import { refusal } from "./refusal.ts";
 import { readDefaults, writeDefaults } from "./state.ts";
+import { harness } from "./harness.ts";
 import {
   reviewWorkspace,
   prepareWorkspace,
@@ -138,6 +139,7 @@ const plugin = {
     }),
   ),
   handlers,
+  harness,
 };
 defineServerPlugin(plugin);
 export default plugin;

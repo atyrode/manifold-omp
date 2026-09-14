@@ -68,6 +68,12 @@ const id = z.string().min(1).max(128);
 const empty = z.strictObject({});
 export const TargetSchema = z.strictObject({ containerId: id, machineId: id });
 export type Target = z.infer<typeof TargetSchema>;
+export const OmpSessionRefSchema = z.strictObject({
+  harness: z.literal(OMP_PLUGIN_ID),
+  sessionId: z.uuid(),
+  machineId: id,
+});
+export type OmpSessionRef = z.infer<typeof OmpSessionRefSchema>;
 export const ResourcePinsSchema = z.strictObject({
   installationRevision: id,
   artifactSha256: digest,
@@ -205,6 +211,15 @@ export const SessionInputSchema = executionInput.extend({
   prompt: z.string().max(16384),
   planYolo: z.boolean(),
 });
+/** Durable dials share the exact validated launch settings; paths and credentials
+ * are deliberately not part of a profile. Defaults are reviewed at each launch. */
+export const OmpHarnessProfileSchema = SessionInputSchema.omit({
+  containerId: true,
+  machineId: true,
+  expectedDefaultsRevision: true,
+  prompt: true,
+});
+export type OmpHarnessProfile = z.infer<typeof OmpHarnessProfileSchema>;
 export const SessionReviewSchema = ReviewSchema.extend({
   defaultsRevision: revision,
   effectiveOverlay: OverlaySchema,
@@ -219,6 +234,13 @@ export const PreparedSessionSchema = z
   .refine((value) => value.runtime.machineId === value.destination.machineId, {
     message: "runtime destination does not match review",
   });
+export const PreparedHarnessSessionSchema = PreparedSessionSchema.safeExtend({
+  session: OmpSessionRefSchema,
+}).refine(value =>
+  value.session.machineId === value.destination.machineId &&
+  value.runtime.input.sessionId === value.session.sessionId,
+  { message: "harness session does not match admitted runtime" },
+);
 export const PreparedSignInSchema = z
   .strictObject({ machineId: id, runtime: TerminalRuntimeSchema })
   .refine((value) => value.runtime.machineId === value.machineId, {
