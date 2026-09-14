@@ -329,12 +329,18 @@ export const rootActionSchemas = {
     input: SessionInputSchema.extend({ reviewDigest: digest }),
     result: PublicJobSchema,
   },
+  /** The job always, for a session this door posted; the receipt only once it is sealed. */
   readSession: {
     input: TargetSchema.extend({ jobId: id }),
     result: z.strictObject({
       job: PublicJobSchema,
-      session: SessionReceiptSchema,
+      session: SessionReceiptSchema.nullable(),
     }),
+  },
+  /** Ends a session this door posted. Idempotent: a settled run is answered, not refused. */
+  cancelSession: {
+    input: TargetSchema.extend({ jobId: id }),
+    result: z.strictObject({ job: PublicJobSchema }),
   },
 } as const;
 export const accountActionSchemas = {

@@ -42,6 +42,7 @@ interface Fixture {
   ctx: OmpContext;
   client: OmpClient;
   posted: PostedJob[];
+  cancelled: string[];
   seal(jobId: string, archive: Buffer): void;
   amend(jobId: string, overrides: JobOverrides): void;
   state: { gatewayRevision: string };
@@ -217,6 +218,7 @@ function fixture(): Fixture {
   const jobs = new Map<string, PublicJob>();
   const doors = new Map<string, string>();
   const posted: PostedJob[] = [];
+  const cancelled: string[] = [];
   const state = { gatewayRevision: "1" };
   let ids = 0;
   const consents: { node: string; cap: Cap; enabled: boolean; revision: string }[] = [];
@@ -315,6 +317,8 @@ function fixture(): Fixture {
         if (!job) throw new Error("unknown job");
         return job;
       },
+      // The hub makes cancelling a settled job a no-op rather than a refusal.
+      cancel: async (node: JobNode) => void cancelled.push(node.jobId),
       output: async (args: {
         node: { jobId: string; outputId: string };
         offset: number;
@@ -385,6 +389,7 @@ function fixture(): Fixture {
       rootHandlers[door.slice(OMP_PLUGIN_ID.length + 1)]!(ctx, input),
     ),
     posted,
+    cancelled,
     /** Attach a sealed transcript to the job's declared `session` output. */
     seal(jobId, archive) {
       const job = jobs.get(jobId)!;
@@ -601,23 +606,38 @@ test("readSession refuses an archive holding more than one transcript", async ()
   });
 });
 
-test("readSession refuses an unfinished run", async () => {
+test("readSession answers an unfinished run with its state and no receipt", async () => {
   const f = fixture();
   const job = await run(f);
   f.amend(job.jobId, { state: "started", exitCode: null });
-  expect(await f.client.call("readSession", { ...target, jobId: job.jobId })).toEqual({
-    refused: "omp_result_unavailable",
-  });
+  const read = await f.client.call("readSession", { ...target, jobId: job.jobId });
+  if ("refused" in read) throw new Error(read.refused);
+  // "Not yet" and "never" are different answers: a poller reads the difference here.
+  expect(read.session).toBeNull();
+  expect(read.job.state).toBe("started");
+  expect(read.job.result).toBeNull();
 });
 
-test("readSession refuses a run that failed", async () => {
+test("readSession answers a failed run with its exit code and no receipt", async () => {
   const f = fixture();
   const job = await run(f);
   f.seal(job.jobId, ustar([[transcriptName, transcript]]));
   f.amend(job.jobId, { exitCode: 3 });
-  expect(await f.client.call("readSession", { ...target, jobId: job.jobId })).toEqual({
-    refused: "omp_result_unavailable",
-  });
+  const read = await f.client.call("readSession", { ...target, jobId: job.jobId });
+  if ("refused" in read) throw new Error(read.refused);
+  expect(read.session).toBeNull();
+  expect(read.job.state).toBe("exited");
+  expect(read.job.result?.exitCode).toBe(3);
+});
+
+test("readSession answers a run whose transcript was never sealed", async () => {
+  const f = fixture();
+  const job = await run(f);
+  // The owner refuses a seal it cannot complete; the run still exited cleanly.
+  const read = await f.client.call("readSession", { ...target, jobId: job.jobId });
+  if ("refused" in read) throw new Error(read.refused);
+  expect(read.session).toBeNull();
+  expect(read.job.result?.exitCode).toBe(0);
 });
 
 test("readSession refuses a transcript that does not name the session it reports", async () => {
@@ -654,4 +674,52 @@ test("readSession refuses a job this door never posted", async () => {
   expect(await f.client.call("readSession", { ...target, jobId: "job-404" })).toEqual({
     refused: "omp_result_unavailable",
   });
+});
+
+test("cancelSession ends a running session and answers its job", async () => {
+  const f = fixture();
+  const job = await run(f);
+  f.amend(job.jobId, { state: "started", exitCode: null });
+  const ended = await f.client.call("cancelSession", { ...target, jobId: job.jobId });
+  if ("refused" in ended) throw new Error(ended.refused);
+  expect(f.cancelled).toEqual([job.jobId]);
+  expect(ended.job.jobId).toBe(job.jobId);
+  expect(ended.job.operationId).toBe(SESSION_OPERATION_ID);
+});
+
+test("cancelSession answers a settled session instead of refusing it", async () => {
+  const f = fixture();
+  const job = await run(f);
+  f.seal(job.jobId, ustar([[transcriptName, transcript]]));
+  const first = await f.client.call("cancelSession", { ...target, jobId: job.jobId });
+  const second = await f.client.call("cancelSession", { ...target, jobId: job.jobId });
+  if ("refused" in first || "refused" in second) throw new Error("settled cancel refused");
+  expect(first.job.state).toBe("exited");
+  expect(second.job.state).toBe("exited");
+  // The receipt outlives the cancel: ending a finished run took nothing away.
+  const read = await f.client.call("readSession", { ...target, jobId: job.jobId });
+  if ("refused" in read) throw new Error(read.refused);
+  expect(read.session).toEqual(receipt);
+});
+
+test("cancelSession refuses a job this door never posted", async () => {
+  const f = fixture();
+  const inventory = await f.client.call("startInventory", {
+    ...target,
+    expectedDefaultsRevision: 0,
+    accountPool: session.accountPool,
+  });
+  if ("refused" in inventory) throw new Error(inventory.refused);
+  expect(await f.client.call("cancelSession", { ...target, jobId: inventory.jobId })).toEqual({
+    refused: "omp_provenance_changed",
+  });
+  expect(await f.client.call("cancelSession", { ...target, jobId: "job-404" })).toEqual({
+    refused: "omp_result_unavailable",
+  });
+  const posted = await run(f);
+  f.amend(posted.jobId, { door: "prepareSession" });
+  expect(await f.client.call("cancelSession", { ...target, jobId: posted.jobId })).toEqual({
+    refused: "omp_result_unavailable",
+  });
+  expect(f.cancelled).toEqual([]);
 });
