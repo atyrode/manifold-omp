@@ -87,15 +87,9 @@ const delegates: Record<RootAction, readonly Cap[]> = {
   readBenchmark: ["machines:run", "jobs:read"],
   reviewSession: observedRuntimeCaps,
   prepareSession: observedRuntimeCaps,
-  // Posting the launch job needs the operation's own declared rights, not only its
-  // observation; the door also closes the one-shot's stdin, and cancels it if it cannot.
-  runSession: [
-    ...observedRuntimeCaps,
-    "network:host",
-    "locations:write",
-    "jobs:input",
-    "jobs:cancel",
-  ],
+  // Posting the one-shot job discharges that operation's own declared rights, not only
+  // the observation `prepareSession` needs to hand a terminal its descriptor.
+  runSession: [...observedRuntimeCaps, "network:host", "locations:write"],
   readSession: ["machines:run", "jobs:read"],
 };
 const writes: Partial<Record<RootAction, true>> = {

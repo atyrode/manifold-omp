@@ -48,10 +48,11 @@ export const VALIDATE_WORKSPACE_OPERATION_ID = `${OMP_PLUGIN_ID}.validate-worksp
 export const INVENTORY_OPERATION_ID = `${OMP_PLUGIN_ID}.inventory`;
 export const BENCHMARK_OPERATION_ID = `${OMP_PLUGIN_ID}.benchmark`;
 export const LAUNCH_OPERATION_ID = `${OMP_PLUGIN_ID}.launch`;
+/** The one-shot sibling of `launch`: no stdin, its own bounded output lease. */
+export const SESSION_OPERATION_ID = `${OMP_PLUGIN_ID}.session`;
 /** A bound output name, never the implicit `stdout`/`stderr` streams. */
 export const SESSION_OUTPUT_NAME = "session";
-/** Named outputs must lease a bounded tmpfs, so the one-shot writes to its own
- * runtime-anchored location rather than the persistent sessions directory. */
+/** Named outputs lease a bounded tmpfs, which only the runtime anchor provides. */
 export const RUNS_LOCATION_ID = `${OMP_PLUGIN_ID}.runs`;
 /** Where the owner mounts this job's `session` lease, as the manifest's argv spells it. */
 export const SESSION_GUEST_PATH = `/outputs/${SESSION_OUTPUT_NAME}`;

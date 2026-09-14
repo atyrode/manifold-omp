@@ -9,6 +9,7 @@ import {
   OMP_PLUGIN_ID,
   RUNS_LOCATION_ID,
   SESSION_GUEST_PATH,
+  SESSION_OPERATION_ID,
   SESSION_OUTPUT_NAME,
   SESSIONS_GUEST_PATH,
   createOmpClient,
@@ -29,12 +30,10 @@ type PostedJob = {
   input: JobInput;
   outputs: { name: string; locationId: string; components: string[] }[];
 };
-type SentInput = { node: JobNode; requestId: string; seq: number; data: string; eof: boolean };
 type JobOverrides = {
-  state?: "queued" | "started" | "exited" | "refused";
+  state?: "exited" | "started";
   exitCode?: number | null;
   door?: string;
-  nextInputSeq?: number | null;
 };
 interface OmpClient {
   call<K extends OmpAction>(name: K, input: ActionInput<K>): Promise<ActionReply<K>>;
@@ -43,12 +42,6 @@ interface Fixture {
   ctx: OmpContext;
   client: OmpClient;
   posted: PostedJob[];
-  sent: SentInput[];
-  cancelled: string[];
-  /** Refuse `jobs.input`, as the hub does when the cursor or the owner moved. */
-  refuseInput: { value: boolean };
-/** Settle without ever starting, as a job the owner refuses at preflight. */
-  refuseStart: { value: boolean };
   seal(jobId: string, archive: Buffer): void;
   amend(jobId: string, overrides: JobOverrides): void;
   state: { gatewayRevision: string };
@@ -79,10 +72,11 @@ const session = {
 };
 const machine = MachineHalfSchema.parse(rootManifest.machine);
 const launch = machine.operations[LAUNCH_OPERATION_ID]!;
+const oneShot = machine.operations[SESSION_OPERATION_ID]!;
 
 /** How the owner turns a reviewed argv template plus one job's input into a command line. */
-function argvFor(input: JobInput): string[] {
-  return launch.argv
+function argvFor(operation: typeof launch, input: JobInput): string[] {
+  return operation.argv
     .filter((slot) => !slot.when || input[slot.when.input] === slot.when.equals)
     .map((slot) => ("literal" in slot ? slot.literal : String(input[slot.input])));
 }
@@ -181,7 +175,7 @@ function publicJob(
     ...pins,
     inputDigest,
     state,
-    nextInputSeq: overrides.nextInputSeq ?? null,
+    nextInputSeq: null,
     result:
       state === "exited"
         ? {
@@ -223,10 +217,6 @@ function fixture(): Fixture {
   const jobs = new Map<string, PublicJob>();
   const doors = new Map<string, string>();
   const posted: PostedJob[] = [];
-  const sent: SentInput[] = [];
-  const cancelled: string[] = [];
-  const refuseInput = { value: false };
-  const refuseStart = { value: false };
   const state = { gatewayRevision: "1" };
   let ids = 0;
   const consents: { node: string; cap: Cap; enabled: boolean; revision: string }[] = [];
@@ -316,28 +306,15 @@ function fixture(): Fixture {
         const door =
           args.operationId === INVENTORY_OPERATION_ID ? "startInventory" : "runSession";
         doors.set(args.jobId, door);
-        // The hub admits a job; only the owner starts it, and only then is stdin open.
-        const queued = publicJob(args.jobId, args.operationId, digestOf(args.input), {
-          door,
-          state: door === "runSession" ? "queued" : "exited",
-        });
-        jobs.set(args.jobId, queued);
-        return queued;
+        const job = publicJob(args.jobId, args.operationId, digestOf(args.input), { door });
+        jobs.set(args.jobId, job);
+        return job;
       },
       status: async (node: JobNode) => {
         const job = jobs.get(node.jobId);
         if (!job) throw new Error("unknown job");
-        if (job.state !== "queued") return job;
-        if (refuseStart.value) return advance(node.jobId, { state: "refused" });
-        return advance(node.jobId, { state: "started", nextInputSeq: 0 });
+        return job;
       },
-      input: async (args: SentInput) => {
-        if (refuseInput.value) throw new Error("job_input_not_open");
-        sent.push(args);
-        advance(args.node.jobId, { state: "exited" });
-        return { accepted: true as const };
-      },
-      cancel: async (node: JobNode) => void cancelled.push(node.jobId),
       output: async (args: {
         node: { jobId: string; outputId: string };
         offset: number;
@@ -408,10 +385,6 @@ function fixture(): Fixture {
       rootHandlers[door.slice(OMP_PLUGIN_ID.length + 1)]!(ctx, input),
     ),
     posted,
-    sent,
-    cancelled,
-    refuseInput,
-    refuseStart,
     /** Attach a sealed transcript to the job's declared `session` output. */
     seal(jobId, archive) {
       const job = jobs.get(jobId)!;
@@ -446,17 +419,16 @@ async function run(f: Fixture): Promise<PublicJob> {
   return job;
 }
 
-test("the launch operation leases a bounded run directory and a one-shot argv variant", () => {
-  expect(launch.outputs).toEqual([SESSION_OUTPUT_NAME]);
-  // A named output must lease a bounded tmpfs, which only the runtime anchor provides.
-  expect(machine.locations[RUNS_LOCATION_ID]?.anchor).toBe("runtime");
-  expect(
-    launch.locations.some(
-      (location) => location.locationId === RUNS_LOCATION_ID && location.access === "write",
-    ),
-  ).toBe(true);
-  // Reviewed terminal placement keeps the exact command line it had.
-  expect(argvFor({ hasPrompt: true, planYolo: false, prompt: "hi" })).toEqual([
+test("the interactive launch operation is untouched by the one-shot", () => {
+  // A terminal must never declare the run location: its lease directory is provisioned
+  // out of band, and a launch that named it would refuse before the terminal opened.
+  expect(launch.outputs).toEqual([]);
+  expect(launch.stdin).toBe(true);
+  expect(launch.locations.map((location) => location.locationId)).toEqual([
+    "atyrode.omp.workspace",
+    "atyrode.omp.sessions",
+  ]);
+  expect(argvFor(launch, { hasPrompt: true, planYolo: false, prompt: "hi" })).toEqual([
     "--session-dir",
     SESSIONS_GUEST_PATH,
     "--config",
@@ -464,92 +436,71 @@ test("the launch operation leases a bounded run directory and a one-shot argv va
     "--",
     "hi",
   ]);
-  expect(
-    argvFor({ hasPrompt: true, planYolo: true, prompt: "hi", oneShot: true }),
-  ).toEqual([
-    "--session-dir",
-    SESSIONS_GUEST_PATH,
+});
+
+test("the one-shot operation leases a bounded run directory and never opens stdin", () => {
+  expect(oneShot.outputs).toEqual([SESSION_OUTPUT_NAME]);
+  // `omp -p` reads stdin to EOF before its first turn; the owner ends the pipe at spawn
+  // only for an operation that declares no stdin.
+  expect(oneShot.stdin).toBe(false);
+  // A named output must lease a bounded tmpfs, which only the runtime anchor provides.
+  expect(machine.locations[RUNS_LOCATION_ID]?.anchor).toBe("runtime");
+  expect(oneShot.locations.map((location) => location.locationId)).toEqual([
+    "atyrode.omp.workspace",
+    RUNS_LOCATION_ID,
+  ]);
+  expect(oneShot.input).toEqual(launch.input);
+  expect(argvFor(oneShot, { hasPrompt: true, planYolo: true, prompt: "hi" })).toEqual([
     "--session-dir",
     SESSION_GUEST_PATH,
+    "--config",
+    "/home/job/.omp/agent/config.yml",
     "-p",
     "--mode",
     "json",
-    "--config",
-    "/home/job/.omp/agent/config.yml",
     "--plan-yolo",
     "--",
     "hi",
   ]);
 });
 
-test("runSession posts the reviewed launch as a one-shot job that retains its own session", async () => {
+test("runSession posts the reviewed session as a one-shot job that retains its transcript", async () => {
   const f = fixture();
   const job = await run(f);
   const posted = f.posted[0]!;
   expect(f.posted).toHaveLength(1);
   expect(job.jobId).toBe(posted.jobId);
-  expect(job.operationId).toBe(LAUNCH_OPERATION_ID);
+  expect(job.operationId).toBe(SESSION_OPERATION_ID);
   expect(job.authority.origin.door).toBe(`${OMP_PLUGIN_ID}.runSession`);
   expect(posted.outputs).toEqual([
     { name: SESSION_OUTPUT_NAME, locationId: RUNS_LOCATION_ID, components: [posted.jobId] },
   ]);
-  expect(posted.input.oneShot).toBe(true);
-  expect(posted.input.hasPrompt).toBe(true);
-  expect(posted.input.sessionDir).toBeUndefined();
   expect(job.inputDigest).toBe(digestOf(posted.input));
-  expect(argvFor(posted.input)).toEqual([
-    "--session-dir",
-    SESSIONS_GUEST_PATH,
+  expect(argvFor(oneShot, posted.input)).toEqual([
     "--session-dir",
     SESSION_GUEST_PATH,
+    "--config",
+    "/home/job/.omp/agent/config.yml",
     "-p",
     "--mode",
     "json",
-    "--config",
-    "/home/job/.omp/agent/config.yml",
     "--",
     session.prompt,
   ]);
 });
 
-test("runSession closes the one-shot's stdin once, after the owner has started it", async () => {
+test("a reviewed session composes one input, whichever way it is placed", async () => {
   const f = fixture();
+  const prepared = await f.client.call("prepareSession", {
+    ...session,
+    reviewDigest: await reviewDigestOf(f.client),
+  });
+  if ("refused" in prepared) throw new Error(prepared.refused);
   const job = await run(f);
-  expect(f.sent).toHaveLength(1);
-  expect(f.sent[0]).toMatchObject({
-    node: {
-      kind: "job",
-      machineId: target.machineId,
-      operationId: LAUNCH_OPERATION_ID,
-      jobId: job.jobId,
-    },
-    seq: 0,
-    data: "",
-    eof: true,
-  });
-  expect(f.cancelled).toEqual([]);
-});
-
-test("runSession cancels and refuses a session whose stdin it cannot close", async () => {
-  const refused = fixture();
-  refused.refuseInput.value = true;
-  const reviewDigest = await reviewDigestOf(refused.client);
-  expect(await refused.client.call("runSession", { ...session, reviewDigest })).toEqual({
-    refused: "omp_session_input_unavailable",
-  });
-  expect(refused.posted).toHaveLength(1);
-  expect(refused.cancelled).toEqual([refused.posted[0]!.jobId]);
-
-  const stalled = fixture();
-  stalled.refuseStart.value = true;
-  expect(
-    await stalled.client.call("runSession", {
-      ...session,
-      reviewDigest: await reviewDigestOf(stalled.client),
-    }),
-  ).toEqual({ refused: "omp_session_input_unavailable" });
-  expect(stalled.sent).toEqual([]);
-  expect(stalled.cancelled).toEqual([stalled.posted[0]!.jobId]);
+  // The review covers the content; the door covers the placement, and nothing else moves.
+  expect(f.posted[0]!.input).toEqual(prepared.runtime.input);
+  expect(prepared.runtime.operationId).toBe(LAUNCH_OPERATION_ID);
+  expect(job.operationId).toBe(SESSION_OPERATION_ID);
 });
 
 test("runSession refuses a stale review", async () => {
@@ -569,6 +520,25 @@ test("runSession refuses a resource that moved after the review matched", async 
   f.ctx.services.describe = (async (args: { machineId: string }) => {
     if ((seen += 1) === 2) f.state.gatewayRevision = "2";
     return describe(args);
+  }) as typeof describe;
+  expect(await f.client.call("runSession", { ...session, reviewDigest })).toEqual({
+    refused: "omp_resources_changed",
+  });
+  expect(f.posted).toEqual([]);
+});
+
+test("runSession refuses when the one-shot operation itself is re-bound", async () => {
+  const f = fixture();
+  const reviewDigest = await reviewDigestOf(f.client);
+  const describe = f.ctx.jobs.describe;
+  let seen = 0;
+  // Each preparation observes launch then the one-shot; re-bind only the one-shot's
+  // resources, during the second preparation, so the content review still matches.
+  f.ctx.jobs.describe = (async (args: { machineId: string; pluginId: string }) => {
+    const native = JobDescriptionSchema.parse(await describe(args));
+    if ((seen += 1) < 4) return native;
+    native.operations![SESSION_OPERATION_ID]!.resourceBindingDigest = "9".repeat(64);
+    return native;
   }) as typeof describe;
   expect(await f.client.call("runSession", { ...session, reviewDigest })).toEqual({
     refused: "omp_resources_changed",
