@@ -25,6 +25,7 @@ import {
   prepareSession,
   runSession,
   readSession,
+  cancelSession,
 } from "./execution.ts";
 
 type RootHandlers = {
@@ -47,6 +48,7 @@ const implementations: RootHandlers = {
   prepareSession,
   runSession,
   readSession,
+  cancelSession,
 };
 const workspaceObservationCaps: readonly Cap[] = ["machines:run", "jobs:read"];
 // The write door may execute either mode; Native still rechecks the exact operation's refs.
@@ -91,12 +93,15 @@ const delegates: Record<RootAction, readonly Cap[]> = {
   // the observation `prepareSession` needs to hand a terminal its descriptor.
   runSession: [...observedRuntimeCaps, "network:host", "locations:write"],
   readSession: ["machines:run", "jobs:read"],
+  // Ending a run needs no observation of the machine, only the job's own two verbs.
+  cancelSession: ["jobs:read", "jobs:cancel"],
 };
 const writes: Partial<Record<RootAction, true>> = {
   writeDefaults: true,
   prepareWorkspace: true,
   prepareSession: true,
   runSession: true,
+  cancelSession: true,
 };
 export const handlers = Object.fromEntries(
   (Object.keys(rootActionSchemas) as RootAction[]).map((name) => [

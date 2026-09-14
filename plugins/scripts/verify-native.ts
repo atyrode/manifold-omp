@@ -179,6 +179,8 @@ try {
     const missingJob = randomUUID();
     await refused("readInventory", { ...target, jobId: missingJob });
     await refused("readSession", { ...target, jobId: missingJob });
+    // Neither read nor cancel answers a job this door never posted, whatever its state.
+    await refused("cancelSession", { ...target, jobId: missingJob });
     await refused("startBenchmark", { ...target, inventoryJobId: missingJob, candidates: {
       schemaVersion: 1, inventoryObservedAt: 0, ompVersion: OMP_VERSION,
       candidates: [{ key: "offline", provider: "fixture", id: "offline", api: "fixture" }],

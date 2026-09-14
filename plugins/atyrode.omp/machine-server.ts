@@ -446,7 +446,8 @@ export async function requireCurrentJob(ctx: OmpContext, job: PublicJob) {
     throw new OmpRefusal("resources_changed");
   return current;
 }
-async function settledJob(
+/** Identity and origin only: a job this door posted, in whatever state it now stands. */
+async function postedJob(
   ctx: OmpContext,
   machineId: string,
   operationId: string,
@@ -461,11 +462,31 @@ async function settledJob(
     job.pluginId !== OMP_PLUGIN_ID ||
     job.operationId !== operationId ||
     job.jobId !== jobId ||
-    job.state !== "exited" ||
-    job.result?.exitCode !== 0 ||
     job.authority.origin.kind !== "action" ||
     job.authority.origin.door !== `${OMP_PLUGIN_ID}.${door}`
   )
+    throw new OmpRefusal("result_unavailable");
+  return job;
+}
+/** A job this door posted, addressed by the operation it runs on. */
+export async function jobOfDoor(
+  ctx: OmpContext,
+  machineId: string,
+  operation: string,
+  jobId: string,
+  door: string,
+) {
+  return postedJob(ctx, machineId, `${OMP_PLUGIN_ID}.${operation}`, jobId, door);
+}
+async function settledJob(
+  ctx: OmpContext,
+  machineId: string,
+  operationId: string,
+  jobId: string,
+  door: string,
+) {
+  const job = await postedJob(ctx, machineId, operationId, jobId, door);
+  if (job.state !== "exited" || job.result?.exitCode !== 0)
     throw new OmpRefusal("result_unavailable");
   return job;
 }
@@ -543,8 +564,13 @@ export async function readJobResult(
   await requireCurrentJob(ctx, job);
   return { job, value };
 }
-/** A declared bound output, sealed by the owner as one ustar archive of the bound directory. */
-export async function readJobArchive(
+/**
+ * The job as it stands, and its declared output sealed as one ustar archive when there is
+ * one to read. A run still going, one that failed, and one whose output the owner could
+ * not seal all answer the job with no archive: only a job this door never posted refuses,
+ * because "not yet" and "never" are different answers and a caller must tell them apart.
+ */
+export async function readSealedArchive(
   ctx: OmpContext,
   machineId: string,
   operation: string,
@@ -554,7 +580,13 @@ export async function readJobArchive(
   limit: number,
 ) {
   const operationId = `${OMP_PLUGIN_ID}.${operation}`;
-  const job = await settledJob(ctx, machineId, operationId, jobId, door);
+  const job = await postedJob(ctx, machineId, operationId, jobId, door);
+  if (
+    job.state !== "exited" ||
+    job.result?.exitCode !== 0 ||
+    !job.result.outputs.some((item) => item.name === name)
+  )
+    return { job, archive: null };
   const archive = await readNamedOutput(
     ctx,
     machineId,

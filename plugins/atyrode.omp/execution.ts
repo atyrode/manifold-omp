@@ -39,7 +39,8 @@ import {
   digestOf,
   OmpRefusal,
   readJobResult,
-  readJobArchive,
+  jobOfDoor,
+  readSealedArchive,
   type OmpContext,
 } from "./machine-server.ts";
 import { effectiveOverlay, expectedDefaults } from "./state.ts";
@@ -620,21 +621,10 @@ export async function runSession(
     { name: SESSION_OUTPUT_NAME, locationId: RUNS_LOCATION_ID, components: [jobId] },
   ]);
 }
-/**
- * The run's own receipt. The `session` lease is created beneath `atyrode.omp.runs`, which
- * every one-shot mounts writable, and the owner withholds a seal until every overlapping
- * writer exits: a finished one-shot therefore answers `result_unavailable` while another
- * one-shot that was alive when this lease was created is still running. Only one-shots
- * hold that location — an operator's interactive terminal runs `atyrode.omp.launch`,
- * which never mounts it, so a day-long terminal cannot withhold a receipt.
- */
-export async function readSession(
-  ctx: OmpContext,
-  args: ActionInput<"readSession">,
-): Promise<ActionResult<"readSession">> {
-  const target = { containerId: args.containerId, machineId: args.machineId };
+/** The retained provenance of a session this door posted, or a refusal naming why not. */
+async function sessionProvenance(ctx: OmpContext, target: Target, jobId: string) {
   await authorizeTarget(ctx, target);
-  const provenance = await retainedProvenance(ctx, target, args.jobId);
+  const provenance = await retainedProvenance(ctx, target, jobId);
   if (
     provenance.door !== "runSession" ||
     provenance.modelIdentities !== null ||
@@ -642,7 +632,28 @@ export async function readSession(
     provenance.candidates !== null
   )
     throw new OmpRefusal("provenance_changed");
-  const result = await readJobArchive(
+  return provenance;
+}
+/**
+ * The run, and its receipt once there is one. A caller polling a session has to tell "not
+ * yet" from "never", so a job that is still going, that failed, or whose transcript the
+ * owner could not seal is answered with a null receipt and its own `state`/`exitCode`;
+ * only a job this door never posted is refused.
+ *
+ * The `session` lease is created beneath `atyrode.omp.runs`, which every one-shot mounts
+ * writable, and the owner withholds a seal until every overlapping writer exits: a
+ * finished one-shot therefore reads back without a receipt while another one-shot that
+ * was alive when this lease was created is still running. Only one-shots hold that
+ * location — an operator's interactive terminal runs `atyrode.omp.launch`, which never
+ * mounts it, so a day-long terminal cannot withhold a receipt.
+ */
+export async function readSession(
+  ctx: OmpContext,
+  args: ActionInput<"readSession">,
+): Promise<ActionResult<"readSession">> {
+  const target = { containerId: args.containerId, machineId: args.machineId };
+  const provenance = await sessionProvenance(ctx, target, args.jobId);
+  const result = await readSealedArchive(
     ctx,
     args.machineId,
     "session",
@@ -652,10 +663,45 @@ export async function readSession(
     SESSION_ARCHIVE_LIMIT,
   );
   checkJob(result.job, provenance, args.jobId);
-  // A settled receipt read always carries a result; the exit code is the run's own.
-  const exitCode = result.job.result?.exitCode ?? 0;
   return {
     job: result.job,
-    session: parseSessionArchive(result.archive, SESSION_GUEST_PATH, exitCode),
+    session:
+      result.archive === null
+        ? null
+        : parseSessionArchive(
+            result.archive,
+            SESSION_GUEST_PATH,
+            result.job.result?.exitCode ?? 0,
+          ),
   };
+}
+/**
+ * Ends a session this door posted. The hub already treats cancelling a settled job as a
+ * no-op, so the request is unconditional and the answer is the job as it stands after it:
+ * cancellation is asked for, not observed, and a caller reads the outcome from `state`.
+ */
+export async function cancelSession(
+  ctx: OmpContext,
+  args: ActionInput<"cancelSession">,
+): Promise<ActionResult<"cancelSession">> {
+  const target = { containerId: args.containerId, machineId: args.machineId };
+  const provenance = await sessionProvenance(ctx, target, args.jobId);
+  const posted = await jobOfDoor(
+    ctx,
+    args.machineId,
+    "session",
+    args.jobId,
+    "runSession",
+  );
+  checkJob(posted, provenance, args.jobId);
+  const node = {
+    kind: "job" as const,
+    machineId: args.machineId,
+    operationId: posted.operationId,
+    jobId: args.jobId,
+  };
+  await ctx.jobs.cancel(node);
+  const job = PublicJobSchema.parse(await ctx.jobs.status(node));
+  checkJob(job, provenance, args.jobId);
+  return { job };
 }
