@@ -11,7 +11,7 @@ const input = z
   .record(component, z.union([z.string().max(65536), z.number().finite(), z.boolean()]))
   .refine(value => Object.keys(value).length <= 64 &&
     new TextEncoder().encode(JSON.stringify(value)).byteLength <= 65536);
-const terminal = z.strictObject({ terminalId: id, terminalHostId: id, containerId: id }).optional();
+const terminal = z.strictObject({ terminalId: id, terminalHostId: id, containerId: id, runId: id.optional() }).optional();
 const service = z.strictObject({ serviceId: component, revision: component, policySha256: hash }).optional();
 
 /** The native terminal descriptor OMP returns to a Manifold client. */
@@ -92,6 +92,7 @@ const CapSchema = z.enum([
   "tokens:mint",
   "machines:mint",
   "agents:delegate",
+  "agents:run",
   "machines:read",
   "machines:run",
   "jobs:read",

@@ -14,6 +14,8 @@ import {
 import { describeDestination, type OmpContext } from "./machine-server.ts";
 import { refusal } from "./refusal.ts";
 import { readDefaults, writeDefaults } from "./state.ts";
+import { harness } from "./harness.ts";
+import { listSessions, resumeSession } from "./sessions.ts";
 import {
   reviewWorkspace,
   prepareWorkspace,
@@ -49,6 +51,8 @@ const implementations: RootHandlers = {
   runSession,
   readSession,
   cancelSession,
+  listSessions,
+  resumeSession,
 };
 const workspaceObservationCaps: readonly Cap[] = ["machines:run", "jobs:read"];
 // The write door may execute either mode; Native still rechecks the exact operation's refs.
@@ -95,6 +99,8 @@ const delegates: Record<RootAction, readonly Cap[]> = {
   readSession: ["machines:run", "jobs:read"],
   // Ending a run needs no observation of the machine, only the job's own two verbs.
   cancelSession: ["jobs:read", "jobs:cancel"],
+  listSessions: ["machines:run", "jobs:read", "jobs:cancel", "locations:read"],
+  resumeSession: [...observedRuntimeCaps, "jobs:cancel", "locations:read"],
 };
 const writes: Partial<Record<RootAction, true>> = {
   writeDefaults: true,
@@ -126,10 +132,12 @@ const plugin = {
     defineServerAction({
       name,
       title: name.replace(/([A-Z])/g, " $1"),
-      caps: [writes[name] ? "containers:write" : "containers:read"],
+      // Operator doors enforce owner authority in their handler. Governed machine
+      // caps belong to the native target admission below, not context-level caps.
+      caps: name === "listSessions" || name === "resumeSession" ? [] : [writes[name] ? "containers:write" : "containers:read"],
       delegates: delegates[name],
       scope:
-        name === "readDefaults" || name === "writeDefaults"
+        name === "readDefaults" || name === "writeDefaults" || name === "listSessions" || name === "resumeSession"
           ? "workspace"
           : "container",
       trace: "opaque",
@@ -138,6 +146,7 @@ const plugin = {
     }),
   ),
   handlers,
+  harness,
 };
 defineServerPlugin(plugin);
 export default plugin;

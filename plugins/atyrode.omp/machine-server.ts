@@ -452,7 +452,7 @@ async function postedJob(
   machineId: string,
   operationId: string,
   jobId: string,
-  door: string,
+  door?: string,
 ) {
   const job = PublicJobSchema.parse(
     await ctx.jobs.status({ kind: "job", machineId, operationId, jobId }),
@@ -463,7 +463,7 @@ async function postedJob(
     job.operationId !== operationId ||
     job.jobId !== jobId ||
     job.authority.origin.kind !== "action" ||
-    job.authority.origin.door !== `${OMP_PLUGIN_ID}.${door}`
+    (door !== undefined && job.authority.origin.door !== `${OMP_PLUGIN_ID}.${door}`)
   )
     throw new OmpRefusal("result_unavailable");
   return job;
@@ -483,7 +483,7 @@ async function settledJob(
   machineId: string,
   operationId: string,
   jobId: string,
-  door: string,
+  door?: string,
 ) {
   const job = await postedJob(ctx, machineId, operationId, jobId, door);
   if (job.state !== "exited" || job.result?.exitCode !== 0)
@@ -543,7 +543,7 @@ export async function readJobResult(
   machineId: string,
   operation: string,
   jobId: string,
-  door: string,
+  door?: string,
 ) {
   const operationId = `${OMP_PLUGIN_ID}.${operation}`;
   const job = await settledJob(ctx, machineId, operationId, jobId, door);

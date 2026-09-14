@@ -175,6 +175,8 @@ try {
     await refused("reviewSession", session);
     await refused("prepareSession", { ...session, reviewDigest: unreviewed });
     await refused("runSession", { ...session, prompt: "verify", reviewDigest: unreviewed });
+    await refused("listSessions", { machineId: target.machineId });
+    await refused("resumeSession", { machineId: target.machineId, sessionId: randomUUID() });
     await refused("startInventory", { ...target, expectedDefaultsRevision: changed.revision, accountPool: {} });
     const missingJob = randomUUID();
     await refused("readInventory", { ...target, jobId: missingJob });

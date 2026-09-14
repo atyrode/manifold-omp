@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   PublicJobSchema,
@@ -22,6 +23,9 @@ import {
   RUNS_LOCATION_ID,
   parseSessionArchive,
   ProbeIdentitiesSchema,
+  PreparedHarnessSessionSchema,
+  OmpSessionRefSchema,
+  type OmpSessionRef,
   type ActionInput,
   type ActionResult,
   type Overlay,
@@ -30,7 +34,7 @@ import {
   type Target,
 } from "../api/index.ts";
 import { parseBenchmarkInput, probeAddress } from "../api/probe.ts";
-import { checkedAccountPool, currentGateway } from "./broker.ts";
+import { checkedAccountPool, currentGateway, enabledAccountPool } from "./broker.ts";
 import {
   actor,
   authorizeTarget,
@@ -43,7 +47,7 @@ import {
   readSealedArchive,
   type OmpContext,
 } from "./machine-server.ts";
-import { effectiveOverlay, expectedDefaults } from "./state.ts";
+import { effectiveOverlay, expectedDefaults, readDefaults } from "./state.ts";
 import { bundledProbeModels } from "./sdk-metadata.macro.ts" with { type: "macro" };
 
 const registry = bundledProbeModels();
@@ -119,16 +123,18 @@ export function nativeModelConfiguration(pool: RuntimeAccountPool) {
     },
   };
 }
+function configuredModels(overlay: Overlay): string[] {
+  const roles = overlay.modelRoles ?? {};
+  return [
+    ...Object.values(roles),
+    ...Object.values(overlay.retry?.fallbackChains ?? {}).flat(),
+    ...Object.values(overlay.task?.agentModelOverrides ?? {}).map(ref => ref.startsWith("@") ? roles[ref.slice(1)] ?? "" : ref),
+  ];
+}
 function checkOverlay(overlay: Overlay, pool: RuntimeAccountPool) {
   const roles = overlay.modelRoles ?? {};
   if (!roles.default) throw new OmpRefusal("model_configuration_missing");
-  const refs = [
-    ...Object.values(roles),
-    ...Object.values(overlay.retry?.fallbackChains ?? {}).flat(),
-    ...Object.values(overlay.task?.agentModelOverrides ?? {}),
-  ];
-  for (const ref of refs) {
-    const concrete = ref.startsWith("@") ? roles[ref.slice(1)] : ref;
+  for (const concrete of configuredModels(overlay)) {
     if (!concrete || !pool[concrete.slice(0, concrete.indexOf("/"))]?.length)
       throw new OmpRefusal("account_unavailable");
   }
@@ -485,20 +491,26 @@ export async function readBenchmark(
     throw new OmpRefusal("provenance_changed");
   return { job: result.job, benchmark };
 }
-async function sessionPreparation(
+/** Runtime preparation is machine-scoped. Container and terminal authorization
+ * belongs to reviewed launch or, for operator resume, independent placement. */
+async function sessionRuntimePreparation(
   ctx: OmpContext,
-  args: ActionInput<"reviewSession">,
+  args: Omit<ActionInput<"reviewSession">, "containerId" | "accountPool"> & { accountPool: RuntimeAccountPool | undefined },
+  operationId: string,
+  sessionId?: string,
+  resume = false,
 ) {
-  await authorizeTarget(ctx, args);
   const defaults = await expectedDefaults(ctx, args.expectedDefaultsRevision);
   const overlay = effectiveOverlay(defaults, args.overlay);
-  const { pool, reference } = await checkedAccountPool(ctx, args.accountPool);
+  const requestedPool = args.accountPool ?? await enabledAccountPool(ctx,
+    configuredModels(overlay).map(ref => ref.slice(0, ref.indexOf("/"))));
+  const { pool, reference } = await checkedAccountPool(ctx, requestedPool);
   checkOverlay(overlay, pool);
   const gateway = await currentGateway(ctx, args.machineId);
   const current = await currentOperation(
     ctx,
     args.machineId,
-    `${OMP_PLUGIN_ID}.launch`,
+    operationId,
   );
   const native = nativeModelConfiguration(pool);
   const input = boundedInput({
@@ -508,14 +520,28 @@ async function sessionPreparation(
     prompt: args.prompt,
     hasPrompt: args.prompt.length > 0,
     planYolo: args.planYolo,
+    ...(sessionId ? { sessionId, resume } : {}),
   });
+  return { defaults, overlay, pool, reference, gateway, current, input };
+}
+
+async function sessionPreparation(
+  ctx: OmpContext,
+  args: ActionInput<"reviewSession">,
+  sessionId?: string,
+  resume = false,
+) {
+  await authorizeTarget(ctx, args);
+  const operationId = `${OMP_PLUGIN_ID}.${sessionId ? "harness" : "launch"}`;
+  const { defaults, overlay, pool, reference, gateway, current, input } =
+    await sessionRuntimePreparation(ctx, args, operationId, sessionId, resume);
   const destination = {
     containerId: args.containerId,
     machineId: args.machineId,
   };
   const review = {
     destination,
-    operationId: `${OMP_PLUGIN_ID}.launch`,
+    operationId,
     pins: current.pins,
     defaultsRevision: defaults.revision,
     effectiveOverlay: overlay,
@@ -540,16 +566,18 @@ export async function reviewSession(
 ): Promise<ActionResult<"reviewSession">> {
   return (await sessionPreparation(ctx, args)).review;
 }
-export async function prepareSession(
+async function prepareReviewedSession(
   ctx: OmpContext,
   args: ActionInput<"prepareSession">,
+  sessionId?: string,
+  resume = false,
 ): Promise<ActionResult<"prepareSession">> {
   await authorizeTarget(ctx, args, true);
   await authorizeTerminalSpawn(ctx, args.containerId);
-  const first = await sessionPreparation(ctx, args);
+  const first = await sessionPreparation(ctx, args, sessionId, resume);
   if (first.review.reviewDigest !== args.reviewDigest)
     throw new OmpRefusal("review_changed");
-  const latest = await sessionPreparation(ctx, args);
+  const latest = await sessionPreparation(ctx, args, sessionId, resume);
   if (latest.review.reviewDigest !== first.review.reviewDigest)
     throw new OmpRefusal("resources_changed");
   return {
@@ -704,4 +732,59 @@ export async function cancelSession(
   const job = PublicJobSchema.parse(await ctx.jobs.status(node));
   checkJob(job, provenance, args.jobId);
   return { job };
+}
+
+export async function prepareSession(
+  ctx: OmpContext,
+  args: ActionInput<"prepareSession">,
+): Promise<ActionResult<"prepareSession">> {
+  return prepareReviewedSession(ctx, args);
+}
+
+/** Trusted harness entry, never an action argument. The UUID is reviewed as native
+ * operation input and the worker writes that exact ID into its OMP transcript. */
+export async function prepareHarnessSession(
+  ctx: OmpContext,
+  args: ActionInput<"reviewSession">,
+  existingSession?: OmpSessionRef,
+) {
+  const session = existingSession ? OmpSessionRefSchema.parse(existingSession) : undefined;
+  if (session && session.machineId !== args.machineId) throw new OmpRefusal("session_binding_changed");
+  const sessionId = session?.sessionId ?? randomUUID();
+  const resume = session !== undefined;
+  const review = await sessionPreparation(ctx, args, sessionId, resume);
+  const prepared = await prepareReviewedSession(
+    ctx, { ...args, reviewDigest: review.review.reviewDigest }, sessionId, resume,
+  );
+  return PreparedHarnessSessionSchema.parse({
+    ...prepared,
+    session: { harness: OMP_PLUGIN_ID, sessionId, machineId: prepared.destination.machineId },
+  });
+}
+
+export async function prepareInteractiveResume(
+  ctx: OmpContext,
+  args: ActionInput<"resumeSession">,
+): Promise<ActionResult<"resumeSession">> {
+  // An optional destination is checked when supplied, but never bound into the
+  // descriptor. The native terminal placement door must authorize its own target.
+  if (args.containerId !== undefined)
+    await authorizeTarget(ctx, { containerId: args.containerId, machineId: args.machineId }, true);
+  const defaults = await readDefaults(ctx);
+  const operationId = `${OMP_PLUGIN_ID}.resume`;
+  const input = {
+    machineId: args.machineId, expectedDefaultsRevision: defaults.revision,
+    accountPool: args.accountPool, overlay: args.overlay ?? {}, prompt: "", planYolo: false,
+  };
+  const first = await sessionRuntimePreparation(ctx, input, operationId, args.sessionId, true);
+  const latest = await sessionRuntimePreparation(ctx, input, operationId, args.sessionId, true);
+  if (digestOf(first) !== digestOf(latest)) throw new OmpRefusal("resources_changed");
+  return {
+    machineId: args.machineId,
+    sessionId: args.sessionId,
+    runtime: TerminalRuntimeSchema.parse({
+      machineId: args.machineId, pluginId: OMP_PLUGIN_ID, operationId,
+      ...latest.current.pins, input: latest.input,
+    }),
+  };
 }
