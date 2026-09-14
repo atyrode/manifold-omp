@@ -39,6 +39,20 @@ export async function usageObservation(ctx: OmpContext) {
   await sharedBrokerReference(ctx, reference);
   return { accounts, snapshot: normalizeBrokerUsage(raw, accounts, Date.now()), refreshStatus };
 }
+/** Implicit operator selection is limited to providers named by the effective
+ * configuration. Disabled credentials never become native runtime authority. */
+export async function enabledAccountPool(ctx: OmpContext, providers: readonly string[]): Promise<RuntimeAccountPool> {
+  const observation = await accountObservation(ctx);
+  const pool: RuntimeAccountPool = {};
+  for (const account of observation.accounts) {
+    const provider = account.reference.provider;
+    if (account.disabled || !providers.includes(provider)) continue;
+    (pool[provider] ??= []).push({
+      scope: observation.scope, credentialId: account.credentialId, identityKey: account.identityKey,
+    });
+  }
+  return pool;
+}
 export async function checkedAccountPool(ctx: OmpContext, input: RuntimeAccountPool, expected?: BrokerReference) {
   const pool = RuntimeAccountPoolSchema.parse(input);
   const reference = await sharedBrokerReference(ctx, expected);

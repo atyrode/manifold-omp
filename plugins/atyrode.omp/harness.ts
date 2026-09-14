@@ -3,60 +3,16 @@ import type { ServerHarness, GuestCtx } from "@manifold/plugin-kit/server";
 import { PublicJobSchema } from "@manifold/protocol";
 import {
   OMP_PLUGIN_ID, OmpHarnessProfileSchema, OmpSessionRefSchema, SessionInputSchema, TargetSchema,
-  type OmpSessionRef,
 } from "../api/index.ts";
 import { prepareHarnessSession } from "./execution.ts";
 import { readDefaults } from "./state.ts";
+import { sessionInventory } from "./sessions.ts";
 import {
-  authorizeTarget, currentOperation, digestOf, OmpRefusal, readJobResult,
-  type OmpContext,
+  authorizeTarget, OmpRefusal, type OmpContext,
 } from "./machine-server.ts";
 
 const operationId = `${OMP_PLUGIN_ID}.harness`;
-const sessionsOperationId = `${OMP_PLUGIN_ID}.harness-sessions`;
-const sessionIdsSchema = z.array(z.uuid()).max(4096).refine(ids => new Set(ids).size === ids.length);
 
-/** Enumeration is a read-only governed job on the owner. Neither the hub filesystem
- * nor caller-supplied paths can resolve an OMP conversation. */
-async function sessionInventory(ctx: OmpContext, machineId: string): Promise<OmpSessionRef[]> {
-  const first = await currentOperation(ctx, machineId, sessionsOperationId);
-  const jobId = await ctx.newId();
-  const latest = await currentOperation(ctx, machineId, sessionsOperationId);
-  if (digestOf(first.pins) !== digestOf(latest.pins)) throw new OmpRefusal("resources_changed");
-  const job = PublicJobSchema.parse(await ctx.jobs.execute({
-    jobId, machineId, operationId: sessionsOperationId, ...latest.pins, input: {}, outputs: [],
-  }));
-  if (job.jobId !== jobId || job.machineId !== machineId || job.pluginId !== OMP_PLUGIN_ID ||
-      job.operationId !== sessionsOperationId || job.inputDigest !== digestOf({}) ||
-      job.installationRevision !== latest.pins.installationRevision || job.artifactSha256 !== latest.pins.artifactSha256 ||
-      job.resourceBindingDigest !== latest.pins.resourceBindingDigest || job.authority.requester !== ctx.auth.principal.id)
-    throw new OmpRefusal("provenance_changed");
-  const node = { kind: "job" as const, machineId, operationId: sessionsOperationId, jobId };
-  const settled = Promise.withResolvers<void>();
-  void settled.promise.catch(() => {});
-  const timeout = setTimeout(() => settled.reject(new OmpRefusal("session_inventory_timeout")), 30000);
-  // A synchronous initial event may arrive before follow() resolves; the resolver
-  // is already installed, and the atomic snapshot closes the completion race.
-  const follow = await ctx.jobs.follow(node, update => {
-    if (update.type === "closed") settled.reject(new OmpRefusal("session_inventory_unavailable"));
-    else if (update.event.type === "result" || update.event.type === "refusal") settled.resolve();
-  }).catch(error => { clearTimeout(timeout); throw error; });
-  try {
-    if (["exited", "interrupted", "cancelled", "refused"].includes(follow.snapshot.state)) settled.resolve();
-    await settled.promise;
-    const result = await readJobResult(ctx, machineId, "harness-sessions", jobId);
-    if (result.job.authority.requester !== job.authority.requester ||
-        digestOf(result.job.authority.origin) !== digestOf(job.authority.origin))
-      throw new OmpRefusal("provenance_changed");
-    return sessionIdsSchema.parse(result.value).map(sessionId => ({ harness: OMP_PLUGIN_ID, sessionId, machineId }));
-  } catch (error) {
-    await ctx.jobs.cancel(node).catch(() => {});
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-    await follow.close();
-  }
-}
 
 export const harness: ServerHarness<GuestCtx> = {
   profileSchema: OmpHarnessProfileSchema,
@@ -77,13 +33,15 @@ export const harness: ServerHarness<GuestCtx> = {
   async sessions(ctx, rawTarget) {
     const target = TargetSchema.parse(rawTarget);
     await authorizeTarget(ctx, target);
-    return sessionInventory(ctx, target.machineId);
+    return (await sessionInventory(ctx, target.machineId)).map(session => ({
+      harness: OMP_PLUGIN_ID, sessionId: session.id, machineId: target.machineId,
+    }));
   },
   async resolveSession(ctx, rawRef) {
     const ref = OmpSessionRefSchema.parse(rawRef);
     // Native operation/location admission independently checks machine-scoped read
     // authority. The reference deliberately carries no path or container bypass.
-    return (await sessionInventory(ctx, ref.machineId)).find(session => session.sessionId === ref.sessionId) ?? null;
+    return (await sessionInventory(ctx, ref.machineId)).some(session => session.id === ref.sessionId) ? ref : null;
   },
   async send(ctx, run, input) {
     const session = OmpSessionRefSchema.parse(run.session);

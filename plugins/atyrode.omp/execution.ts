@@ -34,7 +34,7 @@ import {
   type Target,
 } from "../api/index.ts";
 import { parseBenchmarkInput, probeAddress } from "../api/probe.ts";
-import { checkedAccountPool, currentGateway } from "./broker.ts";
+import { checkedAccountPool, currentGateway, enabledAccountPool } from "./broker.ts";
 import {
   actor,
   authorizeTarget,
@@ -47,7 +47,7 @@ import {
   readSealedArchive,
   type OmpContext,
 } from "./machine-server.ts";
-import { effectiveOverlay, expectedDefaults } from "./state.ts";
+import { effectiveOverlay, expectedDefaults, readDefaults } from "./state.ts";
 import { bundledProbeModels } from "./sdk-metadata.macro.ts" with { type: "macro" };
 
 const registry = bundledProbeModels();
@@ -123,16 +123,18 @@ export function nativeModelConfiguration(pool: RuntimeAccountPool) {
     },
   };
 }
+function configuredModels(overlay: Overlay): string[] {
+  const roles = overlay.modelRoles ?? {};
+  return [
+    ...Object.values(roles),
+    ...Object.values(overlay.retry?.fallbackChains ?? {}).flat(),
+    ...Object.values(overlay.task?.agentModelOverrides ?? {}).map(ref => ref.startsWith("@") ? roles[ref.slice(1)] ?? "" : ref),
+  ];
+}
 function checkOverlay(overlay: Overlay, pool: RuntimeAccountPool) {
   const roles = overlay.modelRoles ?? {};
   if (!roles.default) throw new OmpRefusal("model_configuration_missing");
-  const refs = [
-    ...Object.values(roles),
-    ...Object.values(overlay.retry?.fallbackChains ?? {}).flat(),
-    ...Object.values(overlay.task?.agentModelOverrides ?? {}),
-  ];
-  for (const ref of refs) {
-    const concrete = ref.startsWith("@") ? roles[ref.slice(1)] : ref;
+  for (const concrete of configuredModels(overlay)) {
     if (!concrete || !pool[concrete.slice(0, concrete.indexOf("/"))]?.length)
       throw new OmpRefusal("account_unavailable");
   }
@@ -489,19 +491,22 @@ export async function readBenchmark(
     throw new OmpRefusal("provenance_changed");
   return { job: result.job, benchmark };
 }
-async function sessionPreparation(
+/** Runtime preparation is machine-scoped. Container and terminal authorization
+ * belongs to reviewed launch or, for operator resume, independent placement. */
+async function sessionRuntimePreparation(
   ctx: OmpContext,
-  args: ActionInput<"reviewSession">,
+  args: Omit<ActionInput<"reviewSession">, "containerId" | "accountPool"> & { accountPool: RuntimeAccountPool | undefined },
+  operationId: string,
   sessionId?: string,
   resume = false,
 ) {
-  await authorizeTarget(ctx, args);
   const defaults = await expectedDefaults(ctx, args.expectedDefaultsRevision);
   const overlay = effectiveOverlay(defaults, args.overlay);
-  const { pool, reference } = await checkedAccountPool(ctx, args.accountPool);
+  const requestedPool = args.accountPool ?? await enabledAccountPool(ctx,
+    configuredModels(overlay).map(ref => ref.slice(0, ref.indexOf("/"))));
+  const { pool, reference } = await checkedAccountPool(ctx, requestedPool);
   checkOverlay(overlay, pool);
   const gateway = await currentGateway(ctx, args.machineId);
-  const operationId = `${OMP_PLUGIN_ID}.${sessionId ? "harness" : "launch"}`;
   const current = await currentOperation(
     ctx,
     args.machineId,
@@ -517,6 +522,19 @@ async function sessionPreparation(
     planYolo: args.planYolo,
     ...(sessionId ? { sessionId, resume } : {}),
   });
+  return { defaults, overlay, pool, reference, gateway, current, input };
+}
+
+async function sessionPreparation(
+  ctx: OmpContext,
+  args: ActionInput<"reviewSession">,
+  sessionId?: string,
+  resume = false,
+) {
+  await authorizeTarget(ctx, args);
+  const operationId = `${OMP_PLUGIN_ID}.${sessionId ? "harness" : "launch"}`;
+  const { defaults, overlay, pool, reference, gateway, current, input } =
+    await sessionRuntimePreparation(ctx, args, operationId, sessionId, resume);
   const destination = {
     containerId: args.containerId,
     machineId: args.machineId,
@@ -742,4 +760,31 @@ export async function prepareHarnessSession(
     ...prepared,
     session: { harness: OMP_PLUGIN_ID, sessionId, machineId: prepared.destination.machineId },
   });
+}
+
+export async function prepareInteractiveResume(
+  ctx: OmpContext,
+  args: ActionInput<"sessions.resume">,
+): Promise<ActionResult<"sessions.resume">> {
+  // An optional destination is checked when supplied, but never bound into the
+  // descriptor. The native terminal placement door must authorize its own target.
+  if (args.containerId !== undefined)
+    await authorizeTarget(ctx, { containerId: args.containerId, machineId: args.machineId }, true);
+  const defaults = await readDefaults(ctx);
+  const operationId = `${OMP_PLUGIN_ID}.resume`;
+  const input = {
+    machineId: args.machineId, expectedDefaultsRevision: defaults.revision,
+    accountPool: args.accountPool, overlay: args.overlay ?? {}, prompt: "", planYolo: false,
+  };
+  const first = await sessionRuntimePreparation(ctx, input, operationId, args.sessionId, true);
+  const latest = await sessionRuntimePreparation(ctx, input, operationId, args.sessionId, true);
+  if (digestOf(first) !== digestOf(latest)) throw new OmpRefusal("resources_changed");
+  return {
+    machineId: args.machineId,
+    sessionId: args.sessionId,
+    runtime: TerminalRuntimeSchema.parse({
+      machineId: args.machineId, pluginId: OMP_PLUGIN_ID, operationId,
+      ...latest.current.pins, input: latest.input,
+    }),
+  };
 }

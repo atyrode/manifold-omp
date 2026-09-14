@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { closeSync, copyFileSync, linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, copyFileSync, linkSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createSessionFile, listSessionIds, openSessionsRoot, resolveSessionFile } from "../workers/harness/sessions.ts";
+import { createSessionFile, listSessionSummaries, openSessionsRoot, resolveSessionFile, SESSION_INVENTORY_BYTES } from "../workers/harness/sessions.ts";
 import { OmpRpcActivity, OmpSendInputSchema, rpcFrames } from "../workers/harness/rpc.ts";
 
 
@@ -20,7 +20,9 @@ test("session resolution never follows paths, symlinks, nested artifacts or exte
     linkSync(join(directory, "outside.jsonl"), join(directory, "root", "hardlinked.jsonl"));
     mkdirSync(join(directory, "root", "artifacts"));
     copyFileSync(join(directory, "outside.jsonl"), join(directory, "root", "artifacts", "nested.jsonl"));
-    expect(listSessionIds(root)).toEqual([local]);
+    expect(listSessionSummaries(root)).toEqual([{
+      id: local, title: null, cwd: "/home/job/workspace", updatedAt: Math.floor(statSync(join(directory, "root", filename)).mtimeMs),
+    }]);
     expect(resolveSessionFile(root, local)).toBe(filename);
     expect(resolveSessionFile(root, outside)).toBeNull();
     expect(() => resolveSessionFile(root, "../outside.jsonl")).toThrow();
@@ -35,12 +37,95 @@ test("session IDs come from the OMP header after its title slot, not filenames o
   const root = openSessionsRoot(directory);
   const id = randomUUID();
   try {
-    const transcript = `${JSON.stringify({ type: "title", v: 1, title: "A conversation", pad: " " })}\n${JSON.stringify({ type: "session", version: 3, id, cwd: "/home/job/workspace", timestamp: new Date().toISOString() })}\n`;
+    const updatedAt = "2026-01-01T00:00:00.000Z";
+    const title = { type: "title", v: 1, title: "A conversation", updatedAt, pad: "" };
+    title.pad = " ".repeat(256 - Buffer.byteLength(`${JSON.stringify(title)}\n`));
+    const transcript = `${JSON.stringify(title)}\n${JSON.stringify({ type: "session", version: 3, id, cwd: "/home/job/workspace", timestamp: updatedAt })}\n`;
     writeFileSync(join(directory, "historical-filename.jsonl"), transcript);
     expect(resolveSessionFile(root, id)).toBe("historical-filename.jsonl");
     writeFileSync(join(directory, "copy.jsonl"), transcript);
     expect(() => resolveSessionFile(root, id)).toThrow("ambiguous_session");
-    expect(() => listSessionIds(root)).toThrow("ambiguous_session");
+    expect(() => listSessionSummaries(root)).toThrow("ambiguous_session");
+  } finally { closeSync(root); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("inventory uses only title/header metadata and no-follow file time, independent of message bodies", () => {
+  const directory = mkdtempSync(join(tmpdir(), "omp-session-metadata-"));
+  const root = openSessionsRoot(directory);
+  const updatedAt = 1767225600000;
+  const timestamp = "2025-01-01T00:00:00.000Z";
+  const current = randomUUID();
+  const legacy = randomUUID();
+  const cleared = randomUUID();
+  try {
+    for (const [name, id, title] of [
+      ["a-current.jsonl", current, "Current title"],
+      ["b-legacy.jsonl", legacy, undefined],
+      ["c-cleared.jsonl", cleared, ""],
+    ] as const) {
+      const path = join(directory, name);
+      let prefix = "";
+      if (title !== undefined) {
+        const slot = { type: "title", v: 1, title, updatedAt: timestamp, pad: "" };
+        slot.pad = " ".repeat(256 - Buffer.byteLength(`${JSON.stringify(slot)}\n`));
+        prefix = `${JSON.stringify(slot)}\n`;
+      }
+      writeFileSync(path, `${prefix}${JSON.stringify({
+        type: "session", version: 3, id, cwd: "/home/job/workspace", timestamp, title: "Legacy title",
+      })}\n${JSON.stringify({
+        type: "message", message: { role: "user", content: "Private message, never a title or inventory field." },
+      })}\n`);
+      // Malformed UTF-8 in a large body must not invalidate the bounded metadata.
+      appendFileSync(path, Buffer.alloc(SESSION_INVENTORY_BYTES + 1, 0xff));
+      utimesSync(path, updatedAt / 1000, updatedAt / 1000);
+    }
+    expect(listSessionSummaries(root)).toEqual([
+      { id: current, title: "Current title", cwd: "/home/job/workspace", updatedAt },
+      { id: legacy, title: "Legacy title", cwd: "/home/job/workspace", updatedAt },
+      { id: cleared, title: null, cwd: "/home/job/workspace", updatedAt },
+    ]);
+  } finally { closeSync(root); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("inventory refuses oversized metadata instead of shortening titles, paths or identity", () => {
+  const directory = mkdtempSync(join(tmpdir(), "omp-session-metadata-limit-"));
+  const root = openSessionsRoot(directory);
+  const path = join(directory, "session.jsonl");
+  const header = { type: "session", version: 3, id: randomUUID(), cwd: "/home/job/workspace", timestamp: "2026-01-01T00:00:00.000Z" };
+  try {
+    writeFileSync(path, `${JSON.stringify({ ...header, title: "t".repeat(257) })}\n`);
+    expect(() => listSessionSummaries(root)).toThrow();
+    writeFileSync(path, `${JSON.stringify({ ...header, cwd: "/".repeat(1025) })}\n`);
+    expect(() => listSessionSummaries(root)).toThrow();
+    writeFileSync(path, `${JSON.stringify({ ...header, padding: "x".repeat(16384) })}\n`);
+    expect(() => listSessionSummaries(root)).toThrow("session_metadata_limit");
+    expect(() => resolveSessionFile(root, header.id)).toThrow("session_metadata_limit");
+  } finally { closeSync(root); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("inventory byte bound includes UTF-8 metadata, separators and the output newline without truncation", () => {
+  const directory = mkdtempSync(join(tmpdir(), "omp-session-inventory-limit-"));
+  const root = openSessionsRoot(directory);
+  const updatedAt = 1767225600000;
+  const metadata = { title: "é".repeat(256), cwd: "é".repeat(1024), updatedAt };
+  const rowBytes = Buffer.byteLength(JSON.stringify({ id: randomUUID(), ...metadata }));
+  const count = Math.floor((SESSION_INVENTORY_BYTES - 2) / (rowBytes + 1));
+  const expected = [];
+  try {
+    for (let index = 0; index < count; index++) {
+      const id = randomUUID();
+      const path = join(directory, `${String(index).padStart(4, "0")}.jsonl`);
+      writeFileSync(path, `${JSON.stringify({ type: "session", version: 3, id, ...metadata, timestamp: "2026-01-01T00:00:00.000Z" })}\n`);
+      utimesSync(path, updatedAt / 1000, updatedAt / 1000);
+      expected.push({ id, ...metadata });
+    }
+    const inventory = listSessionSummaries(root);
+    expect(inventory).toEqual(expected);
+    expect(Buffer.byteLength(`${JSON.stringify(inventory)}\n`)).toBe(2 + count * (rowBytes + 1));
+    const path = join(directory, "overflow.jsonl");
+    writeFileSync(path, `${JSON.stringify({ type: "session", version: 3, id: randomUUID(), ...metadata, timestamp: "2026-01-01T00:00:00.000Z" })}\n`);
+    utimesSync(path, updatedAt / 1000, updatedAt / 1000);
+    expect(() => listSessionSummaries(root)).toThrow("session_inventory_limit");
   } finally { closeSync(root); rmSync(directory, { recursive: true, force: true }); }
 });
 

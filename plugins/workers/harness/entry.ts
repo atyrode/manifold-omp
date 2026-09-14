@@ -1,7 +1,7 @@
 import { closeSync, writeSync } from "node:fs";
 import { openWorkerContext, type WorkerContext } from "@manifold/sdk/worker";
-import { listSessionIds, openSessionsRoot } from "./sessions.ts";
-import { runOmpHarness } from "./runtime.ts";
+import { listSessionSummaries, openSessionsRoot } from "./sessions.ts";
+import { runOmpHarness, runOmpResume } from "./runtime.ts";
 
 const controller = new AbortController();
 const cancel = () => controller.abort();
@@ -16,13 +16,15 @@ try {
   if (process.argv[2] === "sessions") {
     const root = openSessionsRoot();
     try {
-      const bytes = Buffer.from(`${JSON.stringify(listSessionIds(root))}\n`);
+      const bytes = Buffer.from(`${JSON.stringify(listSessionSummaries(root))}\n`);
       let offset = 0;
       while (offset < bytes.length) offset += writeSync(1, bytes, offset, bytes.length - offset);
     } finally { closeSync(root); }
     success = true;
   } else if (process.argv[2] === "launch") {
     success = await runOmpHarness(context.signal);
+  } else if (process.argv[2] === "resume") {
+    success = await runOmpResume(context.signal);
   } else throw new Error("invalid_harness_operation");
 } catch {
   // No exception, provider diagnostic, path or environment reaches public output.

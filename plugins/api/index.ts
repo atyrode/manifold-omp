@@ -74,6 +74,16 @@ export const OmpSessionRefSchema = z.strictObject({
   machineId: id,
 });
 export type OmpSessionRef = z.infer<typeof OmpSessionRefSchema>;
+/** Header/title metadata only; message bodies and transcript paths never cross the door. */
+export const OmpSessionSummarySchema = z.strictObject({
+  id: z.uuid(),
+  title: z.string().max(256).nullable(),
+  cwd: z.string().max(1024),
+  updatedAt: epochMilliseconds,
+});
+export type OmpSessionSummary = z.infer<typeof OmpSessionSummarySchema>;
+export const OmpSessionInventorySchema = z.array(OmpSessionSummarySchema).max(4096)
+  .refine(sessions => new Set(sessions.map(session => session.id)).size === sessions.length);
 export const ResourcePinsSchema = z.strictObject({
   installationRevision: id,
   artifactSha256: digest,
@@ -241,6 +251,21 @@ export const PreparedHarnessSessionSchema = PreparedSessionSchema.safeExtend({
   value.runtime.input.sessionId === value.session.sessionId,
   { message: "harness session does not match admitted runtime" },
 );
+export const ResumeSessionInputSchema = z.strictObject({
+  machineId: id,
+  sessionId: z.uuid(),
+  containerId: id.optional(),
+  accountPool: RuntimeAccountPoolSchema.optional(),
+  overlay: OverlaySchema.optional(),
+}).describe("Resume an existing OMP transcript in an interactive terminal without an Agent. Omitted settings use current plugin defaults and currently enabled broker credentials for the configured providers. Explicit overlay keys replace default keys; an explicit accountPool is used exactly. Preparation authorizes the machine runtime only; terminal placement independently authorizes its container and terminal.");
+export const PreparedResumeSessionSchema = z.strictObject({
+  machineId: id,
+  sessionId: z.uuid(),
+  runtime: TerminalRuntimeSchema,
+}).refine(value => value.runtime.machineId === value.machineId &&
+  value.runtime.input.sessionId === value.sessionId, {
+  message: "resume session does not match admitted runtime",
+});
 export const PreparedSignInSchema = z
   .strictObject({ machineId: id, runtime: TerminalRuntimeSchema })
   .refine((value) => value.runtime.machineId === value.machineId, {
@@ -363,6 +388,15 @@ export const rootActionSchemas = {
   cancelSession: {
     input: TargetSchema.extend({ jobId: id }),
     result: z.strictObject({ job: PublicJobSchema }),
+  },
+  "sessions.list": {
+    input: z.strictObject({ machineId: id })
+      .describe("List existing OMP transcripts on the admitted machine: bounded title/header metadata only, never message bodies. Requires operator authority; no Agent credential."),
+    result: OmpSessionInventorySchema,
+  },
+  "sessions.resume": {
+    input: ResumeSessionInputSchema,
+    result: PreparedResumeSessionSchema,
   },
 } as const;
 export const accountActionSchemas = {

@@ -2,7 +2,7 @@
   "id": "atyrode.omp",
   "version": "0.1.0",
   "title": "omp",
-  "description": "Independent OMP execution over governed native Manifold resources.",
+  "description": "Independent OMP execution over governed native Manifold resources. Operator doors atyrode.omp.sessions.list and atyrode.omp.sessions.resume expose body-free transcript metadata and prepare a machine-only interactive terminal runtime, without an Agent. Omitted resume knobs use current defaults and enabled broker credentials for configured providers; placement independently authorizes the container and terminal.",
   "capabilities": [
     "containers:read",
     "containers:write",
@@ -1042,6 +1042,146 @@
           "outputBytes": 1048576
         },
         "stdin": false
+      },
+      "atyrode.omp.resume": {
+        "argv": [
+          {
+            "literal": "/runtime/bin/harness"
+          },
+          {
+            "literal": "resume"
+          }
+        ],
+        "input": {
+          "models": {
+            "type": "string",
+            "required": true,
+            "maxLength": 65536
+          },
+          "config": {
+            "type": "string",
+            "required": true,
+            "maxLength": 65536
+          },
+          "accountPool": {
+            "type": "string",
+            "required": true,
+            "maxLength": 65536
+          },
+          "hasPrompt": {
+            "type": "boolean",
+            "required": true
+          },
+          "prompt": {
+            "type": "string",
+            "required": true,
+            "maxLength": 16384
+          },
+          "planYolo": {
+            "type": "boolean",
+            "required": true
+          },
+          "sessionId": {
+            "type": "string",
+            "required": true,
+            "maxLength": 36
+          },
+          "resume": {
+            "type": "boolean",
+            "required": true
+          }
+        },
+        "environment": {
+          "SSL_CERT_FILE": "/runtime/bin/ca-certificates",
+          "GIT_SSL_CAINFO": "/runtime/bin/ca-certificates"
+        },
+        "runtimeTools": [
+          "omp",
+          "bun",
+          "ca-certificates",
+          "system",
+          "development",
+          "harness"
+        ],
+        "executable": {
+          "runtimeTool": "bun"
+        },
+        "inputFiles": {
+          "models": {
+            "input": "models",
+            "homePath": [
+              ".omp",
+              "agent",
+              "models.yml"
+            ],
+            "jsonValues": [
+              {
+                "path": [
+                  "providers",
+                  "*",
+                  "baseUrl"
+                ],
+                "serviceId": "omp",
+                "value": "url"
+              },
+              {
+                "path": [
+                  "providers",
+                  "*",
+                  "apiKey"
+                ],
+                "serviceId": "omp",
+                "value": "bearer"
+              }
+            ]
+          },
+          "config": {
+            "input": "config",
+            "homePath": [
+              ".omp",
+              "agent",
+              "config.yml"
+            ]
+          },
+          "sessionId": {
+            "input": "sessionId"
+          },
+          "prompt": {
+            "input": "prompt"
+          }
+        },
+        "services": [
+          {
+            "serviceId": "omp",
+            "revision": "1",
+            "operationIds": [
+              "models",
+              "stream"
+            ]
+          }
+        ],
+        "workingDirectory": {
+          "locationId": "atyrode.omp.workspace"
+        },
+        "locations": [
+          {
+            "locationId": "atyrode.omp.workspace",
+            "access": "write"
+          },
+          {
+            "locationId": "atyrode.omp.sessions",
+            "access": "write"
+          }
+        ],
+        "outputs": [],
+        "network": "host",
+        "limits": {
+          "timeoutMs": 86400000,
+          "memoryBytes": 8589934592,
+          "processes": 512,
+          "outputBytes": 1073741824
+        },
+        "stdin": true
       }
     },
     "locations": {

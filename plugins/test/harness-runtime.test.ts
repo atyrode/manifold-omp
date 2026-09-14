@@ -1,14 +1,54 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { closeSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ACTION_RUNNER_MAX_FRAME_BYTES, ActionRunnerResponseSchema, type ActionRunnerRequest } from "@manifold/protocol";
 import { ADMISSION_CONTEXT_BYTES, writeAdmissionContext } from "../workers/harness/admission.ts";
 import { dispatchOmpModelRequest } from "../workers/harness/model.ts";
+import { ompLaunchArgs } from "../workers/harness/runtime.ts";
+import { createSessionFile, openSessionsRoot, prepareSessionFile, SESSIONS_ROOT } from "../workers/harness/sessions.ts";
 
 const discovery = (description: string) => ActionRunnerResponseSchema.parse({
   type: "discovery", id: null, runId: "root-run", protocolVersion: 1,
   actions: [{ name: "core.example", title: "Example", caps: [], scope: "workspace", input: { description }, result: {} }],
+});
+
+test("operator resume rejects missing UUIDs without creating or changing transcripts", () => {
+  const directory = mkdtempSync(join(tmpdir(), "omp-resume-missing-"));
+  const root = openSessionsRoot(directory);
+  const id = randomUUID();
+  const missing = randomUUID();
+  try {
+    const filename = createSessionFile(root, id, "/home/job/workspace");
+    const transcript = readFileSync(join(directory, filename));
+    expect(() => prepareSessionFile(root, missing, "/home/job/workspace", true)).toThrow("session_unavailable");
+    expect(existsSync(join(directory, `${missing}.jsonl`))).toBe(false);
+    expect(readFileSync(join(directory, filename))).toEqual(transcript);
+  } finally { closeSync(root); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("Agent and operator resume select the same header-owned file, directory and sealed config", () => {
+  const directory = mkdtempSync(join(tmpdir(), "omp-resume-argv-"));
+  const root = openSessionsRoot(directory);
+  const id = randomUUID();
+  try {
+    const filename = createSessionFile(root, id, "/home/job/workspace");
+    renameSync(join(directory, filename), join(directory, "historical-session.jsonl"));
+    const before = readFileSync(join(directory, "historical-session.jsonl"));
+    const sessionFile = prepareSessionFile(root, id, "/home/job/workspace", true);
+    const operatorArgs = ompLaunchArgs(sessionFile);
+    const agentArgs = ompLaunchArgs(sessionFile, { admissionPath: "/home/job/tmp/admission.txt" });
+    expect(operatorArgs).toEqual([
+      "--session-dir", SESSIONS_ROOT, "--session", `${SESSIONS_ROOT}/historical-session.jsonl`,
+      "--config", "/home/job/.omp/agent/config.yml",
+    ]);
+    expect(agentArgs).toEqual(["--mode", "rpc", ...operatorArgs, "--append-system-prompt", "/home/job/tmp/admission.txt"]);
+    expect(ompLaunchArgs(sessionFile, { planYolo: true, admissionPath: "/home/job/tmp/admission.txt" })).toEqual([
+      "--mode", "rpc", ...operatorArgs, "--plan-yolo", "--append-system-prompt", "/home/job/tmp/admission.txt",
+    ]);
+    expect(readFileSync(join(directory, "historical-session.jsonl"))).toEqual(before);
+  } finally { closeSync(root); rmSync(directory, { recursive: true, force: true }); }
 });
 
 test("admission carries live schemas larger than an RPC frame and exact policy in a private ephemeral file", () => {

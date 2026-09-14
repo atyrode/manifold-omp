@@ -94,7 +94,7 @@ try {
       throw new VerificationFailure(`${phase}-transport-failed`);
     });
     async function call<K extends OmpAction>(name: K, input: ActionInput<K>): Promise<ActionResult<K>> {
-      phase = `public-${name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)}`;
+      phase = `public-${name.replaceAll(".", "-").replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)}`;
       const reply = await client.call(name, input);
       const refusal = RefusalSchema.safeParse(reply);
       if (refusal.success) {
@@ -111,13 +111,13 @@ try {
       return actionSchemas[name].result.parse(reply) as ActionResult<K>;
     }
     async function refused<K extends OmpAction>(name: K, input: ActionInput<K>): Promise<void> {
-      phase = `public-${name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)}`;
+      phase = `public-${name.replaceAll(".", "-").replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)}`;
       check(RefusalSchema.safeParse(await client.call(name, input)).success, `${phase}-unsafe-admission`);
     }
     // Every published public door is reachable in the real isolate. Empty args
     // may be invalid, but never substitute for the valid boundary calls below.
     for (const name of Object.keys(actionSchemas) as OmpAction[]) {
-      phase = `door-${name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)}`;
+      phase = `door-${name.replaceAll(".", "-").replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)}`;
       const door = actionDoor(name);
       check(loaded.some(row => row.actions.some(action => action.name === door)), "public-door-not-published");
       const result = await dispatch(hub, hub.ownerKey, door, {});
@@ -175,6 +175,8 @@ try {
     await refused("reviewSession", session);
     await refused("prepareSession", { ...session, reviewDigest: unreviewed });
     await refused("runSession", { ...session, prompt: "verify", reviewDigest: unreviewed });
+    await refused("sessions.list", { machineId: target.machineId });
+    await refused("sessions.resume", { machineId: target.machineId, sessionId: randomUUID() });
     await refused("startInventory", { ...target, expectedDefaultsRevision: changed.revision, accountPool: {} });
     const missingJob = randomUUID();
     await refused("readInventory", { ...target, jobId: missingJob });
