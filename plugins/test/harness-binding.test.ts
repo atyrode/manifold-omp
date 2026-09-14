@@ -197,7 +197,7 @@ test("omitted resume knobs select current configured providers and enabled crede
     expect(config.disabledProviders).toContain("openai");
     expect(JSON.parse(String(resumed.runtime.input.accountPool)).anthropic.map((slot: { credentialId: number }) => slot.credentialId)).toEqual([7, 10]);
     expect(Object.keys(JSON.parse(String(resumed.runtime.input.accountPool)))).toEqual(["anthropic"]);
-    expect(resumed.runtime.terminal).toBeUndefined();
+    expect("terminal" in resumed.runtime).toBe(false);
     const sessionFile = files.find(file => file.target === "/inputs/sessionId")!;
     expect(readFileSync(sessionFile.fd, "utf8")).toBe(summary.id);
   } finally { for (const file of files) closeSync(file.fd); }

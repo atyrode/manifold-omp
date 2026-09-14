@@ -8,7 +8,7 @@ import { prepareHarnessSession } from "./execution.ts";
 import { readDefaults } from "./state.ts";
 import { sessionInventory } from "./sessions.ts";
 import {
-  authorizeTarget, OmpRefusal, type OmpContext,
+  authorizeTarget, OmpRefusal,
 } from "./machine-server.ts";
 
 const operationId = `${OMP_PLUGIN_ID}.harness`;
