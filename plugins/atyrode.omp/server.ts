@@ -132,7 +132,9 @@ const plugin = {
     defineServerAction({
       name,
       title: name.replace(/([A-Z])/g, " $1"),
-      caps: name === "listSessions" || name === "resumeSession" ? ["machines:run"] : [writes[name] ? "containers:write" : "containers:read"],
+      // Operator doors enforce owner authority in their handler. Governed machine
+      // caps belong to the native target admission below, not context-level caps.
+      caps: name === "listSessions" || name === "resumeSession" ? [] : [writes[name] ? "containers:write" : "containers:read"],
       delegates: delegates[name],
       scope:
         name === "readDefaults" || name === "writeDefaults" || name === "listSessions" || name === "resumeSession"
