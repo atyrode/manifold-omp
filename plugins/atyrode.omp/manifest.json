@@ -345,6 +345,41 @@
             "literal": "/home/job/omp-sessions"
           },
           {
+            "literal": "--session-dir",
+            "when": {
+              "input": "oneShot",
+              "equals": true
+            }
+          },
+          {
+            "input": "sessionDir",
+            "when": {
+              "input": "oneShot",
+              "equals": true
+            }
+          },
+          {
+            "literal": "-p",
+            "when": {
+              "input": "oneShot",
+              "equals": true
+            }
+          },
+          {
+            "literal": "--mode",
+            "when": {
+              "input": "oneShot",
+              "equals": true
+            }
+          },
+          {
+            "literal": "json",
+            "when": {
+              "input": "oneShot",
+              "equals": true
+            }
+          },
+          {
             "literal": "--config"
           },
           {
@@ -400,6 +435,15 @@
           "planYolo": {
             "type": "boolean",
             "required": true
+          },
+          "oneShot": {
+            "type": "boolean",
+            "required": false
+          },
+          "sessionDir": {
+            "type": "string",
+            "required": false,
+            "maxLength": 4096
           }
         },
         "environment": {
@@ -477,7 +521,9 @@
             "access": "write"
           }
         ],
-        "outputs": [],
+        "outputs": [
+          "session"
+        ],
         "network": "host",
         "limits": {
           "timeoutMs": 86400000,

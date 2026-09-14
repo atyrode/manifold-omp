@@ -23,6 +23,8 @@ import {
   readBenchmark,
   reviewSession,
   prepareSession,
+  runSession,
+  readSession,
 } from "./execution.ts";
 
 type RootHandlers = {
@@ -43,6 +45,8 @@ const implementations: RootHandlers = {
   readBenchmark,
   reviewSession,
   prepareSession,
+  runSession,
+  readSession,
 };
 const workspaceObservationCaps: readonly Cap[] = ["machines:run", "jobs:read"];
 // The write door may execute either mode; Native still rechecks the exact operation's refs.
@@ -83,11 +87,19 @@ const delegates: Record<RootAction, readonly Cap[]> = {
   readBenchmark: ["machines:run", "jobs:read"],
   reviewSession: observedRuntimeCaps,
   prepareSession: observedRuntimeCaps,
+  // Posting the launch job needs the operation's own declared rights, not only its observation.
+  runSession: [
+    ...observedRuntimeCaps,
+    "network:host",
+    "locations:write",
+  ],
+  readSession: ["machines:run", "jobs:read"],
 };
 const writes: Partial<Record<RootAction, true>> = {
   writeDefaults: true,
   prepareWorkspace: true,
   prepareSession: true,
+  runSession: true,
 };
 export const handlers = Object.fromEntries(
   (Object.keys(rootActionSchemas) as RootAction[]).map((name) => [

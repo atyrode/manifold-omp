@@ -174,9 +174,11 @@ try {
     const session = { ...target, expectedDefaultsRevision: changed.revision, accountPool: {}, overlay: {}, prompt: "", planYolo: false };
     await refused("reviewSession", session);
     await refused("prepareSession", { ...session, reviewDigest: unreviewed });
+    await refused("runSession", { ...session, prompt: "verify", reviewDigest: unreviewed });
     await refused("startInventory", { ...target, expectedDefaultsRevision: changed.revision, accountPool: {} });
     const missingJob = randomUUID();
     await refused("readInventory", { ...target, jobId: missingJob });
+    await refused("readSession", { ...target, jobId: missingJob });
     await refused("startBenchmark", { ...target, inventoryJobId: missingJob, candidates: {
       schemaVersion: 1, inventoryObservedAt: 0, ompVersion: OMP_VERSION,
       candidates: [{ key: "offline", provider: "fixture", id: "offline", api: "fixture" }],

@@ -8,6 +8,7 @@ import {
   InstanceServicesDescriptionSchema,
   JobDescriptionSchema,
   JobDeploymentDescriptionSchema,
+  MAX_JOB_OUTPUT_PAGE_BYTES,
   PublicJobSchema,
   type PublicJob,
   type JobDescription,
@@ -445,14 +446,13 @@ export async function requireCurrentJob(ctx: OmpContext, job: PublicJob) {
     throw new OmpRefusal("resources_changed");
   return current;
 }
-export async function readJobResult(
+async function settledJob(
   ctx: OmpContext,
   machineId: string,
-  operation: string,
+  operationId: string,
   jobId: string,
   door: string,
 ) {
-  const operationId = `${OMP_PLUGIN_ID}.${operation}`;
   const job = PublicJobSchema.parse(
     await ctx.jobs.status({ kind: "job", machineId, operationId, jobId }),
   );
@@ -467,19 +467,33 @@ export async function readJobResult(
     job.authority.origin.door !== `${OMP_PLUGIN_ID}.${door}`
   )
     throw new OmpRefusal("result_unavailable");
-  const output = job.result.outputs.find((item) => item.name === "stdout");
-  if (!output || output.bytes < 1 || output.bytes > 1 << 20)
+  return job;
+}
+/** Whole-output read: the sealed digest is the only proof the pages were not substituted. */
+async function readNamedOutput(
+  ctx: OmpContext,
+  machineId: string,
+  operationId: string,
+  job: PublicJob,
+  name: string,
+  limit: number,
+) {
+  const output = job.result?.outputs.find((item) => item.name === name);
+  if (!output || output.bytes < 1 || output.bytes > limit)
     throw new OmpRefusal("result_unavailable");
   const bytes = Buffer.alloc(output.bytes);
   let offset = 0;
   while (offset < bytes.length) {
-    const maxBytes = Math.min(65536, bytes.length - offset);
+    const maxBytes = Math.min(
+      MAX_JOB_OUTPUT_PAGE_BYTES,
+      bytes.length - offset,
+    );
     const chunk = await ctx.jobs.output({
       node: {
         kind: "output",
         machineId,
         operationId,
-        jobId,
+        jobId: job.jobId,
         outputId: output.outputId,
       },
       offset,
@@ -487,7 +501,7 @@ export async function readJobResult(
     });
     const data = Buffer.from(chunk.data, "base64");
     if (
-      chunk.jobId !== jobId ||
+      chunk.jobId !== job.jobId ||
       chunk.outputId !== output.outputId ||
       chunk.seq !== offset ||
       data.length < 1 ||
@@ -501,6 +515,25 @@ export async function readJobResult(
   }
   if (createHash("sha256").update(bytes).digest("hex") !== output.sha256)
     throw new OmpRefusal("result_unavailable");
+  return bytes;
+}
+export async function readJobResult(
+  ctx: OmpContext,
+  machineId: string,
+  operation: string,
+  jobId: string,
+  door: string,
+) {
+  const operationId = `${OMP_PLUGIN_ID}.${operation}`;
+  const job = await settledJob(ctx, machineId, operationId, jobId, door);
+  const bytes = await readNamedOutput(
+    ctx,
+    machineId,
+    operationId,
+    job,
+    "stdout",
+    1 << 20,
+  );
   let value: unknown;
   try {
     value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
@@ -509,4 +542,27 @@ export async function readJobResult(
   }
   await requireCurrentJob(ctx, job);
   return { job, value };
+}
+/** A declared bound output, sealed by the owner as one ustar archive of the bound directory. */
+export async function readJobArchive(
+  ctx: OmpContext,
+  machineId: string,
+  operation: string,
+  jobId: string,
+  door: string,
+  name: string,
+  limit: number,
+) {
+  const operationId = `${OMP_PLUGIN_ID}.${operation}`;
+  const job = await settledJob(ctx, machineId, operationId, jobId, door);
+  const archive = await readNamedOutput(
+    ctx,
+    machineId,
+    operationId,
+    job,
+    name,
+    limit,
+  );
+  await requireCurrentJob(ctx, job);
+  return { job, archive };
 }
