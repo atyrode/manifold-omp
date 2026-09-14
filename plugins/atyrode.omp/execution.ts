@@ -16,9 +16,9 @@ import {
   PROBE_MODEL_LIMIT,
   BenchmarkInputSchema,
   SESSION_ARCHIVE_LIMIT,
+  SESSION_GUEST_PATH,
   SESSION_OUTPUT_NAME,
-  SESSIONS_GUEST_PATH,
-  SESSIONS_LOCATION_ID,
+  RUNS_LOCATION_ID,
   parseSessionArchive,
   ProbeIdentitiesSchema,
   type ActionInput,
@@ -46,6 +46,10 @@ import { bundledProbeModels } from "./sdk-metadata.macro.ts" with { type: "macro
 
 const registry = bundledProbeModels();
 const providers = Object.keys(registry);
+// A one-shot's stdin must close before omp's first turn; admission to started is the wait.
+const SESSION_START_ATTEMPTS = 240;
+const SESSION_START_INTERVAL_MS = 250;
+const SESSION_STARTING_STATES = ["queued", "admitted", "start-committed", "started"];
 
 export function defaultInventoryIdentities(
   catalog: Readonly<Record<string, readonly ProbeIdentity[]>>,
@@ -562,11 +566,52 @@ export async function prepareSession(
     }),
   };
 }
+/** `atyrode.omp.launch` is a stdin operation, so a job of it keeps an open pipe on fd 0
+ * and `omp -p` reads that pipe to EOF before its first turn. A one-shot has nothing to
+ * type: the door closes the pipe as soon as the owner confirms an input cursor, and a
+ * session that never reaches one is cancelled rather than left waiting out its timeout. */
+async function closeSessionInput(ctx: OmpContext, posted: PublicJob) {
+  const node = {
+    kind: "job" as const,
+    machineId: posted.machineId,
+    operationId: posted.operationId,
+    jobId: posted.jobId,
+  };
+  for (let attempt = 0; attempt < SESSION_START_ATTEMPTS; attempt++) {
+    const job = PublicJobSchema.parse(await ctx.jobs.status(node));
+    if (job.state === "started" && job.nextInputSeq !== null) {
+      // A refused write leaves the pipe open, so it settles the run like any other stall.
+      try {
+        await ctx.jobs.input({
+          node,
+          requestId: await ctx.newId(),
+          seq: job.nextInputSeq,
+          data: "",
+          eof: true,
+        });
+      } catch {
+        break;
+      }
+      return PublicJobSchema.parse(await ctx.jobs.status(node));
+    }
+    if (!SESSION_STARTING_STATES.includes(job.state)) break;
+    const settle = Promise.withResolvers<void>();
+    setTimeout(settle.resolve, SESSION_START_INTERVAL_MS);
+    await settle.promise;
+  }
+  // Nothing may outlive a door that could not make the run one-shot; a settled job ignores this.
+  try {
+    await ctx.jobs.cancel(node);
+  } catch {
+    /* the run is already gone, which is the outcome this refusal reports */
+  }
+  throw new OmpRefusal("session_input_unavailable");
+}
 /**
  * The reviewed session, placed as a governed job instead of a terminal. One-shot by
- * construction: the prompt is the whole turn, so the run ends by itself and leaves a receipt.
- * `sessionDir` is the job's own subdirectory of the sessions location, which is also the
- * directory the owner seals as the declared `session` output.
+ * construction: the prompt is the whole turn, so the run ends by itself and leaves a
+ * receipt. The transcript is written straight into the job's `session` output lease,
+ * which the owner mounts at `SESSION_GUEST_PATH` and seals when the run exits.
  */
 export async function runSession(
   ctx: OmpContext,
@@ -581,11 +626,7 @@ export async function runSession(
   const latest = await sessionPreparation(ctx, args);
   if (latest.review.reviewDigest !== first.review.reviewDigest)
     throw new OmpRefusal("resources_changed");
-  const input = boundedInput({
-    ...latest.input,
-    oneShot: true,
-    sessionDir: `${SESSIONS_GUEST_PATH}/${jobId}`,
-  });
+  const input = boundedInput({ ...latest.input, oneShot: true });
   const provenance = provenanceSchema.parse({
     target: latest.review.destination,
     operationId: latest.review.operationId,
@@ -602,14 +643,23 @@ export async function runSession(
     inventoryJobId: null,
     candidates: null,
   });
-  return execute(ctx, jobId, provenance, [
-    {
-      name: SESSION_OUTPUT_NAME,
-      locationId: SESSIONS_LOCATION_ID,
-      components: [jobId],
-    },
+  const posted = await execute(ctx, jobId, provenance, [
+    { name: SESSION_OUTPUT_NAME, locationId: RUNS_LOCATION_ID, components: [jobId] },
   ]);
+  const started = await closeSessionInput(ctx, posted);
+  checkJob(started, provenance, jobId);
+  return started;
 }
+/**
+ * The run's own receipt. The `session` lease is created beneath the shared
+ * `atyrode.omp.runs` location, which every `atyrode.omp.launch` job mounts writable, and
+ * the owner withholds a seal until every overlapping writer exits: a finished one-shot
+ * therefore answers `result_unavailable` while another launch on that machine that was
+ * alive when this lease was created is still running — including an operator's
+ * interactive terminal, whose timeout is a day. `locations` is an operation-wide
+ * declaration and the review pins the operation, so the one-shot and the terminal are
+ * necessarily the same operation and cannot hold different locations.
+ */
 export async function readSession(
   ctx: OmpContext,
   args: ActionInput<"readSession">,
@@ -617,13 +667,11 @@ export async function readSession(
   const target = { containerId: args.containerId, machineId: args.machineId };
   await authorizeTarget(ctx, target);
   const provenance = await retainedProvenance(ctx, target, args.jobId);
-  const sessionDir = provenance.input.sessionDir;
   if (
     provenance.door !== "runSession" ||
     provenance.modelIdentities !== null ||
     provenance.inventoryJobId !== null ||
-    provenance.candidates !== null ||
-    typeof sessionDir !== "string"
+    provenance.candidates !== null
   )
     throw new OmpRefusal("provenance_changed");
   const result = await readJobArchive(
@@ -640,6 +688,6 @@ export async function readSession(
   const exitCode = result.job.result?.exitCode ?? 0;
   return {
     job: result.job,
-    session: parseSessionArchive(result.archive, sessionDir, exitCode),
+    session: parseSessionArchive(result.archive, SESSION_GUEST_PATH, exitCode),
   };
 }

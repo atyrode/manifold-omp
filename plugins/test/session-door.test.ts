@@ -7,9 +7,10 @@ import {
   INVENTORY_OPERATION_ID,
   LAUNCH_OPERATION_ID,
   OMP_PLUGIN_ID,
+  RUNS_LOCATION_ID,
+  SESSION_GUEST_PATH,
   SESSION_OUTPUT_NAME,
   SESSIONS_GUEST_PATH,
-  SESSIONS_LOCATION_ID,
   createOmpClient,
   type ActionInput,
   type ActionReply,
@@ -21,16 +22,19 @@ import { handlers as rootHandlers } from "../atyrode.omp/server.ts";
 import rootManifest from "../atyrode.omp/manifest.json";
 
 type JobInput = Record<string, string | number | boolean>;
+type JobNode = { kind: "job"; machineId: string; operationId: string; jobId: string };
 type PostedJob = {
   jobId: string;
   operationId: string;
   input: JobInput;
   outputs: { name: string; locationId: string; components: string[] }[];
 };
+type SentInput = { node: JobNode; requestId: string; seq: number; data: string; eof: boolean };
 type JobOverrides = {
-  state?: "started" | "exited";
+  state?: "queued" | "started" | "exited" | "refused";
   exitCode?: number | null;
   door?: string;
+  nextInputSeq?: number | null;
 };
 interface OmpClient {
   call<K extends OmpAction>(name: K, input: ActionInput<K>): Promise<ActionReply<K>>;
@@ -39,6 +43,12 @@ interface Fixture {
   ctx: OmpContext;
   client: OmpClient;
   posted: PostedJob[];
+  sent: SentInput[];
+  cancelled: string[];
+  /** Refuse `jobs.input`, as the hub does when the cursor or the owner moved. */
+  refuseInput: { value: boolean };
+/** Settle without ever starting, as a job the owner refuses at preflight. */
+  refuseStart: { value: boolean };
   seal(jobId: string, archive: Buffer): void;
   amend(jobId: string, overrides: JobOverrides): void;
   state: { gatewayRevision: string };
@@ -77,32 +87,36 @@ function argvFor(input: JobInput): string[] {
     .map((slot) => ("literal" in slot ? slot.literal : String(input[slot.input])));
 }
 
-/** Canonical POSIX ustar, as `JobOutputStore.seal` writes it: one file, then two zero blocks. */
-function ustar(name: string, body: string): Buffer {
-  const content = Buffer.from(body, "utf8");
-  const header = Buffer.alloc(512);
-  header.write(name, 0, 100, "utf8");
-  const octal = (value: number, offset: number, length: number) =>
-    header.write(`${value.toString(8).padStart(length - 1, "0")}\0`, offset, length, "ascii");
-  octal(0o600, 100, 8);
-  octal(0, 108, 8);
-  octal(0, 116, 8);
-  octal(content.length, 124, 12);
-  octal(0, 136, 12);
-  header.fill(32, 148, 156);
-  header[156] = 0x30;
-  header.write("ustar\0", 257, 6, "ascii");
-  header.write("00", 263, 2, "ascii");
-  let sum = 0;
-  for (const byte of header) sum += byte;
-  header.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, 8, "ascii");
-  const padding = Buffer.alloc((512 - (content.length % 512)) % 512);
-  return Buffer.concat([header, content, padding, Buffer.alloc(1024)]);
+/** Canonical POSIX ustar, as `JobOutputStore.seal` writes it: lexical files, two zero blocks. */
+function ustar(members: readonly (readonly [string, string])[]): Buffer {
+  const blocks: Buffer[] = [];
+  for (const [name, body] of members) {
+    const content = Buffer.from(body, "utf8");
+    const header = Buffer.alloc(512);
+    header.write(name, 0, 100, "utf8");
+    const octal = (value: number, offset: number, length: number) =>
+      header.write(`${value.toString(8).padStart(length - 1, "0")}\0`, offset, length, "ascii");
+    octal(0o600, 100, 8);
+    octal(0, 108, 8);
+    octal(0, 116, 8);
+    octal(content.length, 124, 12);
+    octal(0, 136, 12);
+    header.fill(32, 148, 156);
+    header[156] = 0x30;
+    header.write("ustar\0", 257, 6, "ascii");
+    header.write("00", 263, 2, "ascii");
+    let sum = 0;
+    for (const byte of header) sum += byte;
+    header.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, 8, "ascii");
+    blocks.push(header, content, Buffer.alloc((512 - (content.length % 512)) % 512));
+  }
+  return Buffer.concat([...blocks, Buffer.alloc(1024)]);
 }
 
 // A transcript in the shape omp 18.1.14 writes under --session-dir.
 const sessionId = "01a0a008-88ed-7186-b28f-6356df68f8ed";
-const transcriptName = `2026-09-14T13-08-29-037Z_${sessionId}.jsonl`;
+const stem = `2026-09-14T13-08-29-037Z_${sessionId}`;
+const transcriptName = `${stem}.jsonl`;
 function assistant(text: string, tokens: number, cost: number): string {
   return JSON.stringify({
     type: "message",
@@ -142,6 +156,14 @@ const transcript = [
   JSON.stringify({ type: "custom", customType: "session_exit", data: { kind: "normal" } }),
   "",
 ].join("\n");
+const receipt = {
+  sessionId,
+  sessionPath: `${SESSION_GUEST_PATH}/${transcriptName}`,
+  model: "anthropic/claude-sonnet-4-5",
+  finalMessage: "the repository builds one plugin",
+  usage: { input: 30, output: 60, cacheRead: 2, cacheWrite: 4, cost: 0.75 },
+  exitCode: 0,
+};
 
 function publicJob(
   jobId: string,
@@ -159,7 +181,7 @@ function publicJob(
     ...pins,
     inputDigest,
     state,
-    nextInputSeq: null,
+    nextInputSeq: overrides.nextInputSeq ?? null,
     result:
       state === "exited"
         ? {
@@ -199,7 +221,12 @@ function fixture(): Fixture {
   const storage = new Map<string, string>();
   const archives = new Map<string, Buffer>();
   const jobs = new Map<string, PublicJob>();
+  const doors = new Map<string, string>();
   const posted: PostedJob[] = [];
+  const sent: SentInput[] = [];
+  const cancelled: string[] = [];
+  const refuseInput = { value: false };
+  const refuseStart = { value: false };
   const state = { gatewayRevision: "1" };
   let ids = 0;
   const consents: { node: string; cap: Cap; enabled: boolean; revision: string }[] = [];
@@ -241,6 +268,17 @@ function fixture(): Fixture {
       purgeRequested: false,
     },
   });
+  /** Replace a job, keeping the identity and any sealed outputs the run already has. */
+  const advance = (jobId: string, overrides: JobOverrides) => {
+    const job = jobs.get(jobId)!;
+    const next = publicJob(jobId, job.operationId, job.inputDigest, {
+      door: doors.get(jobId)!,
+      ...overrides,
+    });
+    if (next.result && job.result) next.result.outputs = job.result.outputs;
+    jobs.set(jobId, next);
+    return next;
+  };
   const ctx = {
     pluginId: OMP_PLUGIN_ID,
     auth: {
@@ -277,15 +315,29 @@ function fixture(): Fixture {
         posted.push(args);
         const door =
           args.operationId === INVENTORY_OPERATION_ID ? "startInventory" : "runSession";
-        const job = publicJob(args.jobId, args.operationId, digestOf(args.input), { door });
-        jobs.set(args.jobId, job);
-        return job;
+        doors.set(args.jobId, door);
+        // The hub admits a job; only the owner starts it, and only then is stdin open.
+        const queued = publicJob(args.jobId, args.operationId, digestOf(args.input), {
+          door,
+          state: door === "runSession" ? "queued" : "exited",
+        });
+        jobs.set(args.jobId, queued);
+        return queued;
       },
-      status: async ({ jobId }: { jobId: string }) => {
-        const job = jobs.get(jobId);
+      status: async (node: JobNode) => {
+        const job = jobs.get(node.jobId);
         if (!job) throw new Error("unknown job");
-        return job;
+        if (job.state !== "queued") return job;
+        if (refuseStart.value) return advance(node.jobId, { state: "refused" });
+        return advance(node.jobId, { state: "started", nextInputSeq: 0 });
       },
+      input: async (args: SentInput) => {
+        if (refuseInput.value) throw new Error("job_input_not_open");
+        sent.push(args);
+        advance(args.node.jobId, { state: "exited" });
+        return { accepted: true as const };
+      },
+      cancel: async (node: JobNode) => void cancelled.push(node.jobId),
       output: async (args: {
         node: { jobId: string; outputId: string };
         offset: number;
@@ -356,6 +408,10 @@ function fixture(): Fixture {
       rootHandlers[door.slice(OMP_PLUGIN_ID.length + 1)]!(ctx, input),
     ),
     posted,
+    sent,
+    cancelled,
+    refuseInput,
+    refuseStart,
     /** Attach a sealed transcript to the job's declared `session` output. */
     seal(jobId, archive) {
       const job = jobs.get(jobId)!;
@@ -371,12 +427,7 @@ function fixture(): Fixture {
         },
       ];
     },
-    amend(jobId, overrides) {
-      const job = jobs.get(jobId)!;
-      const next = publicJob(jobId, job.operationId, job.inputDigest, overrides);
-      if (next.result && job.result) next.result.outputs = job.result.outputs;
-      jobs.set(jobId, next);
-    },
+    amend: advance,
     state,
   };
 }
@@ -395,9 +446,15 @@ async function run(f: Fixture): Promise<PublicJob> {
   return job;
 }
 
-test("the launch operation declares a bound session output and a one-shot argv variant", () => {
+test("the launch operation leases a bounded run directory and a one-shot argv variant", () => {
   expect(launch.outputs).toEqual([SESSION_OUTPUT_NAME]);
-  expect(machine.locations[SESSIONS_LOCATION_ID]?.guestPath).toBe(SESSIONS_GUEST_PATH);
+  // A named output must lease a bounded tmpfs, which only the runtime anchor provides.
+  expect(machine.locations[RUNS_LOCATION_ID]?.anchor).toBe("runtime");
+  expect(
+    launch.locations.some(
+      (location) => location.locationId === RUNS_LOCATION_ID && location.access === "write",
+    ),
+  ).toBe(true);
   // Reviewed terminal placement keeps the exact command line it had.
   expect(argvFor({ hasPrompt: true, planYolo: false, prompt: "hi" })).toEqual([
     "--session-dir",
@@ -408,18 +465,12 @@ test("the launch operation declares a bound session output and a one-shot argv v
     "hi",
   ]);
   expect(
-    argvFor({
-      hasPrompt: true,
-      planYolo: true,
-      prompt: "hi",
-      oneShot: true,
-      sessionDir: `${SESSIONS_GUEST_PATH}/job-1`,
-    }),
+    argvFor({ hasPrompt: true, planYolo: true, prompt: "hi", oneShot: true }),
   ).toEqual([
     "--session-dir",
     SESSIONS_GUEST_PATH,
     "--session-dir",
-    `${SESSIONS_GUEST_PATH}/job-1`,
+    SESSION_GUEST_PATH,
     "-p",
     "--mode",
     "json",
@@ -440,17 +491,17 @@ test("runSession posts the reviewed launch as a one-shot job that retains its ow
   expect(job.operationId).toBe(LAUNCH_OPERATION_ID);
   expect(job.authority.origin.door).toBe(`${OMP_PLUGIN_ID}.runSession`);
   expect(posted.outputs).toEqual([
-    { name: SESSION_OUTPUT_NAME, locationId: SESSIONS_LOCATION_ID, components: [posted.jobId] },
+    { name: SESSION_OUTPUT_NAME, locationId: RUNS_LOCATION_ID, components: [posted.jobId] },
   ]);
   expect(posted.input.oneShot).toBe(true);
   expect(posted.input.hasPrompt).toBe(true);
-  expect(posted.input.sessionDir).toBe(`${SESSIONS_GUEST_PATH}/${posted.jobId}`);
+  expect(posted.input.sessionDir).toBeUndefined();
   expect(job.inputDigest).toBe(digestOf(posted.input));
   expect(argvFor(posted.input)).toEqual([
     "--session-dir",
     SESSIONS_GUEST_PATH,
     "--session-dir",
-    `${SESSIONS_GUEST_PATH}/${posted.jobId}`,
+    SESSION_GUEST_PATH,
     "-p",
     "--mode",
     "json",
@@ -459,6 +510,46 @@ test("runSession posts the reviewed launch as a one-shot job that retains its ow
     "--",
     session.prompt,
   ]);
+});
+
+test("runSession closes the one-shot's stdin once, after the owner has started it", async () => {
+  const f = fixture();
+  const job = await run(f);
+  expect(f.sent).toHaveLength(1);
+  expect(f.sent[0]).toMatchObject({
+    node: {
+      kind: "job",
+      machineId: target.machineId,
+      operationId: LAUNCH_OPERATION_ID,
+      jobId: job.jobId,
+    },
+    seq: 0,
+    data: "",
+    eof: true,
+  });
+  expect(f.cancelled).toEqual([]);
+});
+
+test("runSession cancels and refuses a session whose stdin it cannot close", async () => {
+  const refused = fixture();
+  refused.refuseInput.value = true;
+  const reviewDigest = await reviewDigestOf(refused.client);
+  expect(await refused.client.call("runSession", { ...session, reviewDigest })).toEqual({
+    refused: "omp_session_input_unavailable",
+  });
+  expect(refused.posted).toHaveLength(1);
+  expect(refused.cancelled).toEqual([refused.posted[0]!.jobId]);
+
+  const stalled = fixture();
+  stalled.refuseStart.value = true;
+  expect(
+    await stalled.client.call("runSession", {
+      ...session,
+      reviewDigest: await reviewDigestOf(stalled.client),
+    }),
+  ).toEqual({ refused: "omp_session_input_unavailable" });
+  expect(stalled.sent).toEqual([]);
+  expect(stalled.cancelled).toEqual([stalled.posted[0]!.jobId]);
 });
 
 test("runSession refuses a stale review", async () => {
@@ -500,17 +591,43 @@ test("runSession refuses a session with no prompt, which could never end by itse
 test("readSession summarises the retained transcript of a finished run", async () => {
   const f = fixture();
   const job = await run(f);
-  f.seal(job.jobId, ustar(transcriptName, transcript));
+  f.seal(job.jobId, ustar([[transcriptName, transcript]]));
   const read = await f.client.call("readSession", { ...target, jobId: job.jobId });
   if ("refused" in read) throw new Error(read.refused);
   expect(read.job.jobId).toBe(job.jobId);
-  expect(read.session).toEqual({
-    sessionId,
-    sessionPath: `${SESSIONS_GUEST_PATH}/${job.jobId}/${transcriptName}`,
-    model: "anthropic/claude-sonnet-4-5",
-    finalMessage: "the repository builds one plugin",
-    usage: { input: 30, output: 60, cacheRead: 2, cacheWrite: 4, cost: 0.75 },
-    exitCode: 0,
+  expect(read.session).toEqual(receipt);
+});
+
+test("readSession reads past the artifact directory omp writes beside the transcript", async () => {
+  const f = fixture();
+  const job = await run(f);
+  // A tool-using run roots its artifact store at `<transcript without .jsonl>/`.
+  f.seal(
+    job.jobId,
+    ustar([
+      [`${stem}/0.bash.log`, "$ ls\nplugins\n"],
+      [`${stem}/1.eval.log`, "ok\n"],
+      [`${stem}/__advisor.jsonl`, '{"type":"note"}\n'],
+      [transcriptName, transcript],
+    ]),
+  );
+  const read = await f.client.call("readSession", { ...target, jobId: job.jobId });
+  if ("refused" in read) throw new Error(read.refused);
+  expect(read.session).toEqual(receipt);
+});
+
+test("readSession refuses an archive holding more than one transcript", async () => {
+  const f = fixture();
+  const job = await run(f);
+  f.seal(
+    job.jobId,
+    ustar([
+      [transcriptName, transcript],
+      ["2026-09-14T14-00-00-000Z_01a0a009-0000-7000-8000-000000000000.jsonl", transcript],
+    ]),
+  );
+  expect(await f.client.call("readSession", { ...target, jobId: job.jobId })).toEqual({
+    refused: "omp_invalid_session",
   });
 });
 
@@ -526,7 +643,7 @@ test("readSession refuses an unfinished run", async () => {
 test("readSession refuses a run that failed", async () => {
   const f = fixture();
   const job = await run(f);
-  f.seal(job.jobId, ustar(transcriptName, transcript));
+  f.seal(job.jobId, ustar([[transcriptName, transcript]]));
   f.amend(job.jobId, { exitCode: 3 });
   expect(await f.client.call("readSession", { ...target, jobId: job.jobId })).toEqual({
     refused: "omp_result_unavailable",
@@ -536,7 +653,7 @@ test("readSession refuses a run that failed", async () => {
 test("readSession refuses a transcript that does not name the session it reports", async () => {
   const f = fixture();
   const job = await run(f);
-  f.seal(job.jobId, ustar("2026-09-14T13-08-29-037Z_another-session.jsonl", transcript));
+  f.seal(job.jobId, ustar([["2026-09-14T13-08-29-037Z_another-session.jsonl", transcript]]));
   expect(await f.client.call("readSession", { ...target, jobId: job.jobId })).toEqual({
     refused: "omp_invalid_session",
   });
@@ -545,7 +662,7 @@ test("readSession refuses a transcript that does not name the session it reports
 test("readSession refuses a job another door placed", async () => {
   const f = fixture();
   const job = await run(f);
-  f.seal(job.jobId, ustar(transcriptName, transcript));
+  f.seal(job.jobId, ustar([[transcriptName, transcript]]));
   f.amend(job.jobId, { door: "prepareSession" });
   expect(await f.client.call("readSession", { ...target, jobId: job.jobId })).toEqual({
     refused: "omp_result_unavailable",

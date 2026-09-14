@@ -48,11 +48,15 @@ export const VALIDATE_WORKSPACE_OPERATION_ID = `${OMP_PLUGIN_ID}.validate-worksp
 export const INVENTORY_OPERATION_ID = `${OMP_PLUGIN_ID}.inventory`;
 export const BENCHMARK_OPERATION_ID = `${OMP_PLUGIN_ID}.benchmark`;
 export const LAUNCH_OPERATION_ID = `${OMP_PLUGIN_ID}.launch`;
-export const SESSIONS_LOCATION_ID = `${OMP_PLUGIN_ID}.sessions`;
-/** The launch operation's mounted sessions location, as the manifest's argv spells it. */
-export const SESSIONS_GUEST_PATH = "/home/job/omp-sessions";
 /** A bound output name, never the implicit `stdout`/`stderr` streams. */
 export const SESSION_OUTPUT_NAME = "session";
+/** Named outputs must lease a bounded tmpfs, so the one-shot writes to its own
+ * runtime-anchored location rather than the persistent sessions directory. */
+export const RUNS_LOCATION_ID = `${OMP_PLUGIN_ID}.runs`;
+/** Where the owner mounts this job's `session` lease, as the manifest's argv spells it. */
+export const SESSION_GUEST_PATH = `/outputs/${SESSION_OUTPUT_NAME}`;
+/** The launch operation's persistent sessions location: the interactive path's own. */
+export const SESSIONS_GUEST_PATH = "/home/job/omp-sessions";
 export const revision = z
   .number()
   .int()

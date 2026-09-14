@@ -38,6 +38,8 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
 // Replacement characters keep malformed bytes out of the receipt without throwing here.
 const decoder = new TextDecoder("utf-8", { fatal: false });
 const BLOCK = 512;
+/** The native output store's own walk bound; an archive past it is not one it sealed. */
+const MAX_ARCHIVE_ENTRIES = 10000;
 const transcriptName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.jsonl$/;
 
 function field(header: Uint8Array, start: number, length: number): string {
@@ -50,19 +52,38 @@ function octal(header: Uint8Array, start: number, length: number): number {
   if (!/^[0-7]{1,11}$/.test(raw)) invalid();
   return Number.parseInt(raw, 8);
 }
-/** Canonical POSIX ustar as the native output store seals it: one regular file, no prefix. */
-function soleMember(archive: Uint8Array): { name: string; body: Uint8Array } {
+/**
+ * Canonical POSIX ustar as the native output store seals it, walked whole. omp roots a
+ * per-session artifact store at `<transcript without .jsonl>/`, so a run that used a tool
+ * seals that directory's files beside the transcript; only the transcript is the receipt's.
+ */
+function transcript(archive: Uint8Array): { name: string; body: Uint8Array } {
   if (archive.byteLength < BLOCK * 3 || archive.byteLength % BLOCK !== 0) invalid();
-  const header = archive.subarray(0, BLOCK);
-  if (header[156] !== 0x30 || header[345] !== 0 || field(header, 257, 6) !== "ustar")
-    invalid();
-  const name = field(header, 0, 100);
-  const size = octal(header, 124, 12);
-  const padded = Math.ceil(size / BLOCK) * BLOCK;
-  if (size < 1 || !transcriptName.test(name) || BLOCK + padded + BLOCK * 2 !== archive.byteLength)
-    invalid();
-  if (archive.subarray(BLOCK + padded).some((byte) => byte !== 0)) invalid();
-  return { name, body: archive.subarray(BLOCK, BLOCK + size) };
+  let found: { name: string; body: Uint8Array } | null = null;
+  let offset = 0;
+  let entries = 0;
+  while (offset + BLOCK <= archive.byteLength) {
+    const header = archive.subarray(offset, offset + BLOCK);
+    if (header.every((byte) => byte === 0)) break;
+    if ((entries += 1) > MAX_ARCHIVE_ENTRIES) invalid();
+    if (header[156] !== 0x30 || field(header, 257, 6) !== "ustar") invalid();
+    const prefix = field(header, 345, 155);
+    const name = field(header, 0, 100);
+    const path = prefix ? `${prefix}/${name}` : name;
+    const size = octal(header, 124, 12);
+    const padded = Math.ceil(size / BLOCK) * BLOCK;
+    if (offset + BLOCK + padded > archive.byteLength) invalid();
+    // Only the archive root holds the transcript; `<stem>/…` is omp's artifact store.
+    if (transcriptName.test(path)) {
+      if (found || size < 1) invalid();
+      found = { name: path, body: archive.subarray(offset + BLOCK, offset + BLOCK + size) };
+    }
+    offset += BLOCK + padded;
+  }
+  // `seal` closes with exactly two zero blocks; anything else is not an archive it wrote.
+  if (!found || archive.byteLength - offset !== BLOCK * 2) invalid();
+  if (archive.subarray(offset).some((byte) => byte !== 0)) invalid();
+  return found;
 }
 
 // OMP 18.1.14 session records. Unlisted keys are the agent's business, not the receipt's.
@@ -106,7 +127,7 @@ export function parseSessionArchive(
   sessionDirectory: string,
   exitCode: number,
 ): SessionReceipt {
-  const member = soleMember(archive);
+  const member = transcript(archive);
   let sessionId: string | null = null;
   let model: string | null = null;
   let finalMessage = "";

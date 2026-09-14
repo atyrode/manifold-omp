@@ -352,7 +352,7 @@
             }
           },
           {
-            "input": "sessionDir",
+            "literal": "/outputs/session",
             "when": {
               "input": "oneShot",
               "equals": true
@@ -439,11 +439,6 @@
           "oneShot": {
             "type": "boolean",
             "required": false
-          },
-          "sessionDir": {
-            "type": "string",
-            "required": false,
-            "maxLength": 4096
           }
         },
         "environment": {
@@ -519,6 +514,10 @@
           {
             "locationId": "atyrode.omp.sessions",
             "access": "write"
+          },
+          {
+            "locationId": "atyrode.omp.runs",
+            "access": "write"
           }
         ],
         "outputs": [
@@ -553,6 +552,15 @@
         "revision": "1",
         "kind": "directory",
         "guestPath": "/home/job/omp-sessions"
+      },
+      "atyrode.omp.runs": {
+        "anchor": "runtime",
+        "components": [
+          "omp",
+          "runs"
+        ],
+        "revision": "1",
+        "kind": "directory"
       }
     }
   },
