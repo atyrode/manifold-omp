@@ -389,12 +389,12 @@ export const rootActionSchemas = {
     input: TargetSchema.extend({ jobId: id }),
     result: z.strictObject({ job: PublicJobSchema }),
   },
-  "sessions.list": {
+  listSessions: {
     input: z.strictObject({ machineId: id })
       .describe("List existing OMP transcripts on the admitted machine: bounded title/header metadata only, never message bodies. Requires operator authority; no Agent credential."),
     result: OmpSessionInventorySchema,
   },
-  "sessions.resume": {
+  resumeSession: {
     input: ResumeSessionInputSchema,
     result: PreparedResumeSessionSchema,
   },

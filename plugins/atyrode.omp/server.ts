@@ -51,8 +51,8 @@ const implementations: RootHandlers = {
   runSession,
   readSession,
   cancelSession,
-  "sessions.list": listSessions,
-  "sessions.resume": resumeSession,
+  listSessions,
+  resumeSession,
 };
 const workspaceObservationCaps: readonly Cap[] = ["machines:run", "jobs:read"];
 // The write door may execute either mode; Native still rechecks the exact operation's refs.
@@ -99,8 +99,8 @@ const delegates: Record<RootAction, readonly Cap[]> = {
   readSession: ["machines:run", "jobs:read"],
   // Ending a run needs no observation of the machine, only the job's own two verbs.
   cancelSession: ["jobs:read", "jobs:cancel"],
-  "sessions.list": ["machines:run", "jobs:read", "jobs:cancel", "locations:read"],
-  "sessions.resume": [...observedRuntimeCaps, "jobs:cancel", "locations:read"],
+  listSessions: ["machines:run", "jobs:read", "jobs:cancel", "locations:read"],
+  resumeSession: [...observedRuntimeCaps, "jobs:cancel", "locations:read"],
 };
 const writes: Partial<Record<RootAction, true>> = {
   writeDefaults: true,
@@ -132,10 +132,10 @@ const plugin = {
     defineServerAction({
       name,
       title: name.replace(/([A-Z])/g, " $1"),
-      caps: name.startsWith("sessions.") ? ["machines:run"] : [writes[name] ? "containers:write" : "containers:read"],
+      caps: name === "listSessions" || name === "resumeSession" ? ["machines:run"] : [writes[name] ? "containers:write" : "containers:read"],
       delegates: delegates[name],
       scope:
-        name === "readDefaults" || name === "writeDefaults" || name.startsWith("sessions.")
+        name === "readDefaults" || name === "writeDefaults" || name === "listSessions" || name === "resumeSession"
           ? "workspace"
           : "container",
       trace: "opaque",

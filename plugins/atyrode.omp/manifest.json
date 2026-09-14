@@ -2,7 +2,7 @@
   "id": "atyrode.omp",
   "version": "0.1.0",
   "title": "omp",
-  "description": "Independent OMP execution over governed native Manifold resources. Operator doors atyrode.omp.sessions.list and atyrode.omp.sessions.resume expose body-free transcript metadata and prepare a machine-only interactive terminal runtime, without an Agent. Omitted resume knobs use current defaults and enabled broker credentials for configured providers; placement independently authorizes the container and terminal.",
+  "description": "Independent OMP execution over governed native Manifold resources. Operator doors atyrode.omp.listSessions and atyrode.omp.resumeSession expose body-free transcript metadata and prepare a machine-only interactive terminal runtime, without an Agent. Omitted resume knobs use current defaults and enabled broker credentials for configured providers; placement independently authorizes the container and terminal.",
   "capabilities": [
     "containers:read",
     "containers:write",

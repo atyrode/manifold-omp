@@ -54,7 +54,7 @@ function launchFixture() {
         job = PublicJobSchema.parse({
           jobId, machineId, operationId, pluginId: OMP_PLUGIN_ID, ...pins,
           inputDigest: digestOf({}), state: "exited", nextInputSeq: null,
-          authority: { origin: { kind: "action", traceId: "fixture-trace", door: `${OMP_PLUGIN_ID}.sessions.list` },
+          authority: { origin: { kind: "action", traceId: "fixture-trace", door: `${OMP_PLUGIN_ID}.listSessions` },
             requester: "fixture-sponsor", executor: null, decision: null },
           result: { jobId, requestDigest: "c".repeat(64), ownerId: "fixture-owner", ownerGeneration: 1,
             state: "exited", exitCode: 0, reason: null, startedAt: 1, finishedAt: 2, usage: null,

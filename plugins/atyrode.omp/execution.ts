@@ -764,8 +764,8 @@ export async function prepareHarnessSession(
 
 export async function prepareInteractiveResume(
   ctx: OmpContext,
-  args: ActionInput<"sessions.resume">,
-): Promise<ActionResult<"sessions.resume">> {
+  args: ActionInput<"resumeSession">,
+): Promise<ActionResult<"resumeSession">> {
   // An optional destination is checked when supplied, but never bound into the
   // descriptor. The native terminal placement door must authorize its own target.
   if (args.containerId !== undefined)

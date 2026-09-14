@@ -57,12 +57,12 @@ function authorizeOperator(ctx: OmpContext): void {
   if (!ctx.auth.isRoot || ctx.auth.containerScope !== null) throw new OmpRefusal("session_owner_required");
 }
 
-export async function listSessions(ctx: OmpContext, args: ActionInput<"sessions.list">): Promise<ActionResult<"sessions.list">> {
+export async function listSessions(ctx: OmpContext, args: ActionInput<"listSessions">): Promise<ActionResult<"listSessions">> {
   authorizeOperator(ctx);
   return sessionInventory(ctx, args.machineId);
 }
 
-export async function resumeSession(ctx: OmpContext, args: ActionInput<"sessions.resume">): Promise<ActionResult<"sessions.resume">> {
+export async function resumeSession(ctx: OmpContext, args: ActionInput<"resumeSession">): Promise<ActionResult<"resumeSession">> {
   authorizeOperator(ctx);
   if (!(await sessionInventory(ctx, args.machineId)).some(session => session.id === args.sessionId))
     throw new OmpRefusal("session_unavailable");
