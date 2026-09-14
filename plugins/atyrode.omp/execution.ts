@@ -15,6 +15,12 @@ import {
   BenchmarkReceiptSchema,
   PROBE_MODEL_LIMIT,
   BenchmarkInputSchema,
+  SESSION_ARCHIVE_LIMIT,
+  SESSION_GUEST_PATH,
+  SESSION_OPERATION_ID,
+  SESSION_OUTPUT_NAME,
+  RUNS_LOCATION_ID,
+  parseSessionArchive,
   ProbeIdentitiesSchema,
   type ActionInput,
   type ActionResult,
@@ -33,6 +39,7 @@ import {
   digestOf,
   OmpRefusal,
   readJobResult,
+  readJobArchive,
   type OmpContext,
 } from "./machine-server.ts";
 import { effectiveOverlay, expectedDefaults } from "./state.ts";
@@ -72,7 +79,7 @@ const provenanceSchema = z.strictObject({
   accountPool: RuntimeAccountPoolSchema,
   broker: BrokerReferenceSchema,
   gateway: ServicePinSchema,
-  modelIdentities: ProbeIdentitiesSchema,
+  modelIdentities: ProbeIdentitiesSchema.nullable(),
   inventoryJobId: z.string().nullable(),
   candidates: BenchmarkInputSchema.nullable(),
 });
@@ -272,7 +279,13 @@ function checkJob(
   )
     throw new OmpRefusal("provenance_changed");
 }
-async function execute(ctx: OmpContext, jobId: string, provenance: Provenance) {
+type OutputBinding = { name: string; locationId: string; components: string[] };
+async function execute(
+  ctx: OmpContext,
+  jobId: string,
+  provenance: Provenance,
+  outputs: OutputBinding[] = [],
+) {
   // Retain the exact intended request before dispatch. A failed native dispatch cannot grant receipt access.
   if (
     !(await ctx.storage.compareAndSet(
@@ -289,7 +302,7 @@ async function execute(ctx: OmpContext, jobId: string, provenance: Provenance) {
       operationId: provenance.operationId,
       ...provenance.pins,
       input: provenance.input,
-      outputs: [],
+      outputs,
     }),
   );
   checkJob(job, provenance, jobId);
@@ -326,6 +339,7 @@ export async function readInventory(
   const provenance = await retainedProvenance(ctx, target, args.jobId);
   if (
     provenance.door !== "startInventory" ||
+    provenance.modelIdentities === null ||
     provenance.inventoryJobId !== null ||
     provenance.candidates !== null
   )
@@ -517,7 +531,7 @@ async function sessionPreparation(
       input,
     }),
   };
-  return { review, input };
+  return { review, input, broker: reference, gateway };
 }
 export async function reviewSession(
   ctx: OmpContext,
@@ -547,5 +561,101 @@ export async function prepareSession(
       ...latest.review.pins,
       input: latest.input,
     }),
+  };
+}
+/** The reviewed session's content, plus the pins of the operation that will run it. */
+async function oneShotPreparation(
+  ctx: OmpContext,
+  args: ActionInput<"runSession">,
+) {
+  const prepared = await sessionPreparation(ctx, args);
+  const current = await currentOperation(ctx, args.machineId, SESSION_OPERATION_ID);
+  return {
+    prepared,
+    pins: current.pins,
+    digest: digestOf({ review: prepared.review.reviewDigest, current }),
+  };
+}
+/**
+ * The reviewed session, placed as a governed job instead of a terminal. It runs on
+ * `atyrode.omp.session`, the one-shot sibling of `atyrode.omp.launch`: the same reviewed
+ * input and the same executable, but no stdin — so `omp -p` reads its prompt from argv
+ * and never waits on a pipe — and a bounded `session` output lease, which the owner
+ * mounts at `SESSION_GUEST_PATH`, that omp writes its transcript straight into.
+ *
+ * The caller's `reviewDigest` covers the session's content, which is placement-agnostic;
+ * the door covers the placement, by pinning the operation it posts across both
+ * preparations and recording it in the retained provenance.
+ */
+export async function runSession(
+  ctx: OmpContext,
+  args: ActionInput<"runSession">,
+): Promise<ActionResult<"runSession">> {
+  await authorizeTarget(ctx, args, true);
+  if (args.prompt.length === 0) throw new OmpRefusal("prompt_required");
+  const first = await oneShotPreparation(ctx, args);
+  if (first.prepared.review.reviewDigest !== args.reviewDigest)
+    throw new OmpRefusal("review_changed");
+  const jobId = await ctx.newId();
+  const latest = await oneShotPreparation(ctx, args);
+  if (latest.digest !== first.digest) throw new OmpRefusal("resources_changed");
+  const input = latest.prepared.input;
+  const provenance = provenanceSchema.parse({
+    target: latest.prepared.review.destination,
+    operationId: SESSION_OPERATION_ID,
+    door: "runSession",
+    requester: ctx.auth.principal.id,
+    pins: latest.pins,
+    input,
+    inputDigest: digestOf(input),
+    defaultsRevision: latest.prepared.review.defaultsRevision,
+    accountPool: latest.prepared.review.accountPool,
+    broker: latest.prepared.broker,
+    gateway: latest.prepared.gateway,
+    modelIdentities: null,
+    inventoryJobId: null,
+    candidates: null,
+  });
+  return execute(ctx, jobId, provenance, [
+    { name: SESSION_OUTPUT_NAME, locationId: RUNS_LOCATION_ID, components: [jobId] },
+  ]);
+}
+/**
+ * The run's own receipt. The `session` lease is created beneath `atyrode.omp.runs`, which
+ * every one-shot mounts writable, and the owner withholds a seal until every overlapping
+ * writer exits: a finished one-shot therefore answers `result_unavailable` while another
+ * one-shot that was alive when this lease was created is still running. Only one-shots
+ * hold that location — an operator's interactive terminal runs `atyrode.omp.launch`,
+ * which never mounts it, so a day-long terminal cannot withhold a receipt.
+ */
+export async function readSession(
+  ctx: OmpContext,
+  args: ActionInput<"readSession">,
+): Promise<ActionResult<"readSession">> {
+  const target = { containerId: args.containerId, machineId: args.machineId };
+  await authorizeTarget(ctx, target);
+  const provenance = await retainedProvenance(ctx, target, args.jobId);
+  if (
+    provenance.door !== "runSession" ||
+    provenance.modelIdentities !== null ||
+    provenance.inventoryJobId !== null ||
+    provenance.candidates !== null
+  )
+    throw new OmpRefusal("provenance_changed");
+  const result = await readJobArchive(
+    ctx,
+    args.machineId,
+    "session",
+    args.jobId,
+    "runSession",
+    SESSION_OUTPUT_NAME,
+    SESSION_ARCHIVE_LIMIT,
+  );
+  checkJob(result.job, provenance, args.jobId);
+  // A settled receipt read always carries a result; the exit code is the run's own.
+  const exitCode = result.job.result?.exitCode ?? 0;
+  return {
+    job: result.job,
+    session: parseSessionArchive(result.archive, SESSION_GUEST_PATH, exitCode),
   };
 }

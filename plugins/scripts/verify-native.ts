@@ -174,9 +174,11 @@ try {
     const session = { ...target, expectedDefaultsRevision: changed.revision, accountPool: {}, overlay: {}, prompt: "", planYolo: false };
     await refused("reviewSession", session);
     await refused("prepareSession", { ...session, reviewDigest: unreviewed });
+    await refused("runSession", { ...session, prompt: "verify", reviewDigest: unreviewed });
     await refused("startInventory", { ...target, expectedDefaultsRevision: changed.revision, accountPool: {} });
     const missingJob = randomUUID();
     await refused("readInventory", { ...target, jobId: missingJob });
+    await refused("readSession", { ...target, jobId: missingJob });
     await refused("startBenchmark", { ...target, inventoryJobId: missingJob, candidates: {
       schemaVersion: 1, inventoryObservedAt: 0, ompVersion: OMP_VERSION,
       candidates: [{ key: "offline", provider: "fixture", id: "offline", api: "fixture" }],
@@ -334,7 +336,9 @@ try {
     phase = "packed-accounts-installation";
     await waitFor(async () => {
       const current = JobDeploymentSchema.parse(await ownerAction(hub, "engine.jobs.readDeployment", { deploymentId: deploymentRequest.deploymentId }));
-      check(!current.targets.some(value => ["refused", "needs_review", "cancelled", "superseded"].includes(value.state)), "packed-deployment-refused");
+      // A refusal that does not name itself costs a whole CI round trip to diagnose.
+      const stuck = current.targets.find(value => ["refused", "needs_review", "cancelled", "superseded"].includes(value.state));
+      check(!stuck, `packed-deployment-${`${stuck?.state}-${stuck?.reason ?? "unstated"}`.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/-+$/, "").slice(0, 64)}`);
       return current.targets.every(value => value.state === "ready");
     }, 480_000, 100);
     const ready = await describeAccounts();

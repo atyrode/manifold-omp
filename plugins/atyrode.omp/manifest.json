@@ -486,6 +486,168 @@
           "outputBytes": 1073741824
         },
         "stdin": true
+      },
+      "atyrode.omp.session": {
+        "argv": [
+          {
+            "literal": "--session-dir"
+          },
+          {
+            "literal": "/outputs/session"
+          },
+          {
+            "literal": "--config"
+          },
+          {
+            "literal": "/home/job/.omp/agent/config.yml"
+          },
+          {
+            "literal": "-p"
+          },
+          {
+            "literal": "--mode"
+          },
+          {
+            "literal": "json"
+          },
+          {
+            "literal": "--plan-yolo",
+            "when": {
+              "input": "planYolo",
+              "equals": true
+            }
+          },
+          {
+            "literal": "--",
+            "when": {
+              "input": "hasPrompt",
+              "equals": true
+            }
+          },
+          {
+            "input": "prompt",
+            "when": {
+              "input": "hasPrompt",
+              "equals": true
+            }
+          }
+        ],
+        "input": {
+          "models": {
+            "type": "string",
+            "required": true,
+            "maxLength": 65536
+          },
+          "config": {
+            "type": "string",
+            "required": true,
+            "maxLength": 65536
+          },
+          "accountPool": {
+            "type": "string",
+            "required": true,
+            "maxLength": 65536
+          },
+          "hasPrompt": {
+            "type": "boolean",
+            "required": true
+          },
+          "prompt": {
+            "type": "string",
+            "required": true,
+            "maxLength": 16384
+          },
+          "planYolo": {
+            "type": "boolean",
+            "required": true
+          }
+        },
+        "environment": {
+          "SSL_CERT_FILE": "/runtime/bin/ca-certificates",
+          "GIT_SSL_CAINFO": "/runtime/bin/ca-certificates"
+        },
+        "runtimeTools": [
+          "omp",
+          "bun",
+          "ca-certificates",
+          "system",
+          "development"
+        ],
+        "executable": {
+          "runtimeTool": "omp"
+        },
+        "inputFiles": {
+          "models": {
+            "input": "models",
+            "homePath": [
+              ".omp",
+              "agent",
+              "models.yml"
+            ],
+            "jsonValues": [
+              {
+                "path": [
+                  "providers",
+                  "*",
+                  "baseUrl"
+                ],
+                "serviceId": "omp",
+                "value": "url"
+              },
+              {
+                "path": [
+                  "providers",
+                  "*",
+                  "apiKey"
+                ],
+                "serviceId": "omp",
+                "value": "bearer"
+              }
+            ]
+          },
+          "config": {
+            "input": "config",
+            "homePath": [
+              ".omp",
+              "agent",
+              "config.yml"
+            ]
+          }
+        },
+        "services": [
+          {
+            "serviceId": "omp",
+            "revision": "1",
+            "operationIds": [
+              "models",
+              "stream"
+            ]
+          }
+        ],
+        "workingDirectory": {
+          "locationId": "atyrode.omp.workspace"
+        },
+        "locations": [
+          {
+            "locationId": "atyrode.omp.workspace",
+            "access": "write"
+          },
+          {
+            "locationId": "atyrode.omp.runs",
+            "access": "write"
+          }
+        ],
+        "outputs": [
+          "session"
+        ],
+        "network": "host",
+        "limits": {
+          "timeoutMs": 86400000,
+          "memoryBytes": 8589934592,
+          "processes": 512,
+          "outputBytes": 1073741824
+        },
+        "stdin": false
       }
     },
     "locations": {
@@ -507,6 +669,15 @@
         "revision": "1",
         "kind": "directory",
         "guestPath": "/home/job/omp-sessions"
+      },
+      "atyrode.omp.runs": {
+        "anchor": "runtime",
+        "components": [
+          "omp",
+          "runs"
+        ],
+        "revision": "1",
+        "kind": "directory"
       }
     }
   },

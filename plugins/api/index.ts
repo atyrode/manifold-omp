@@ -20,8 +20,10 @@ import {
   BenchmarkReceiptSchema,
 } from "./probe.ts";
 import { PermittedUsageSnapshotSchema } from "./usage.ts";
+import { SessionReceiptSchema } from "./session.ts";
 export * from "./contracts.ts";
 export * from "./probe.ts";
+export * from "./session.ts";
 export {
   DeploymentProgressSchema,
   PublicJobSchema,
@@ -46,6 +48,16 @@ export const VALIDATE_WORKSPACE_OPERATION_ID = `${OMP_PLUGIN_ID}.validate-worksp
 export const INVENTORY_OPERATION_ID = `${OMP_PLUGIN_ID}.inventory`;
 export const BENCHMARK_OPERATION_ID = `${OMP_PLUGIN_ID}.benchmark`;
 export const LAUNCH_OPERATION_ID = `${OMP_PLUGIN_ID}.launch`;
+/** The one-shot sibling of `launch`: no stdin, its own bounded output lease. */
+export const SESSION_OPERATION_ID = `${OMP_PLUGIN_ID}.session`;
+/** A bound output name, never the implicit `stdout`/`stderr` streams. */
+export const SESSION_OUTPUT_NAME = "session";
+/** Named outputs lease a bounded tmpfs, which only the runtime anchor provides. */
+export const RUNS_LOCATION_ID = `${OMP_PLUGIN_ID}.runs`;
+/** Where the owner mounts this job's `session` lease, as the manifest's argv spells it. */
+export const SESSION_GUEST_PATH = `/outputs/${SESSION_OUTPUT_NAME}`;
+/** The launch operation's persistent sessions location: the interactive path's own. */
+export const SESSIONS_GUEST_PATH = "/home/job/omp-sessions";
 export const revision = z
   .number()
   .int()
@@ -311,6 +323,18 @@ export const rootActionSchemas = {
   prepareSession: {
     input: SessionInputSchema.extend({ reviewDigest: digest }),
     result: PreparedSessionSchema,
+  },
+  /** The same reviewed session, placed as a governed one-shot job instead of a terminal. */
+  runSession: {
+    input: SessionInputSchema.extend({ reviewDigest: digest }),
+    result: PublicJobSchema,
+  },
+  readSession: {
+    input: TargetSchema.extend({ jobId: id }),
+    result: z.strictObject({
+      job: PublicJobSchema,
+      session: SessionReceiptSchema,
+    }),
   },
 } as const;
 export const accountActionSchemas = {
