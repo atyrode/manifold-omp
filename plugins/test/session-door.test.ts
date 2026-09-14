@@ -16,6 +16,7 @@ import {
   type ActionInput,
   type ActionReply,
   type OmpAction,
+  type JobInputBinding,
   type PublicJob,
 } from "../api/index.ts";
 import { digestOf, type OmpContext } from "../atyrode.omp/machine-server.ts";
@@ -29,11 +30,13 @@ type PostedJob = {
   operationId: string;
   input: JobInput;
   outputs: { name: string; locationId: string; components: string[] }[];
+  inputs?: JobInputBinding[];
 };
 type JobOverrides = {
   state?: "exited" | "started";
   exitCode?: number | null;
   door?: string;
+  inputs?: JobInputBinding[];
 };
 interface OmpClient {
   call<K extends OmpAction>(name: K, input: ActionInput<K>): Promise<ActionReply<K>>;
@@ -175,6 +178,7 @@ function publicJob(
     pluginId: OMP_PLUGIN_ID,
     ...pins,
     inputDigest,
+    ...(overrides.inputs === undefined ? {} : { inputs: overrides.inputs }),
     state,
     nextInputSeq: null,
     result:
@@ -217,6 +221,7 @@ function fixture(): Fixture {
   const archives = new Map<string, Buffer>();
   const jobs = new Map<string, PublicJob>();
   const doors = new Map<string, string>();
+  const bound = new Map<string, JobInputBinding[] | undefined>();
   const posted: PostedJob[] = [];
   const cancelled: string[] = [];
   const state = { gatewayRevision: "1" };
@@ -265,6 +270,7 @@ function fixture(): Fixture {
     const job = jobs.get(jobId)!;
     const next = publicJob(jobId, job.operationId, job.inputDigest, {
       door: doors.get(jobId)!,
+      ...(bound.get(jobId) === undefined ? {} : { inputs: bound.get(jobId)! }),
       ...overrides,
     });
     if (next.result && job.result) next.result.outputs = job.result.outputs;
@@ -308,7 +314,12 @@ function fixture(): Fixture {
         const door =
           args.operationId === INVENTORY_OPERATION_ID ? "startInventory" : "runSession";
         doors.set(args.jobId, door);
-        const job = publicJob(args.jobId, args.operationId, digestOf(args.input), { door });
+        bound.set(args.jobId, args.inputs);
+        // The hub echoes the bindings it admitted, and nothing when there were none.
+        const job = publicJob(args.jobId, args.operationId, digestOf(args.input), {
+          door,
+          ...(args.inputs === undefined ? {} : { inputs: args.inputs }),
+        });
         jobs.set(args.jobId, job);
         return job;
       },
@@ -445,6 +456,12 @@ test("the interactive launch operation is untouched by the one-shot", () => {
 
 test("the one-shot operation leases a bounded run directory and never opens stdin", () => {
   expect(oneShot.outputs).toEqual([SESSION_OUTPUT_NAME]);
+  // A binding can only name an input the operation declares.
+  expect(oneShot.inputs).toEqual(["material"]);
+  // Babel's prepare seals a material archive of up to 512 MiB; the default would have been
+  // this operation's own outputBytes, which measures what it writes, not what it is handed.
+  expect(oneShot.limits.inputBytes).toBe(536870912);
+  expect(launch.inputs).toBeUndefined();
   // `omp -p` reads stdin to EOF before its first turn; the owner ends the pipe at spawn
   // only for an operation that declares no stdin.
   expect(oneShot.stdin).toBe(false);
@@ -722,4 +739,70 @@ test("cancelSession refuses a job this door never posted", async () => {
     refused: "omp_result_unavailable",
   });
   expect(f.cancelled).toEqual([]);
+});
+
+const material: JobInputBinding = {
+  name: "material",
+  from: { jobId: "prepare-job-1", output: "outputs" },
+};
+
+test("runSession hands the hub the bindings it was given, verbatim", async () => {
+  const f = fixture();
+  const job = await f.client.call("runSession", {
+    ...session,
+    reviewDigest: await reviewDigestOf(f.client),
+    inputs: [material],
+  });
+  if ("refused" in job) throw new Error(job.refused);
+  expect(f.posted[0]!.inputs).toEqual([material]);
+  // The door reads none of it: what the material is belongs to the caller and the prompt.
+  expect(f.posted[0]!.input.material).toBeUndefined();
+  expect(job.inputs).toEqual([material]);
+});
+
+test("runSession binds nothing when it was given nothing", async () => {
+  const f = fixture();
+  const job = await run(f);
+  expect(f.posted[0]!.inputs).toBeUndefined();
+  expect(job.inputs).toBeUndefined();
+});
+
+test("the review covers the session's content, never what it is handed", async () => {
+  const f = fixture();
+  // One digest, minted before any binding existed, spends on every placement of it.
+  const bare = await reviewDigestOf(f.client);
+  const first = await f.client.call("runSession", {
+    ...session,
+    reviewDigest: bare,
+    inputs: [material],
+  });
+  const second = await f.client.call("runSession", {
+    ...session,
+    reviewDigest: bare,
+    inputs: [{ name: "material", from: { jobId: "prepare-job-2", output: "outputs" } }],
+  });
+  const none = await f.client.call("runSession", { ...session, reviewDigest: bare });
+  if ("refused" in first || "refused" in second || "refused" in none)
+    throw new Error("a binding changed what the review answers for");
+  expect(await reviewDigestOf(f.client)).toBe(bare);
+  // Same reviewed content, three placements: the job's own input digest never moved.
+  expect(new Set([first, second, none].map((job) => job.inputDigest)).size).toBe(1);
+});
+
+test("readSession and cancelSession still answer a session that was handed material", async () => {
+  const f = fixture();
+  const job = await f.client.call("runSession", {
+    ...session,
+    reviewDigest: await reviewDigestOf(f.client),
+    inputs: [material],
+  });
+  if ("refused" in job) throw new Error(job.refused);
+  f.seal(job.jobId, ustar([[transcriptName, transcript]]));
+  const read = await f.client.call("readSession", { ...target, jobId: job.jobId });
+  if ("refused" in read) throw new Error(read.refused);
+  expect(read.session).toEqual(receipt);
+  expect(read.job.inputs).toEqual([material]);
+  const ended = await f.client.call("cancelSession", { ...target, jobId: job.jobId });
+  if ("refused" in ended) throw new Error(ended.refused);
+  expect(ended.job.inputs).toEqual([material]);
 });

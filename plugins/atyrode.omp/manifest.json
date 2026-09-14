@@ -846,12 +846,16 @@
         "outputs": [
           "session"
         ],
+        "inputs": [
+          "material"
+        ],
         "network": "host",
         "limits": {
           "timeoutMs": 86400000,
           "memoryBytes": 8589934592,
           "processes": 512,
-          "outputBytes": 1073741824
+          "outputBytes": 1073741824,
+          "inputBytes": 536870912
         },
         "stdin": false
       },

@@ -16,6 +16,7 @@ import {
   BenchmarkReceiptSchema,
   PROBE_MODEL_LIMIT,
   BenchmarkInputSchema,
+  JobInputBindingSchema,
   SESSION_ARCHIVE_LIMIT,
   SESSION_GUEST_PATH,
   SESSION_OPERATION_ID,
@@ -87,6 +88,8 @@ const provenanceSchema = z.strictObject({
   modelIdentities: ProbeIdentitiesSchema.nullable(),
   inventoryJobId: z.string().nullable(),
   candidates: BenchmarkInputSchema.nullable(),
+  // Absent in provenance retained before bound inputs existed, which is no bindings at all.
+  inputs: z.array(JobInputBindingSchema).max(16).default([]),
 });
 type Provenance = z.infer<typeof provenanceSchema>;
 
@@ -204,6 +207,7 @@ export async function prepareWorkspace(
       requester: ctx.auth.principal.id,
       pins: latest.pins,
       inputDigest: digestOf({}),
+      inputs: [],
     },
     jobId,
   );
@@ -267,7 +271,13 @@ function checkJob(
   job: PublicJob,
   provenance: Pick<
     Provenance,
-    "target" | "operationId" | "door" | "requester" | "pins" | "inputDigest"
+    | "target"
+    | "operationId"
+    | "door"
+    | "requester"
+    | "pins"
+    | "inputDigest"
+    | "inputs"
   >,
   jobId: string,
 ) {
@@ -280,6 +290,8 @@ function checkJob(
     job.installationRevision !== provenance.pins.installationRevision ||
     job.artifactSha256 !== provenance.pins.artifactSha256 ||
     job.resourceBindingDigest !== provenance.pins.resourceBindingDigest ||
+    // What the hub says it bound must be what was asked for, in the order it was asked.
+    digestOf(job.inputs ?? []) !== digestOf(provenance.inputs) ||
     job.authority.requester !== provenance.requester ||
     job.authority.origin.kind !== "action" ||
     job.authority.origin.door !== `${OMP_PLUGIN_ID}.${provenance.door}`
@@ -310,6 +322,7 @@ async function execute(
       ...provenance.pins,
       input: provenance.input,
       outputs,
+      ...(provenance.inputs.length === 0 ? {} : { inputs: provenance.inputs }),
     }),
   );
   checkJob(job, provenance, jobId);
@@ -644,6 +657,8 @@ export async function runSession(
     modelIdentities: null,
     inventoryJobId: null,
     candidates: null,
+    // Passed to the hub verbatim: this door binds material, it never reads it.
+    inputs: args.inputs ?? [],
   });
   return execute(ctx, jobId, provenance, [
     { name: SESSION_OUTPUT_NAME, locationId: RUNS_LOCATION_ID, components: [jobId] },
