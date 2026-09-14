@@ -13,6 +13,17 @@ const input = z
     new TextEncoder().encode(JSON.stringify(value)).byteLength <= 65536);
 const terminal = z.strictObject({ terminalId: id, terminalHostId: id, containerId: id, runId: id.optional() }).optional();
 const service = z.strictObject({ serviceId: component, revision: component, policySha256: hash }).optional();
+const boundOutputName = component.refine(
+  value => value !== "stdout" && value !== "stderr",
+);
+/** The outputs primitive inverted: a declared input of this operation, mounted read-only
+ * at `/inputs/<name>`, reading the sealed output of a settled job on the same machine. */
+export const JobInputBindingSchema = z.strictObject({
+  name: boundOutputName,
+  from: z.strictObject({ jobId: id, output: boundOutputName }),
+});
+export type JobInputBinding = z.infer<typeof JobInputBindingSchema>;
+const jobInputs = z.array(JobInputBindingSchema).max(16).optional();
 
 /** The native terminal descriptor OMP returns to a Manifold client. */
 export const TerminalRuntimeSchema = z.strictObject({
@@ -44,6 +55,7 @@ const jobLimits = z.strictObject({
   memoryBytes: z.number().int().positive().max(1099511627776),
   processes: z.number().int().positive().max(4096),
   outputBytes: z.number().int().positive().max(1073741824),
+  inputBytes: z.number().int().positive().max(1073741824).optional(),
   inference: JobInferenceLimitsSchema.optional(),
 });
 const JobStateSchema = z.enum([
@@ -163,6 +175,8 @@ export const PublicJobSchema = z.strictObject({
   artifactSha256: hash,
   inputDigest: hash,
   resourceBindingDigest: hash,
+  /** The bound inputs the hub admitted, echoed so a reader sees what this job was handed. */
+  inputs: jobInputs,
   state: JobStateSchema,
   nextInputSeq: count.nullable(),
   result: JobResultSchema.nullable(),

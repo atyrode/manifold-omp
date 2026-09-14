@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   DeploymentProgressSchema,
+  JobInputBindingSchema,
   PublicJobSchema,
   TerminalRuntimeSchema,
 } from "./native.ts";
@@ -26,8 +27,10 @@ export * from "./probe.ts";
 export * from "./session.ts";
 export {
   DeploymentProgressSchema,
+  JobInputBindingSchema,
   PublicJobSchema,
   TerminalRuntimeSchema,
+  type JobInputBinding,
   type PublicJob,
   type TerminalRuntime,
 } from "./native.ts";
@@ -371,9 +374,15 @@ export const rootActionSchemas = {
     input: SessionInputSchema.extend({ reviewDigest: digest }),
     result: PreparedSessionSchema,
   },
-  /** The same reviewed session, placed as a governed one-shot job instead of a terminal. */
+  /** The same reviewed session, placed as a governed one-shot job instead of a terminal.
+   * `inputs` binds sealed outputs of earlier jobs on the same machine to this run's
+   * declared inputs; the door passes them to the hub verbatim and reads none of them, so
+   * what the material is and how the prompt refers to it are the caller's business. */
   runSession: {
-    input: SessionInputSchema.extend({ reviewDigest: digest }),
+    input: SessionInputSchema.extend({
+      reviewDigest: digest,
+      inputs: z.array(JobInputBindingSchema).max(16).optional(),
+    }),
     result: PublicJobSchema,
   },
   /** The job always, for a session this door posted; the receipt only once it is sealed. */
