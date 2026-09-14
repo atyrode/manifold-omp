@@ -26,11 +26,25 @@ export const TerminalRuntimeSchema = z.strictObject({
 });
 export type TerminalRuntime = z.infer<typeof TerminalRuntimeSchema>;
 
+const JobInferenceLimitsSchema = z.strictObject({
+  calls: z.number().int().positive().max(1_000_000).optional(),
+  inputTokens: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  outputTokens: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  costMicros: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+});
+const JobInferenceUsageSchema = z.strictObject({
+  calls: count,
+  inputTokens: count,
+  outputTokens: count,
+  cachedInputTokens: count,
+  costMicros: count,
+});
 const jobLimits = z.strictObject({
   timeoutMs: z.number().int().nonnegative().max(86400000),
   memoryBytes: z.number().int().positive().max(1099511627776),
   processes: z.number().int().positive().max(4096),
   outputBytes: z.number().int().positive().max(1073741824),
+  inference: JobInferenceLimitsSchema.optional(),
 });
 const JobStateSchema = z.enum([
   "queued",
@@ -57,6 +71,7 @@ const JobResultSchema = z.strictObject({
     memoryBytes: count,
     processes: count,
     outputBytes: count,
+    inference: JobInferenceUsageSchema.optional(),
   }).nullable(),
   limits: jobLimits,
   outputs: z.array(z.strictObject({
@@ -76,6 +91,7 @@ const CapSchema = z.enum([
   "terminals:write",
   "tokens:mint",
   "machines:mint",
+  "agents:delegate",
   "machines:read",
   "machines:run",
   "jobs:read",
