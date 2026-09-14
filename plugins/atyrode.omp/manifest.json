@@ -601,7 +601,7 @@
           "prompt": {
             "type": "string",
             "required": true,
-            "maxLength": 16384
+            "maxLength": 45056
           },
           "planYolo": {
             "type": "boolean",
@@ -761,7 +761,7 @@
           "prompt": {
             "type": "string",
             "required": true,
-            "maxLength": 16384
+            "maxLength": 45056
           },
           "planYolo": {
             "type": "boolean",
@@ -905,7 +905,7 @@
           "prompt": {
             "type": "string",
             "required": true,
-            "maxLength": 16384
+            "maxLength": 45056
           },
           "planYolo": {
             "type": "boolean",
@@ -1079,7 +1079,7 @@
           "prompt": {
             "type": "string",
             "required": true,
-            "maxLength": 16384
+            "maxLength": 45056
           },
           "planYolo": {
             "type": "boolean",

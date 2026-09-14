@@ -9,6 +9,7 @@ import {
   OMP_PLUGIN_ID,
   RUNS_LOCATION_ID,
   SESSION_GUEST_PATH,
+  PROMPT_MAX_BYTES,
   SESSION_OPERATION_ID,
   SESSION_OUTPUT_NAME,
   SESSIONS_GUEST_PATH,
@@ -805,4 +806,55 @@ test("readSession and cancelSession still answer a session that was handed mater
   const ended = await f.client.call("cancelSession", { ...target, jobId: job.jobId });
   if ("refused" in ended) throw new Error(ended.refused);
   expect(ended.job.inputs).toEqual([material]);
+});
+
+// Three-byte UTF-8: a character count passes three times over what the bytes cost.
+const wide = "\u4e16".repeat(Math.ceil(PROMPT_MAX_BYTES / 3));
+
+test("every operation that takes a prompt can carry one of the bound's full size", () => {
+  for (const operation of Object.values(machine.operations))
+    if (operation.input.prompt)
+      expect(operation.input.prompt.maxLength).toBeGreaterThanOrEqual(PROMPT_MAX_BYTES);
+});
+
+test("a prompt of the full bound reaches the job", async () => {
+  const f = fixture();
+  const prompt = "a".repeat(PROMPT_MAX_BYTES);
+  const full = { ...session, prompt };
+  const job = await f.client.call("runSession", {
+    ...full,
+    reviewDigest: await reviewDigestOf(f.client, full),
+  });
+  if ("refused" in job) throw new Error(job.refused);
+  // Past the schema is not enough: the hub bounds the whole input map at 64 KiB of JSON,
+  // and `boundedInput` is what enforces it, so the bound has to leave room for the rest.
+  expect(f.posted[0]!.input.prompt).toBe(prompt);
+  expect(argvFor(oneShot, f.posted[0]!.input).at(-1)).toBe(prompt);
+});
+
+/** What a remote caller sees: the door validates its own input and answers a refusal. */
+async function reviewRefusal(f: Fixture, prompt: string) {
+  return rootHandlers.reviewSession!(f.ctx, { ...session, prompt });
+}
+
+test("one byte past the bound is refused", async () => {
+  const f = fixture();
+  const over = "a".repeat(PROMPT_MAX_BYTES + 1);
+  expect(await reviewRefusal(f, over)).toEqual({ refused: "omp_invalid_request" });
+  // An in-process caller using the published client fails before it dispatches at all.
+  expect(f.client.call("reviewSession", { ...session, prompt: over })).rejects.toThrow();
+});
+
+test("the bound counts bytes, not characters", async () => {
+  const f = fixture();
+  expect(wide.length).toBeLessThan(PROMPT_MAX_BYTES);
+  expect(Buffer.byteLength(wide, "utf8")).toBeGreaterThan(PROMPT_MAX_BYTES);
+  expect(await reviewRefusal(f, wide)).toEqual({ refused: "omp_invalid_request" });
+  // The same character count in one-byte text is accepted, which is the whole point.
+  const reviewed = await f.client.call("reviewSession", {
+    ...session,
+    prompt: "a".repeat(wide.length),
+  });
+  if ("refused" in reviewed) throw new Error(reviewed.refused);
+  expect(reviewed.destination).toEqual(target);
 });

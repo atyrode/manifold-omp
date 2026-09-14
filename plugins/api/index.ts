@@ -219,9 +219,33 @@ const executionInput = TargetSchema.extend({
 export const InventoryInputSchema = executionInput.extend({
   modelIdentities: ProbeIdentitiesSchema.optional(),
 });
+/**
+ * A prompt crosses two ceilings, and the smaller one is not the one you would guess.
+ * omp composes it into a single positional argument, where Linux's `MAX_ARG_STRLEN`
+ * allows 131072 bytes — verified against the binary, which accepts 100 KiB there. But the
+ * prompt reaches the machine as one entry of a job's input map, and the hub bounds that
+ * whole map at 65536 bytes of JSON across every entry. Beside the models, config and
+ * account-pool entries, a 64-provider pool — the most the pool schema admits — leaves
+ * 48111 bytes; an ordinary one- or three-provider pool leaves about 63.4 KB. 44 KiB fits
+ * under the worst of those with room for JSON escaping. The map itself is still checked
+ * at composition, so an oversized whole is refused `omp_input_too_large` by name.
+ *
+ * Bytes, not characters: three-byte UTF-8 passes a character count three times over.
+ */
+export const PROMPT_MAX_BYTES = 45056;
 export const SessionInputSchema = executionInput.extend({
   overlay: OverlaySchema,
-  prompt: z.string().max(16384),
+  // Empty is the interactive terminal opened with no initial prompt (`hasPrompt: false`).
+  // A one-shot has no such state and `runSession` refuses it by name.
+  prompt: z
+    .string()
+    .max(PROMPT_MAX_BYTES)
+    // `TextEncoder`, not `Buffer`: this module is the published package, and a consumer
+    // typechecks it with `lib: ["ES2022", "DOM"]` and no Node globals at all.
+    .refine(
+      (value) => new TextEncoder().encode(value).byteLength <= PROMPT_MAX_BYTES,
+      "prompt exceeds 44 KiB",
+    ),
   planYolo: z.boolean(),
 });
 /** Durable dials share the exact validated launch settings; paths and credentials
