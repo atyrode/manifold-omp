@@ -4,7 +4,7 @@ import { ACTION_RUNNER_MAX_FRAME_BYTES, ActionRunnerRequestSchema } from "@manif
 import { z } from "zod";
 
 const request = z.union(ActionRunnerRequestSchema.options.map(option =>
-  option.omit({ id: true }).extend({ runId: option.shape.runId.optional() }),
+  z.strictObject({ ...option.shape, runId: option.shape.runId.optional() }).omit({ id: true }),
 ));
 export const OmpModelToolInputSchema = z.strictObject({ request });
 export type OmpModelDispatchOutcome = "running" | "completed" | "failed";

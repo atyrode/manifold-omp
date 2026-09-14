@@ -65,7 +65,7 @@ test("activity follows RPC lifecycle and outstanding questions, not model conten
 });
 
 test("native follow-up frames cannot switch sessions or declare activity", async () => {
-  const input = { type: "prompt", message: "Continue with the next task" };
+  const input = { type: "prompt" as const, message: "Continue with the next task" };
   const bytes = Buffer.from(`${JSON.stringify(input)}\n`);
   const fragmented = (async function* () { for (const byte of bytes) yield Buffer.from([byte]); })();
   const frames = [];

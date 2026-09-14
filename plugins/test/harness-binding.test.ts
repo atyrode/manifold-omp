@@ -21,7 +21,7 @@ function launchFixture() {
   const consent = (cap: Cap, ref: ManifoldRef) => ({ cap, node: formatManifoldUri(ref), enabled: true, revision: "fixture-consent" });
   const operation = { kind: "operation" as const, machineId, operationId };
   const description = {
-    machineId, pluginId: OMP_PLUGIN_ID, connected: true, platforms: ["linux-x64"], admissionPublicKey: "fixture-public-key",
+    machineId, pluginId: OMP_PLUGIN_ID, connected: true, platforms: ["linux-x64"], admissionPublicKey: "-----BEGIN PUBLIC KEY----- fixture",
     retainedInstallations: [],
     installation: { revision: pins.installationRevision, artifactSha256: pins.artifactSha256, enabled: true, ready: true, purgeRequested: false },
     operations: { [operationId]: { ready: true, reason: null, resourceBindingDigest: pins.resourceBindingDigest } },
