@@ -336,7 +336,9 @@ try {
     phase = "packed-accounts-installation";
     await waitFor(async () => {
       const current = JobDeploymentSchema.parse(await ownerAction(hub, "engine.jobs.readDeployment", { deploymentId: deploymentRequest.deploymentId }));
-      check(!current.targets.some(value => ["refused", "needs_review", "cancelled", "superseded"].includes(value.state)), "packed-deployment-refused");
+      // A refusal that does not name itself costs a whole CI round trip to diagnose.
+      const stuck = current.targets.find(value => ["refused", "needs_review", "cancelled", "superseded"].includes(value.state));
+      check(!stuck, `packed-deployment-${`${stuck?.state}-${stuck?.reason ?? "unstated"}`.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/-+$/, "").slice(0, 64)}`);
       return current.targets.every(value => value.state === "ready");
     }, 480_000, 100);
     const ready = await describeAccounts();
