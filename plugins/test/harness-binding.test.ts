@@ -165,6 +165,21 @@ test("operator inventory admits only bounded body-free transcript summaries", as
   await expect(listSessions(f.ctx, { machineId: f.input.machineId })).rejects.toThrow();
 });
 
+test("operator inventory survives an inference-usage frame before the completion snapshot", async () => {
+  const f = launchFixture();
+  const summary = { id: randomUUID(), title: "A prior task", cwd: "/home/job/workspace", updatedAt: 123 };
+  f.setInventory([summary]);
+  const follow = f.ctx.jobs.follow;
+  f.ctx.jobs.follow = async (node, listener) => {
+    listener({
+      type: "inference_usage",
+      inferenceUsage: { calls: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, costMicros: 0, lastModel: "fixture/model" },
+    });
+    return follow(node, listener);
+  };
+  expect(await listSessions(f.ctx, { machineId: f.input.machineId })).toEqual([summary]);
+});
+
 test("operator resume refuses absent conversations before any credential selection", async () => {
   const f = launchFixture();
   const summary = { id: randomUUID(), title: null, cwd: "/home/job/workspace", updatedAt: 123 };
