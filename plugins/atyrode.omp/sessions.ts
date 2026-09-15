@@ -32,7 +32,8 @@ export async function sessionInventory(ctx: OmpContext, machineId: string): Prom
   // is already installed, and the atomic snapshot closes the completion race.
   const follow = await ctx.jobs.follow(node, update => {
     if (update.type === "closed") settled.reject(new OmpRefusal("session_inventory_unavailable"));
-    else if (update.event.type === "result" || update.event.type === "refusal") settled.resolve();
+    else if (update.type === "event" &&
+        (update.event.type === "result" || update.event.type === "refusal")) settled.resolve();
   }).catch(error => { clearTimeout(timeout); throw error; });
   try {
     if (["exited", "interrupted", "cancelled", "refused"].includes(follow.snapshot.state)) settled.resolve();
