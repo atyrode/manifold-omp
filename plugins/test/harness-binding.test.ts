@@ -226,6 +226,29 @@ test("explicit resume knobs replace defaults and never widen an explicit account
     .rejects.toThrow("omp_caller_locations_write_required");
 });
 
+test("a model this machine cannot serve refuses, and a colon is read for what it means", async () => {
+  const f = launchFixture();
+  const sessionId = randomUUID();
+  f.setInventory([{ id: sessionId, title: null, cwd: "/home/job/workspace", updatedAt: 123 }]);
+  const resume = (model: string) =>
+    resumeSession(f.ctx, {
+      machineId: f.input.machineId,
+      containerId: f.input.containerId,
+      sessionId,
+      accountPool: f.input.accountPool,
+      overlay: { modelRoles: { default: model } },
+    });
+  // A session used to run whatever the agent resolved instead, and the receipt named that.
+  await expect(resume("anthropic/stealth/not-a-model")).rejects.toThrow("omp_model_unavailable");
+  // A trailing thinking level names a level, so the model in front of it still resolves.
+  const levelled = await resume("anthropic/claude-sonnet-4-5:high");
+  expect(JSON.parse(String(levelled.runtime.input.config)).modelRoles.default).toBe(
+    "anthropic/claude-sonnet-4-5:high",
+  );
+  // A trailing tier is part of the id, so stripping it would refuse a model that is served.
+  await expect(resume("anthropic/claude-sonnet-4-5:free")).rejects.toThrow("omp_model_unavailable");
+});
+
 test("operator session doors reject non-owner and container-scoped authority", async () => {
   const f = launchFixture();
   const nonOwner = { ...f.ctx, auth: { ...f.ctx.auth, isRoot: false } };

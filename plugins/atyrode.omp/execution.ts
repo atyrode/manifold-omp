@@ -23,6 +23,7 @@ import {
   RUNS_LOCATION_ID,
   parseSessionArchive,
   ProbeIdentitiesSchema,
+  ThinkingLevelSchema,
   PreparedHarnessSessionSchema,
   OmpSessionRefSchema,
   type OmpSessionRef,
@@ -150,9 +151,17 @@ function checkOverlay(overlay: Overlay, pool: RuntimeAccountPool) {
     if (!concrete || separator <= 0) throw new OmpRefusal("model_configuration_missing");
     const provider = concrete.slice(0, separator);
     if (!pool[provider]?.length) throw new OmpRefusal("account_unavailable");
-    // The thinking suffix selects a level, not a model: `provider/model:level`.
-    const id = concrete.slice(separator + 1).split(":")[0]!;
-    if (!registry[provider]?.some(identity => identity.id === id))
+    // A colon is ambiguous: it ends an OpenRouter model id (`deepseek/x:free`) and it also
+    // introduces a thinking level (`anthropic/y:high`). So take the id as written first, and
+    // only strip a suffix that is actually a level.
+    const written = concrete.slice(separator + 1);
+    const level = written.lastIndexOf(":");
+    const bare =
+      level > 0 && ThinkingLevelSchema.safeParse(written.slice(level + 1)).success
+        ? written.slice(0, level)
+        : written;
+    const serveable = registry[provider] ?? [];
+    if (!serveable.some(identity => identity.id === written || identity.id === bare))
       throw new OmpRefusal("model_unavailable");
   }
 }
