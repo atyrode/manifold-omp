@@ -1,11 +1,21 @@
 import { timingSafeEqual } from "node:crypto";
+import { writeSync } from "node:fs";
 import { parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import { unavailable } from "./inputs.ts";
 
 const FRAME_LIMIT = 16 * 1024 * 1024;
 const encoder = new TextEncoder();
-export function safeFailure(status: number): Response {
+/**
+ * The caller still learns only that the gateway would not serve it. The MACHINE learns which
+ * check refused and what the upstream said, because one opaque word for unauthorized, unknown
+ * route, unknown model, an upstream status and a malformed stream made a failure here
+ * indistinguishable from a broken credential, a missing model or a rate limit (#36).
+ *
+ * Only a fixed label and a numeric status are written. No body, header, URL or bearer.
+ */
+export function safeFailure(status: number, reason = "unspecified"): Response {
+  writeSync(2, `gateway_refused ${reason} ${String(status)}\n`);
   return Response.json({ error: { type: "gateway_unavailable", message: "gateway_unavailable" } }, { status, headers: { "Cache-Control": "no-store" } });
 }
 
@@ -52,24 +62,24 @@ export function startPrivateBoundary(target: { url: string; bearer: string }, be
   const expected = Buffer.from(`Bearer ${bearer}`);
   const server = Bun.serve({
     hostname: "127.0.0.1", port: 0, idleTimeout: 255, maxRequestBodySize: FRAME_LIMIT,
-    error() { return safeFailure(503); },
+    error() { return safeFailure(503, "listener_error"); },
     async fetch(request) {
       try {
         signal.throwIfAborted();
         const supplied = Buffer.from(request.headers.get("authorization") ?? "");
         const authorized = supplied.length === expected.length && timingSafeEqual(supplied, expected);
         supplied.fill(0);
-        if (!authorized) return safeFailure(401);
+        if (!authorized) return safeFailure(401, "service_bearer_rejected");
         const url = new URL(request.url);
-        if (url.search || url.hash) return safeFailure(404);
+        if (url.search || url.hash) return safeFailure(404, "route_not_bare");
         const listing = request.method === "GET" && url.pathname === "/v1/models";
-        if (!listing && !(request.method === "POST" && url.pathname === "/v1/pi/stream")) return safeFailure(404);
+        if (!listing && !(request.method === "POST" && url.pathname === "/v1/pi/stream")) return safeFailure(404, "route_unknown");
         const payload = listing ? undefined : await request.arrayBuffer();
         let model: Model<Api> | undefined;
         if (payload) {
           const parsed = parseRequest(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(payload)));
           model = models.get(parsed.modelId);
-          if (!model) return safeFailure(404);
+          if (!model) return safeFailure(404, "model_not_published");
         }
         const requestSignal = AbortSignal.any([signal, request.signal]);
         const headers = new Headers(request.headers);
@@ -79,15 +89,15 @@ export function startPrivateBoundary(target: { url: string; bearer: string }, be
         // provider credential and never returned to the native service caller.
         headers.set("authorization", `Bearer ${target.bearer}`);
         const response = await fetch(target.url + url.pathname, { method: request.method, headers, ...(payload ? { body: payload } : {}), redirect: "error", signal: requestSignal });
-        if (!response.ok) { await response.body?.cancel(); return safeFailure(response.status); }
+        if (!response.ok) { await response.body?.cancel(); return safeFailure(response.status, "upstream_status"); }
         if (response.headers.get("content-type")?.startsWith("text/event-stream")) {
-          if (!response.body || !model) { await response.body?.cancel(); return safeFailure(503); }
+          if (!response.body || !model) { await response.body?.cancel(); return safeFailure(503, "stream_without_model"); }
           return new Response(safeNativeStream(response.body, model), { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-store" } });
         }
         const value = await response.json();
-        if (!listing && (!value?.message || ["error", "aborted"].includes(value.message.stopReason))) return safeFailure(503);
+        if (!listing && (!value?.message || ["error", "aborted"].includes(value.message.stopReason))) return safeFailure(503, "upstream_message_error");
         return Response.json(value, { headers: { "Cache-Control": "no-store" } });
-      } catch { return safeFailure(503); }
+      } catch { return safeFailure(503, "boundary_exception"); }
     },
   });
   return { port: server.port!, close() { server.stop(true); expected.fill(0); } };
