@@ -113,21 +113,28 @@ export function poolModels(pool: RuntimeAccountPool): Map<string, Model<Api>> {
 /**
  * Resolves the model id a client sends, which is not always the id this gateway published.
  *
- * The listing advertises `${provider}/${model.id}` as the row id while reporting the provider
- * separately, and a client that discovers models through it qualifies that row id with the
- * provider again. So `openrouter/stealth/union-alpha` comes back asking for
- * `openrouter/openrouter/stealth/union-alpha`, and answering 404 blames the caller for a name
- * this gateway handed it. One duplicated leading segment is that round trip and nothing else:
- * an unpublished model still gets its named refusal.
+ * A published key is `${provider}/${model.id}`, and a client qualifies the id it was configured
+ * with by a provider of its own choosing — the row's `owned_by` when it discovered the model
+ * here, or the first account in its pool when it did not. So a session configured for
+ * `openrouter/stealth/union-alpha` asks for `openrouter/openrouter/stealth/union-alpha` or
+ * `openai-codex/openrouter/stealth/union-alpha`, and answering 404 blames the caller for
+ * qualifying a name this gateway handed out.
+ *
+ * Dropping that one leading segment is name parsing, not authority: the remainder must itself
+ * be a published key, so it carries its own provider, and the model that comes back is served
+ * with ITS provider's credential. A prefix that is not a qualifier cannot reach another
+ * provider's model, and an unpublished model still gets its named refusal.
  */
 export function resolvePublished(models: ReadonlyMap<string, Model<Api>>, id: string): Model<Api> | undefined {
   const direct = models.get(id);
   if (direct) return direct;
   const separator = id.indexOf("/");
   if (separator <= 0) return undefined;
-  const provider = id.slice(0, separator);
   const remainder = id.slice(separator + 1);
-  return remainder.startsWith(`${provider}/`) ? models.get(remainder) : undefined;
+  const qualified = models.get(remainder);
+  // The remainder is a key only when its own first segment is the model's provider, which is
+  // what makes this unambiguous rather than a search for any model whose name ends this way.
+  return qualified && remainder.startsWith(`${qualified.provider}/`) ? qualified : undefined;
 }
 
 /** OpenRouter's catalog endpoint. Public: it carries no credential and needs none. */

@@ -46,23 +46,34 @@ describe("the gateway publishes what its provider serves", () => {
   });
 });
 
-describe("a client's round trip through the listing still resolves", () => {
-  const models = new Map<string, Model<Api>>([["openrouter/stealth/union-alpha", { id: "stealth/union-alpha" } as Model<Api>]]);
+describe("a client's qualified name still resolves", () => {
+  const models = new Map<string, Model<Api>>([
+    ["openrouter/stealth/union-alpha", { id: "stealth/union-alpha", provider: "openrouter" } as Model<Api>],
+    ["openai-codex/gpt-5.5", { id: "gpt-5.5", provider: "openai-codex" } as Model<Api>],
+  ]);
 
   test("the published id resolves", () => {
     expect(resolvePublished(models, "openrouter/stealth/union-alpha")?.id).toBe("stealth/union-alpha");
   });
 
   test("the id qualified twice resolves, because the gateway handed out that name", () => {
-    // The listing advertises `provider/id` as the row id and reports the provider separately,
-    // so a client that discovers models through it asks for the provider twice. Refusing that
-    // blamed the caller for a name this gateway produced.
     expect(resolvePublished(models, "openrouter/openrouter/stealth/union-alpha")?.id).toBe("stealth/union-alpha");
   });
 
-  test("an unpublished model is still refused, and a different provider is never borrowed", () => {
+  test("a pool provider's qualifier resolves the model it names, not the qualifier's", () => {
+    // A session qualifies the configured id with the first account in its pool, which is not
+    // the model's provider. The remainder carries the provider, so the model that comes back is
+    // still served with its own credential.
+    const resolved = resolvePublished(models, "openai-codex/openrouter/stealth/union-alpha");
+    expect(resolved?.id).toBe("stealth/union-alpha");
+    expect(resolved?.provider).toBe("openrouter");
+  });
+
+  test("an unpublished model is refused, and no prefix reaches another provider's model", () => {
     expect(resolvePublished(models, "openrouter/stealth/not-a-model")).toBeUndefined();
-    expect(resolvePublished(models, "anthropic/openrouter/stealth/union-alpha")).toBeUndefined();
     expect(resolvePublished(models, "stealth/union-alpha")).toBeUndefined();
+    // `gpt-5.5` is published under openai-codex; a qualifier cannot serve it as openrouter's.
+    expect(resolvePublished(models, "openrouter/gpt-5.5")).toBeUndefined();
+    expect(resolvePublished(models, "openrouter/openai-codex/gpt-5.5")?.provider).toBe("openai-codex");
   });
 });
