@@ -44,6 +44,20 @@ describe("the gateway publishes what its provider serves", () => {
     );
     expect(models.get(firstKey)?.contextWindow).toBe(bundled.contextWindow);
   });
+
+  test("a transient refusal does not unpublish a model the credential serves", async () => {
+    // One 429 used to cost that session its model: it got a named 404 while the next session
+    // ran fine. The attempts are what make the catalog's absence mean absent, not unlucky.
+    let calls = 0;
+    const flaky = (() => {
+      calls += 1;
+      if (calls < 3) return Promise.resolve(Response.json({ error: "slow down" }, { status: 429 }));
+      return Promise.resolve(Response.json({ data: [{ id: "stealth/union-alpha", pricing: { prompt: "0", completion: "0" }, context_length: 262_144 }] }));
+    }) as unknown as typeof fetch;
+    const models = await publishedModels(pool, AbortSignal.timeout(10_000), flaky);
+    expect(calls).toBe(3);
+    expect(models.get("openrouter/stealth/union-alpha")?.id).toBe("stealth/union-alpha");
+  });
 });
 
 describe("a client's qualified name still resolves", () => {

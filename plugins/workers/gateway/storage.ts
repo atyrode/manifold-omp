@@ -153,8 +153,11 @@ const ListedModelsSchema = z.object({
   ),
 });
 
-/** A session is waiting on this call, so the catalog either answers quickly or is skipped. */
+/** A session is waiting on this call, so the catalog either answers inside this budget or is skipped. */
 const CATALOG_TIMEOUT_MS = 8_000;
+/** Enough to ride out one transient refusal; the budget above still bounds the total. */
+const CATALOG_ATTEMPTS = 3;
+const CATALOG_RETRY_MS = 400;
 
 /**
  * Reports publishing less than the credential can reach, and returns the pinned catalog.
@@ -198,22 +201,32 @@ export async function publishedModels(
   if (!pool.openrouter?.length) return models;
   const template = getBundledModels("openrouter").find((model) => model.api === "openrouter");
   if (!template) return models;
-  let listed: z.infer<typeof ListedModelsSchema>;
-  try {
-    // Bounded, because a gateway that cannot start is worse than one serving the pinned
-    // catalog: the session behind it is already waiting on this call.
-    const response = await fetchImpl(OPENROUTER_CATALOG, {
-      redirect: "error",
-      signal: AbortSignal.any([signal, AbortSignal.timeout(CATALOG_TIMEOUT_MS)]),
-    });
-    if (!response.ok) return degraded(models, `status_${response.status}`);
-    listed = ListedModelsSchema.parse(await response.json());
-  } catch (error) {
-    // A catalog this gateway could not read leaves the pinned one in place; it never empties
-    // it. But the degradation is the difference between a model being serveable and not, so
-    // it says so rather than quietly publishing less than the credential can reach.
-    return degraded(models, error instanceof Error ? error.name : typeof error);
+  // One transient failure must not unpublish a model: a session that drew a 429 or a timeout
+  // here got a named 404 for a model its credential serves, while the next session ran fine.
+  // The attempts share the budget below, so retrying never makes the gateway slower to start
+  // than a single slow fetch would.
+  let listed: z.infer<typeof ListedModelsSchema> | undefined;
+  let reason = "unattempted";
+  const deadline = AbortSignal.any([signal, AbortSignal.timeout(CATALOG_TIMEOUT_MS)]);
+  for (let attempt = 0; attempt < CATALOG_ATTEMPTS && !deadline.aborted; attempt += 1) {
+    if (attempt > 0) await Bun.sleep(CATALOG_RETRY_MS);
+    try {
+      const response = await fetchImpl(OPENROUTER_CATALOG, { redirect: "error", signal: deadline });
+      if (!response.ok) {
+        await response.body?.cancel();
+        reason = `status_${response.status}`;
+        continue;
+      }
+      listed = ListedModelsSchema.parse(await response.json());
+      break;
+    } catch (error) {
+      reason = error instanceof Error ? error.name : typeof error;
+    }
   }
+  // A catalog this gateway could not read leaves the pinned one in place; it never empties it.
+  // But the degradation is the difference between a model being serveable and not, so it says
+  // so rather than quietly publishing less than the credential can reach.
+  if (!listed) return degraded(models, reason);
   // A model that does not accept a reasoning parameter carries no thinking config at all,
   // rather than an empty one: a level on a model that has none is what made a configured id
   // resolve to something else.
