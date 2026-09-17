@@ -98,7 +98,12 @@ export function startPrivateBoundary(target: { url: string; bearer: string }, be
         const value = await response.json();
         if (!listing && (!value?.message || ["error", "aborted"].includes(value.message.stopReason))) return safeFailure(503, "upstream_message_error");
         return Response.json(value, { headers: { "Cache-Control": "no-store" } });
-      } catch { return safeFailure(503, "boundary_exception"); }
+      } catch (error) {
+        // The class, never the message: a constructor name says which hop broke without
+        // carrying a URL, a bearer, or any bytes from the request or the provider.
+        const kind = error instanceof Error ? error.name : typeof error;
+        return safeFailure(503, `boundary_exception_${kind}`);
+      }
     },
   });
   return { port: server.port!, close() { server.stop(true); expected.fill(0); } };
