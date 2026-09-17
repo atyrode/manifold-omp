@@ -131,12 +131,29 @@ function configuredModels(overlay: Overlay): string[] {
     ...Object.values(overlay.task?.agentModelOverrides ?? {}).map(ref => ref.startsWith("@") ? roles[ref.slice(1)] ?? "" : ref),
   ];
 }
+/**
+ * A configured model this machine cannot serve REFUSES; it is never quietly replaced.
+ *
+ * The gateway publishes `poolModels`, and a session discovers models through it
+ * (`discovery: { type: "proxy" }`). An id absent from that catalog used to reach the session
+ * anyway, where the agent resolved some other model and recorded it as a non-fallback
+ * resolution — so a receipt could name a model the operator never configured, and the spend
+ * went to whatever ran. Refusing here says which model and why, before anything starts.
+ *
+ * Both the review and the launch pass through here, so neither admits a substitute.
+ */
 function checkOverlay(overlay: Overlay, pool: RuntimeAccountPool) {
   const roles = overlay.modelRoles ?? {};
   if (!roles.default) throw new OmpRefusal("model_configuration_missing");
   for (const concrete of configuredModels(overlay)) {
-    if (!concrete || !pool[concrete.slice(0, concrete.indexOf("/"))]?.length)
-      throw new OmpRefusal("account_unavailable");
+    const separator = concrete.indexOf("/");
+    if (!concrete || separator <= 0) throw new OmpRefusal("model_configuration_missing");
+    const provider = concrete.slice(0, separator);
+    if (!pool[provider]?.length) throw new OmpRefusal("account_unavailable");
+    // The thinking suffix selects a level, not a model: `provider/model:level`.
+    const id = concrete.slice(separator + 1).split(":")[0]!;
+    if (!registry[provider]?.some(identity => identity.id === id))
+      throw new OmpRefusal("model_unavailable");
   }
 }
 function boundedInput(input: Record<string, string | number | boolean>) {
