@@ -135,6 +135,12 @@ function configuredModels(overlay: Overlay): string[] {
     ...Object.values(overlay.task?.agentModelOverrides ?? {}).map(ref => ref.startsWith("@") ? roles[ref.slice(1)] ?? "" : ref),
   ];
 }
+
+/**
+ * Providers whose catalog the gateway resolves from the provider itself rather than from the
+ * pinned SDK snapshot, so the machine rather than this build decides what can be served.
+ */
+const LIVE_CATALOG_PROVIDERS: Readonly<Record<string, true>> = { openrouter: true };
 /**
  * A configured model this machine cannot serve REFUSES; it is never quietly replaced.
  *
@@ -163,6 +169,12 @@ function checkOverlay(overlay: Overlay, pool: RuntimeAccountPool) {
       level > 0 && ThinkingLevelSchema.safeParse(written.slice(level + 1)).success
         ? written.slice(0, level)
         : written;
+    // The bundled registry is a snapshot of the pinned SDK, so it is authoritative only for a
+    // provider whose catalog the gateway does NOT resolve live. For one it does, the machine
+    // holds the real catalog and refuses an id it cannot serve by name
+    // (`model_not_published`); refusing here on a stale snapshot would reject every model the
+    // provider added since the SDK release, which is the same wrongness inverted.
+    if (LIVE_CATALOG_PROVIDERS[provider] === true) continue;
     const serveable = registry[provider] ?? [];
     if (!serveable.some(identity => identity.id === written || identity.id === bare))
       throw new OmpRefusal("model_unavailable");

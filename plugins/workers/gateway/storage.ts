@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { AuthBrokerClient, type AuthBrokerClientOptions, type FetchSnapshotOptions, type FetchSnapshotResult } from "@oh-my-pi/pi-ai/auth-broker/client";
 import { RemoteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-broker/remote-store";
 import type { SnapshotResponse, SnapshotStreamEvent } from "@oh-my-pi/pi-ai/auth-broker/types";
@@ -105,6 +106,112 @@ export function poolModels(pool: RuntimeAccountPool): Map<string, Model<Api>> {
   for (const provider of getBundledProviders()) {
     if (!Object.hasOwn(pool, provider) || !pool[provider]?.length) continue;
     for (const model of getBundledModels(provider)) models.set(`${model.provider}/${model.id}`, model);
+  }
+  return models;
+}
+
+/**
+ * Resolves the model id a client sends, which is not always the id this gateway published.
+ *
+ * A published key is `${provider}/${model.id}`, and a client qualifies the id it was configured
+ * with by a provider of its own choosing — the row's `owned_by` when it discovered the model
+ * here, or the first account in its pool when it did not. So a session configured for
+ * `openrouter/stealth/union-alpha` asks for `openrouter/openrouter/stealth/union-alpha` or
+ * `openai-codex/openrouter/stealth/union-alpha`, and answering 404 blames the caller for
+ * qualifying a name this gateway handed out.
+ *
+ * Dropping that one leading segment is name parsing, not authority: the remainder must itself
+ * be a published key, so it carries its own provider, and the model that comes back is served
+ * with ITS provider's credential. A prefix that is not a qualifier cannot reach another
+ * provider's model, and an unpublished model still gets its named refusal.
+ */
+export function resolvePublished(models: ReadonlyMap<string, Model<Api>>, id: string): Model<Api> | undefined {
+  const direct = models.get(id);
+  if (direct) return direct;
+  const separator = id.indexOf("/");
+  if (separator <= 0) return undefined;
+  const remainder = id.slice(separator + 1);
+  const qualified = models.get(remainder);
+  // The remainder is a key only when its own first segment is the model's provider, which is
+  // what makes this unambiguous rather than a search for any model whose name ends this way.
+  return qualified && remainder.startsWith(`${qualified.provider}/`) ? qualified : undefined;
+}
+
+/** OpenRouter's catalog endpoint. Public: it carries no credential and needs none. */
+const OPENROUTER_CATALOG = "https://openrouter.ai/api/v1/models";
+const ListedModelsSchema = z.object({
+  data: z.array(
+    z.object({
+      id: z.string().min(1).max(256),
+      name: z.string().max(256).optional(),
+      context_length: z.number().int().positive().optional(),
+      top_provider: z.object({ max_completion_tokens: z.number().int().positive().nullable() }).partial().optional(),
+      pricing: z.object({ prompt: z.string(), completion: z.string() }).partial().optional(),
+      supported_parameters: z.array(z.string()).optional(),
+    }),
+  ),
+});
+
+/** Per-million cost from a per-token price string; an unparseable price is not a free model. */
+function perMillion(price: string | undefined): number | null {
+  if (price === undefined) return null;
+  const value = Number(price);
+  return Number.isFinite(value) && value >= 0 ? value * 1_000_000 : null;
+}
+
+/**
+ * The models this gateway publishes: the pinned SDK catalog, plus the ones the provider lists
+ * that the SDK does not carry.
+ *
+ * The bundled catalog is a snapshot of the SDK release, so every model a provider added since
+ * — including every unlisted id, which is how OpenRouter ships its stealth models — was
+ * unreachable through the governed path while working normally in local omp. A session
+ * discovers models through this gateway, so the absence was total.
+ *
+ * A listed model is admitted only when its provider is in the account pool, and it is built
+ * from a bundled model of the SAME provider and api: the dialect flags belong to the provider,
+ * not to the individual model, and the listing states only identity, size and price. A bundled
+ * id always wins, so nothing the SDK pins is overridden by a fetched document.
+ */
+export async function publishedModels(
+  pool: RuntimeAccountPool,
+  signal: AbortSignal,
+  fetchImpl: typeof fetch = fetch,
+): Promise<Map<string, Model<Api>>> {
+  const models = poolModels(pool);
+  if (!pool.openrouter?.length) return models;
+  const template = getBundledModels("openrouter").find((model) => model.api === "openrouter");
+  if (!template) return models;
+  let listed: z.infer<typeof ListedModelsSchema>;
+  try {
+    const response = await fetchImpl(OPENROUTER_CATALOG, { redirect: "error", signal });
+    if (!response.ok) return models;
+    listed = ListedModelsSchema.parse(await response.json());
+  } catch {
+    // A catalog this gateway could not read leaves the pinned one in place; it never empties it.
+    return models;
+  }
+  // A model that does not accept a reasoning parameter carries no thinking config at all,
+  // rather than an empty one: a level on a model that has none is what made a configured id
+  // resolve to something else.
+  const { thinking: templateThinking, ...dialect } = template;
+  for (const entry of listed.data) {
+    const key = `openrouter/${entry.id}`;
+    if (models.has(key)) continue;
+    const input = perMillion(entry.pricing?.prompt);
+    const output = perMillion(entry.pricing?.completion);
+    if (input === null || output === null || !entry.context_length) continue;
+    const reasoning = (entry.supported_parameters ?? []).includes("reasoning");
+    models.set(key, {
+      ...dialect,
+      ...(reasoning && templateThinking ? { thinking: templateThinking } : {}),
+      id: entry.id,
+      name: entry.name ?? entry.id,
+      contextWindow: entry.context_length,
+      maxTokens: entry.top_provider?.max_completion_tokens ?? template.maxTokens,
+      cost: { input, output, cacheRead: 0, cacheWrite: 0 },
+      reasoning,
+    });
   }
   return models;
 }
