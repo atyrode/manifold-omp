@@ -134,14 +134,15 @@ export async function observeNative(ctx: OmpContext, machineId: string) {
     machineId,
   });
   if (denied) throw new OmpRefusal(denied);
-  const [description, deployment] = await Promise.all([
-    ctx.jobs
-      .describe({ machineId, pluginId: ctx.pluginId })
-      .then((value) => JobDescriptionSchema.parse(value)),
-    ctx.jobs
-      .describeDeployment({ machineId, pluginId: ctx.pluginId })
-      .then((value) => JobDeploymentDescriptionSchema.parse(value)),
-  ]);
+  // `await` rather than `.then`: the host serves these verbs synchronously to an in-realm
+  // plugin and as a promise to an isolated one, so chaining off the return value breaks on
+  // exactly one of the two and reads as an unexplained TypeError in the other.
+  const [description, deployment] = [
+    JobDescriptionSchema.parse(await ctx.jobs.describe({ machineId, pluginId: ctx.pluginId })),
+    JobDeploymentDescriptionSchema.parse(
+      await ctx.jobs.describeDeployment({ machineId, pluginId: ctx.pluginId }),
+    ),
+  ];
   if (
     description.machineId !== machineId ||
     description.pluginId !== ctx.pluginId ||
@@ -335,22 +336,17 @@ export async function describeDestination(
       ),
     ),
   );
-  const [broker, gatewayDescription] = await Promise.all([
-    // Instance discovery hides absent and unauthorized services from non-owners.
-    // A hidden broker is not evidence about independent destination operations.
-    ctx.auth.isRoot
-      ? ctx.services
-          .describeInstance({ serviceId: BROKER_SERVICE_ID })
-          .then((value) => InstanceServiceDescriptionSchema.parse(value))
-      : ctx.services
-          .listInstances({})
-          .then((value) =>
-            InstanceServicesDescriptionSchema.parse(value).services.find(
-              (service) => service.serviceId === BROKER_SERVICE_ID,
-            ),
-          ),
-    ctx.services.describe({ machineId: target.machineId }),
-  ]);
+  // Same reason as `observeNative`: await the value, never chain off it.
+  const broker = ctx.auth.isRoot
+    ? InstanceServiceDescriptionSchema.parse(
+        await ctx.services.describeInstance({ serviceId: BROKER_SERVICE_ID }),
+      )
+    : // Instance discovery hides absent and unauthorized services from non-owners.
+      // A hidden broker is not evidence about independent destination operations.
+      InstanceServicesDescriptionSchema.parse(await ctx.services.listInstances({})).services.find(
+        (service) => service.serviceId === BROKER_SERVICE_ID,
+      );
+  const gatewayDescription = await ctx.services.describe({ machineId: target.machineId });
   if (
     broker &&
     (broker.serviceId !== BROKER_SERVICE_ID ||

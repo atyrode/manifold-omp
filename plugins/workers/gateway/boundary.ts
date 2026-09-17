@@ -3,6 +3,7 @@ import { writeSync } from "node:fs";
 import { parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import { unavailable } from "./inputs.ts";
+import { resolvePublished } from "./storage.ts";
 
 const FRAME_LIMIT = 16 * 1024 * 1024;
 const encoder = new TextEncoder();
@@ -78,7 +79,7 @@ export function startPrivateBoundary(target: { url: string; bearer: string }, be
         let model: Model<Api> | undefined;
         if (payload) {
           const parsed = parseRequest(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(payload)));
-          model = models.get(parsed.modelId);
+          model = resolvePublished(models, parsed.modelId);
           if (!model) return safeFailure(404, "model_not_published");
         }
         const requestSignal = AbortSignal.any([signal, request.signal]);

@@ -262,6 +262,10 @@ test("a model this machine cannot serve refuses, and a colon is read for what it
   );
   // A trailing tier is part of the id, so stripping it would refuse a model that is served.
   await expect(resume("anthropic/claude-sonnet-4-5:free")).rejects.toThrow("omp_model_unavailable");
+  // A provider whose catalog the gateway resolves live is decided by the machine, not by this
+  // build's snapshot. Identity is no longer judged here, so an id the SDK never carried stops
+  // at the credential question instead of being refused for not existing.
+  await expect(resume("openrouter/stealth/union-alpha")).rejects.toThrow("omp_account_unavailable");
 });
 
 test("operator session doors reject non-owner and container-scoped authority", async () => {

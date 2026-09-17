@@ -3,7 +3,7 @@ import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway/server";
 import type { AuthGatewayServerHandle } from "@oh-my-pi/pi-ai/auth-gateway/types";
 import { startPrivateBoundary, type PrivateBoundary } from "./boundary.ts";
 import { type GatewayInputs, unavailable } from "./inputs.ts";
-import { openPoolStorage, poolModels, type PoolAuthStorage } from "./storage.ts";
+import { openPoolStorage, publishedModels, resolvePublished, type PoolAuthStorage } from "./storage.ts";
 
 export interface PoolGateway { port: number; close(): Promise<void> }
 export async function startPoolGateway(inputs: GatewayInputs, ownerSignal: AbortSignal, fetchImpl: typeof fetch = fetch): Promise<PoolGateway> {
@@ -30,13 +30,13 @@ export async function startPoolGateway(inputs: GatewayInputs, ownerSignal: Abort
     signal.throwIfAborted();
     storage = await openPoolStorage(inputs.broker, inputs.accountPool, signal, fetchImpl);
     signal.throwIfAborted();
-    const models = poolModels(inputs.accountPool);
+    const models = await publishedModels(inputs.accountPool, signal, fetchImpl);
     // The SDK exposes diagnostic routes without a hook to disable them. Its
     // unannounced listener uses a separate private capability so possession of
     // the native service bearer cannot bypass the safe application boundary.
     const internalBearer = randomBytes(32).toString("base64url");
     sdk = startAuthGateway({ bind: "127.0.0.1:0", bearerTokens: [internalBearer], storage,
-      resolveModel: id => models.get(id), listModels: () => models.values(),
+      resolveModel: id => resolvePublished(models, id), listModels: () => models.values(),
     });
     boundary = startPrivateBoundary({ url: sdk.url, bearer: internalBearer }, inputs.serviceBearer, models, signal);
     signal.throwIfAborted();
