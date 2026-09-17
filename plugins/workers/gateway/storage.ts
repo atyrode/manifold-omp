@@ -1,3 +1,4 @@
+import { writeSync } from "node:fs";
 import { z } from "zod";
 import { AuthBrokerClient, type AuthBrokerClientOptions, type FetchSnapshotOptions, type FetchSnapshotResult } from "@oh-my-pi/pi-ai/auth-broker/client";
 import { RemoteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-broker/remote-store";
@@ -152,6 +153,21 @@ const ListedModelsSchema = z.object({
   ),
 });
 
+/** A session is waiting on this call, so the catalog either answers quickly or is skipped. */
+const CATALOG_TIMEOUT_MS = 8_000;
+
+/**
+ * Reports publishing less than the credential can reach, and returns the pinned catalog.
+ *
+ * Silence here is what made an unlisted model look like a caller's mistake: the session gets a
+ * named 404 for a model the provider serves, and nothing upstream says the catalog was the
+ * reason. One line on this worker's stderr is where the machine reads it.
+ */
+function degraded(models: Map<string, Model<Api>>, reason: string): Map<string, Model<Api>> {
+  writeSync(2, `catalog_pinned_only ${reason} ${String(models.size)}\n`);
+  return models;
+}
+
 /** Per-million cost from a per-token price string; an unparseable price is not a free model. */
 function perMillion(price: string | undefined): number | null {
   if (price === undefined) return null;
@@ -184,12 +200,19 @@ export async function publishedModels(
   if (!template) return models;
   let listed: z.infer<typeof ListedModelsSchema>;
   try {
-    const response = await fetchImpl(OPENROUTER_CATALOG, { redirect: "error", signal });
-    if (!response.ok) return models;
+    // Bounded, because a gateway that cannot start is worse than one serving the pinned
+    // catalog: the session behind it is already waiting on this call.
+    const response = await fetchImpl(OPENROUTER_CATALOG, {
+      redirect: "error",
+      signal: AbortSignal.any([signal, AbortSignal.timeout(CATALOG_TIMEOUT_MS)]),
+    });
+    if (!response.ok) return degraded(models, `status_${response.status}`);
     listed = ListedModelsSchema.parse(await response.json());
-  } catch {
-    // A catalog this gateway could not read leaves the pinned one in place; it never empties it.
-    return models;
+  } catch (error) {
+    // A catalog this gateway could not read leaves the pinned one in place; it never empties
+    // it. But the degradation is the difference between a model being serveable and not, so
+    // it says so rather than quietly publishing less than the credential can reach.
+    return degraded(models, error instanceof Error ? error.name : typeof error);
   }
   // A model that does not accept a reasoning parameter carries no thinking config at all,
   // rather than an empty one: a level on a model that has none is what made a configured id
