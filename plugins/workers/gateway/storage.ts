@@ -161,15 +161,35 @@ const CATALOG_ATTEMPTS = 3;
 const CATALOG_RETRY_MS = 400;
 
 /**
+ * The published models, and WHY THE LIVE LISTING IS NOT BEHIND THEM when it is not.
+ *
+ * `unreadable` is the reason a read was attempted and failed, or null when there is nothing to
+ * report — the listing was read, or this pool holds no credential it would be read for. The
+ * distinction is the point: "the listing does not contain your model" and "I could not read
+ * the listing your model would be in" are different answers, and only one of them is the
+ * caller's fault.
+ *
+ * A fallback indistinguishable from success is how this stayed unnoticed. One line of stderr
+ * said the catalog was pinned-only and nothing else did, so a preview served a stale model list
+ * for hours while looking exactly like a working one, and it became visible only when a model
+ * existed ONLY in the live listing (atyrode/manifold#751).
+ */
+export interface PublishedCatalog {
+  readonly models: Map<string, Model<Api>>;
+  readonly unreadable: string | null;
+}
+
+/**
  * Reports publishing less than the credential can reach, and returns the pinned catalog.
  *
  * Silence here is what made an unlisted model look like a caller's mistake: the session gets a
  * named 404 for a model the provider serves, and nothing upstream says the catalog was the
- * reason. One line on this worker's stderr is where the machine reads it.
+ * reason. One line on this worker's stderr is where the machine reads it; the returned reason
+ * is how the boundary refuses by the right name instead of blaming the caller.
  */
-function degraded(models: Map<string, Model<Api>>, reason: string): Map<string, Model<Api>> {
+function degraded(models: Map<string, Model<Api>>, reason: string): PublishedCatalog {
   writeSync(2, `catalog_pinned_only ${reason} ${String(models.size)}\n`);
-  return models;
+  return { models, unreadable: reason };
 }
 
 /** Per-million cost from a per-token price string; an unparseable price is not a free model. */
@@ -197,11 +217,13 @@ export async function publishedModels(
   pool: RuntimeAccountPool,
   signal: AbortSignal,
   fetchImpl: typeof fetch = fetch,
-): Promise<Map<string, Model<Api>>> {
+): Promise<PublishedCatalog> {
   const models = poolModels(pool);
-  if (!pool.openrouter?.length) return models;
+  // No OpenRouter credential means no listing this pool would be served from: publishing
+  // exactly what the credentials reach is the whole answer, not a degradation of one.
+  if (!pool.openrouter?.length) return { models, unreadable: null };
   const template = getBundledModels("openrouter").find((model) => model.api === "openrouter");
-  if (!template) return models;
+  if (!template) return { models, unreadable: null };
   // One transient failure must not unpublish a model: a session that drew a 429 or a timeout
   // here got a named 404 for a model its credential serves, while the next session ran fine.
   // The attempts share the budget below, so retrying never makes the gateway slower to start
@@ -250,7 +272,7 @@ export async function publishedModels(
       reasoning,
     });
   }
-  return models;
+  return { models, unreadable: null };
 }
 
 export async function openPoolStorage(broker: { url: string; token: string }, pool: RuntimeAccountPool, signal: AbortSignal, fetchImpl: typeof fetch = fetch) {
