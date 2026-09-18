@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import {
+  OMP_VERSION,
   PROBE_MODEL_LIMIT,
+  parseBenchmarkInput,
   ProbeIdentitiesSchema,
   type ProbeIdentity,
   type RuntimeAccountPool,
@@ -60,4 +62,26 @@ test("bundled inventory defaults satisfy the public identity contract", () => {
 
   expect(selected).toHaveLength(PROBE_MODEL_LIMIT);
   expect(ProbeIdentitiesSchema.safeParse(selected).success).toBe(true);
+});
+
+/**
+ * The rule under test is agreement with the RUN path: `atyrode.omp/execution.ts` strips a
+ * trailing `:suffix` only when it parses as a thinking level, so an id whose suffix is not a
+ * level resolves as written and is benchmarkable. A blanket colon rejection here disagreed with
+ * that and silently barred every variant-addressed model from any derived catalog.
+ */
+const candidate = (id: string) => ({
+  schemaVersion: 1 as const,
+  inventoryObservedAt: 1_700_000_000_000,
+  ompVersion: OMP_VERSION,
+  candidates: [{ provider: "openrouter", id, api: "chat", key: `openrouter.${id.replace(/[^A-Za-z0-9._-]/g, "_")}` }],
+});
+
+test("a variant suffix is benchmarkable and a thinking suffix is not", () => {
+  expect(parseBenchmarkInput(candidate("deepseek/deepseek-v4:free")).candidates[0]!.id).toBe("deepseek/deepseek-v4:free");
+  expect(parseBenchmarkInput(candidate("vendor/model:nitro")).candidates[0]!.id).toBe("vendor/model:nitro");
+
+  // `high` IS a level, so this selector names a model and a level at once: still refused.
+  expect(() => parseBenchmarkInput(candidate("anthropic/claude-sonnet-4-5:high"))).toThrow("invalid_input");
+  expect(() => parseBenchmarkInput(candidate("vendor/model:minimal"))).toThrow("invalid_input");
 });

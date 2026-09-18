@@ -66,8 +66,18 @@ export function parseBenchmarkInput(value: unknown): BenchmarkInput {
   const input = parse(BenchmarkInputSchema, value, "invalid_input");
   unique(input.candidates);
   if (new Set(input.candidates.map(candidate => candidate.key)).size !== input.candidates.length) throw new ProbeError("ambiguous_identity");
-  // ':' has OMP thinking-suffix semantics. Do not permit an ambiguous selector.
-  if (input.candidates.some(candidate => candidate.id.includes(":"))) throw new ProbeError("invalid_input");
+  // A COLON IS ONLY AMBIGUOUS WHEN THE SUFFIX IS A LEVEL, and this is the rule the run path
+  // already applies: `atyrode.omp/execution.ts:163-171` takes an id as written and strips a
+  // trailing `:suffix` ONLY when it parses as a `ThinkingLevel`, because a colon both ends an
+  // OpenRouter model id (`deepseek/x:free`) and introduces a level (`anthropic/y:high`).
+  // Rejecting every colon here contradicted that: it barred from benchmarking — and therefore
+  // from any derived catalog — the entire set of ids a provider spells with a variant, whose
+  // suffix is not a level and resolves unambiguously. `model:high` stays rejected, because that
+  // selector really does name two things.
+  if (input.candidates.some(candidate => {
+    const separator = candidate.id.lastIndexOf(":");
+    return separator > 0 && ThinkingLevelSchema.safeParse(candidate.id.slice(separator + 1)).success;
+  })) throw new ProbeError("invalid_input");
   return input;
 }
 export function parseOmpVersion(raw: string): typeof OMP_VERSION {
