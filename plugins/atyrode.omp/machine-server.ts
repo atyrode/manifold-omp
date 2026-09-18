@@ -486,8 +486,13 @@ async function settledJob(
     throw new OmpRefusal("result_unavailable");
   return job;
 }
-/** Whole-output read: the sealed digest is the only proof the pages were not substituted. */
-async function readNamedOutput(
+/**
+ * Whole-output read: the sealed digest is the only proof the pages were not substituted.
+ *
+ * Exported because a session with no receipt is read for the word it stopped with, and its
+ * standard error is where a sandboxed process writes that word (#43).
+ */
+export async function readNamedOutput(
   ctx: OmpContext,
   machineId: string,
   operationId: string,

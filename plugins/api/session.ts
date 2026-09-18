@@ -6,6 +6,31 @@ import { OmpDataError } from "./errors.ts";
 export const SESSION_MESSAGE_LIMIT = 16384;
 /** A one-shot transcript archive larger than this is read through the job output, not summarised. */
 export const SESSION_ARCHIVE_LIMIT = 4194304;
+/** The transcript's own verdict is one line the provider wrote, never a body. */
+export const SESSION_FAILURE_LIMIT = 256;
+/**
+ * WHY A SESSION THIS DOOR POSTED HAS NO RECEIPT — one word, in place of an absence.
+ *
+ * `session: null` used to answer five separate facts with the same silence: a run still
+ * going, a run that exited non-zero, a run whose destination filled under it, a run whose
+ * transcript the owner could not seal, and a run that never started. A caller settling a
+ * claim on that answer cannot tell them apart, so every one of them reads as "the model was
+ * never reached and nothing was produced" (#43). Each fact says which one it is.
+ *
+ * `omp_session_destination_full` is the contention: every one-shot on a machine writes its
+ * transcript into the same bounded run location, and a session whose sibling filled it dies
+ * on ENOSPC mid-transcript, exiting non-zero with no reason of the owner's own.
+ */
+export const SessionSilenceSchema = z.enum([
+  "omp_session_running",
+  "omp_session_destination_full",
+  "omp_session_unsealed",
+  "omp_session_failed",
+  "omp_session_cancelled",
+  "omp_session_interrupted",
+  "omp_session_refused",
+]);
+export type SessionSilence = z.infer<typeof SessionSilenceSchema>;
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const amount = z.number().finite().nonnegative();
 export const SessionUsageSchema = z.strictObject({
@@ -24,6 +49,15 @@ export const SessionReceiptSchema = z.strictObject({
   finalMessage: z.string().max(SESSION_MESSAGE_LIMIT),
   usage: SessionUsageSchema.nullable(),
   exitCode: z.number().int(),
+  /**
+   * THE TRANSCRIPT'S OWN LAST VERDICT, when the agent's last turn ended in an error rather
+   * than an answer: the word the provider or the gateway gave it, never this plugin's.
+   *
+   * A model that was never reached leaves a receipt whose `finalMessage` is empty and whose
+   * `usage` is null — the shape of an agent that ran and said nothing, which is what a
+   * caller then reports. The transcript knew better and this is where it says so (#43).
+   */
+  failure: z.string().max(SESSION_FAILURE_LIMIT).nullable(),
 });
 export type SessionReceipt = z.infer<typeof SessionReceiptSchema>;
 
@@ -101,6 +135,10 @@ const RawAssistantSchema = z.object({
   provider: z.string().max(128).optional(),
   model: z.string().max(512).optional(),
   usage: RawUsageSchema.optional(),
+  // omp writes the provider's own ending on every assistant turn; `error` is the one that
+  // means the turn carries no answer, and `errorMessage` is the word for why.
+  stopReason: z.string().max(64).optional(),
+  errorMessage: z.string().max(4096).optional(),
 });
 const RawRecordSchema = z.object({ type: z.string().max(128) });
 const RawSessionSchema = z.object({ id: z.string().max(128) });
@@ -137,6 +175,7 @@ export function parseSessionArchive(
   let cacheRead = 0;
   let cacheWrite = 0;
   let cost: number | null = null;
+  let failure: string | null = null;
   for (const line of decoder.decode(member.body).split("\n")) {
     if (line.trim().length === 0) continue;
     let raw: unknown;
@@ -156,6 +195,12 @@ export function parseSessionArchive(
     if (message.role !== "assistant") continue;
     const assistant = parse(RawAssistantSchema, message);
     finalMessage = finalText(assistant.content ?? []);
+    // The LAST turn's ending is the run's: an earlier error the agent retried past is not
+    // what stopped it, and a later answer supersedes it.
+    failure =
+      assistant.stopReason === "error"
+        ? (assistant.errorMessage ?? assistant.stopReason).slice(0, SESSION_FAILURE_LIMIT)
+        : null;
     if (assistant.model)
       model = assistant.provider
         ? `${assistant.provider}/${assistant.model}`
@@ -187,5 +232,17 @@ export function parseSessionArchive(
             ...(cost === null ? {} : { cost }),
           },
     exitCode,
+    failure,
   });
 }
+
+/**
+ * HOW A SESSION NAMES ITS DESTINATION AS THE THING THAT STOPPED IT, on its own stderr.
+ *
+ * A bounded output location is shared by every one-shot on the machine, and the kernel
+ * enforces its ceiling on the WRITE inside the sandbox: the owner sees a process that exited
+ * non-zero and reports no reason of its own, so the session's stderr is the only place the
+ * fact exists. Reading a worker's stderr for the word it declined with is this family's own
+ * convention — the gateway names `gateway_refused` and `catalog_pinned_only` there too.
+ */
+export const EXHAUSTED_DESTINATION = /ENOSPC|no space left on device/i;
