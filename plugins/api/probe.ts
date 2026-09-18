@@ -149,6 +149,21 @@ export function parseBenchmarkObservation(raw: unknown, inputValue: unknown, sta
       // Raw error text is inspected privately and is never retained in receipts.
       if (/claude_code_version_too_old/i.test(run.error)) return failure("client_blocked");
       if (/\b(?:not_found_error|model_not_found|not_found)\b/i.test(run.error)) return failure("not_found");
+      /*
+        A DATA-POLICY EXCLUSION IS A DEFINITE ANSWER, and reading it as an inconclusive one stops
+        a whole catalog. An aggregator that will not serve an endpoint to THIS account answers
+        with the reason and no `not_found` token in it — OpenRouter says "0 endpoints out of N
+        requested are available matching your guardrail restrictions and data policy", which
+        landed in `unresolved`, and one `unresolved` candidate makes
+        `catalogFromObservations` refuse `inconclusive_probe` for every other model measured
+        beside it. Observed on a live free tier where two of four endpoints served and two were
+        excluded: the two that worked could not be catalogued because of the two that could not.
+
+        `client_blocked`, not `not_found`: the endpoint exists and is published in the listing,
+        and what excludes it is the CALLER's account configuration — the same shape of fact as a
+        client too old to be served, and like that one it is settled rather than worth retrying.
+      */
+      if (/\b(?:guardrail|data policy|endpoints out of)\b/i.test(run.error)) return failure("client_blocked");
       return failure("unresolved");
     }
     if (!row.stats || row.stats.generationTps.mean !== run.generationTps || row.stats.ttftMs.mean !== run.ttftMs) return failure("unresolved");
