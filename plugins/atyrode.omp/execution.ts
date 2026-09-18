@@ -27,6 +27,7 @@ import {
   type SessionSilence,
   ProbeIdentitiesSchema,
   ThinkingLevelSchema,
+  modelId,
   PreparedHarnessSessionSchema,
   OmpSessionRefSchema,
   type OmpSessionRef,
@@ -96,6 +97,18 @@ const provenanceSchema = z.strictObject({
   inputs: z.array(JobInputBindingSchema).max(16).default([]),
 });
 type Provenance = z.infer<typeof provenanceSchema>;
+/**
+ * The part of a retained job's own `config` input this plugin reads back: the model the
+ * session was configured with, and whether substituting one was permitted.
+ *
+ * Deliberately tolerant about everything else. The config is the effective overlay merged with
+ * the native runtime configuration, it grows with the agent's own settings, and a receipt read
+ * must not start refusing old jobs because a key it never looks at appeared or went away.
+ */
+const RetainedSessionConfigSchema = z.object({
+  modelRoles: z.object({ default: modelId }).catchall(z.unknown()),
+  retry: z.object({ modelFallback: z.boolean().optional() }).catchall(z.unknown()).optional(),
+}).catchall(z.unknown());
 
 export function nativeModelConfiguration(pool: RuntimeAccountPool) {
   const selected = Object.keys(pool).filter(
@@ -807,15 +820,40 @@ export async function readSession(
       session: null,
       silence: await sessionSilence(ctx, args.machineId, result.job),
     };
-  return {
-    job: result.job,
-    session: parseSessionArchive(
-      result.archive,
-      SESSION_GUEST_PATH,
-      result.job.result?.exitCode ?? 0,
-    ),
-    silence: null,
-  };
+  // THE CONFIGURED MODEL COMES FROM THE PROVENANCE OF THE JOB THIS DOOR POSTED, never from the
+  // transcript, so the receipt's two models have independent origins and a substitution cannot
+  // present itself as agreement. A withdrawn id was answered by a published PAID model and the
+  // receipt named only the substitute, which makes the one artifact anyone audits able to
+  // attest to a run nobody configured (#49).
+  const retained = RetainedSessionConfigSchema.parse(JSON.parse(String(provenance.input.config)));
+  const configuredModel = retained.modelRoles.default;
+  const session = parseSessionArchive(
+    result.archive,
+    SESSION_GUEST_PATH,
+    result.job.result?.exitCode ?? 0,
+    configuredModel,
+  );
+  // Same ambiguity as `checkOverlay`: a trailing thinking level is not part of the id, and the
+  // transcript never carries one, so comparing the written form would report every levelled
+  // model as substituted.
+  const level = configuredModel.lastIndexOf(":");
+  const asked =
+    level > 0 && ThinkingLevelSchema.safeParse(configuredModel.slice(level + 1)).success
+      ? configuredModel.slice(0, level)
+      : configuredModel;
+  // `modelFallback: false` means no path may resolve to another model, so a receipt naming one
+  // is refused rather than recorded. With fallback permitted the receipt keeps both names and
+  // the caller decides; it is never reduced to the substitute alone.
+  //
+  // ONLY A SUBSTITUTION THAT SERVED IS REFUSED. A last turn that ended in an error names
+  // whatever model the agent was about to use when the gateway would not serve it, and
+  // refusing there would throw away `failure` — the one word that says what stopped the run —
+  // and replace a named fact with a less informative refusal, which is the defect #43 and #46
+  // exist to prevent. That case keeps its ending, with both model names in the receipt so the
+  // mismatch is still auditable.
+  if (session.model !== asked && session.failure === null && retained.retry?.modelFallback !== true)
+    throw new OmpRefusal("model_substituted");
+  return { job: result.job, session, silence: null };
 }
 /**
  * Ends a session this door posted. The hub already treats cancelling a settled job as a

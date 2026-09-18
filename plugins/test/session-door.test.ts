@@ -165,6 +165,8 @@ const receipt = {
   usage: { input: 30, output: 60, cacheRead: 2, cacheWrite: 4, cost: 0.75 },
   exitCode: 0,
   failure: null,
+  // The receipt carries what was asked for beside what answered; here they agree.
+  configuredModel: "anthropic/claude-sonnet-4-5",
 };
 
 function publicJob(
@@ -765,6 +767,42 @@ test("a receipt carries the ending the transcript recorded", async () => {
   expect(read.session?.finalMessage).toBe("");
   expect(read.session?.usage).toBeNull();
   expect(read.session?.failure).toBe("gateway_unavailable");
+  // The turn that failed names the model the agent was about to use, which is not the one this
+  // session configured. That mismatch is REPORTED rather than refused, because the ending is
+  // the fact worth having, and both names are present so it is still auditable (#49).
+  expect(read.session?.model).toBe("openrouter/deepseek/deepseek-v4-flash:free");
+  expect(read.session?.configuredModel).toBe("anthropic/claude-sonnet-4-5");
+});
+
+/**
+ * A withdrawn model was replaced by a published PAID one and the receipt named only the
+ * substitute, so the single artifact anyone audits could attest to a run nobody configured —
+ * and a model-exclusivity claim proved by reading `model` off persisted receipts would have
+ * believed it. With `modelFallback: false` no path may resolve to another model, so a receipt
+ * that names one is refused (#49).
+ */
+test("a session that served under a model it was not configured with is refused", async () => {
+  const f = fixture();
+  const job = await run(f);
+  const substituted = [
+    JSON.stringify({ type: "session", version: 3, id: sessionId }),
+    JSON.stringify({
+      type: "message",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "answered under another model" }],
+        provider: "openrouter",
+        model: "openai/gpt-5.5",
+        usage: { input: 10, output: 20, cacheRead: 0, cacheWrite: 0, cost: { total: 0.5 } },
+        stopReason: "end_turn",
+      },
+    }),
+    "",
+  ].join("\n");
+  f.seal(job.jobId, ustar([[transcriptName, substituted]]));
+  expect(await f.client.call("readSession", { ...target, jobId: job.jobId })).toEqual({
+    refused: "omp_model_substituted",
+  });
 });
 
 test("readSession refuses a transcript that does not name the session it reports", async () => {
