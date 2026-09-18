@@ -47,10 +47,14 @@ export async function readGatewaySetup(ctx: OmpContext, destination: ActionInput
   }
 }
 const implementations: GatewayHandlers = { readGatewaySetup, reviewGateway, configureGateway };
+// All three reach `ctx.jobs.describe` through `observeNative` — `readGatewaySetup` here,
+// the other two through `currentOperation` — and that read takes `machines:read` in the
+// calling plugin's capabilities, separate from running there (#45).
+const gatewaySetupCaps: readonly Cap[] = ["machines:read", "machines:run", "jobs:read", "services:read", "services:configure"];
 const delegates: Record<GatewayAction, readonly Cap[]> = {
-  readGatewaySetup: ["machines:run", "jobs:read", "services:read", "services:configure"],
-  reviewGateway: ["machines:run", "jobs:read", "services:read", "services:configure"],
-  configureGateway: ["machines:run", "jobs:read", "services:read", "services:configure"],
+  readGatewaySetup: gatewaySetupCaps,
+  reviewGateway: gatewaySetupCaps,
+  configureGateway: gatewaySetupCaps,
 };
 export const handlers = Object.fromEntries((Object.keys(gatewayActionSchemas) as GatewayAction[]).map(name => [name,
   async (ctx: OmpContext, raw: unknown) => {

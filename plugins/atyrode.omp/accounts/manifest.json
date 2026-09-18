@@ -7,6 +7,7 @@
     "containers:read",
     "containers:write",
     "terminals:spawn",
+    "machines:read",
     "machines:run",
     "jobs:read",
     "jobs:input",
