@@ -53,11 +53,19 @@ export function safeNativeStream(body: ReadableStream<Uint8Array>, model: Model<
           // exhausted balance and a rate limit all reached the caller as one word and left the
           // owner nothing to read. Same rule as `safeFailure`: a fixed label and numbers only,
           // never a body, header, URL, bearer or upstream message.
-          const reported: unknown = event.error ?? event.message ?? event.partial ?? {};
-          const numeric = (value: unknown): string =>
-            typeof value === "number" && Number.isFinite(value) ? String(value) : "none";
-          const stop = (reported as { stopReason?: unknown }).stopReason;
-          writeSync(2, `gateway_stream_refused ${event.type} ${typeof stop === "string" ? stop : "none"} ${numeric((reported as { status?: unknown }).status)} ${numeric((reported as { code?: unknown }).code)}\n`);
+          const reported = (event.error ?? event.message ?? event.partial ?? {}) as {
+            stopReason?: unknown; errorStatus?: unknown; errorId?: unknown; status?: unknown; code?: unknown;
+          };
+          const numeric = (...values: unknown[]): string => {
+            const found = values.find(value => typeof value === "number" && Number.isFinite(value));
+            return found === undefined ? "none" : String(found);
+          };
+          // `errorStatus`/`errorId` FIRST, because those are the names the SDK's failed assistant
+          // message actually carries; `status`/`code` are the shapes a bare error event uses. The
+          // first version of this line read only the latter pair and printed `none none` against a
+          // real upstream 404, which is a log that reports its own absence of information.
+          const stop = reported.stopReason;
+          writeSync(2, `gateway_stream_refused ${event.type} ${typeof stop === "string" ? stop : "none"} ${numeric(reported.errorStatus, reported.status)} ${numeric(reported.errorId, reported.code)}\n`);
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(failure)}\n\ndata: [DONE]\n\n`));
           controller.terminate();
           return;
