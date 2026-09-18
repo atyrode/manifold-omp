@@ -46,6 +46,18 @@ export function safeNativeStream(body: ReadableStream<Uint8Array>, model: Model<
         const event = JSON.parse(data);
         if (!event || typeof event !== "object" || typeof event.type !== "string") throw unavailable();
         if (event.type === "error" || event.message?.stopReason === "error" || event.message?.stopReason === "aborted" || event.partial?.stopReason === "error" || event.partial?.stopReason === "aborted") {
+          // The MACHINE learns which check refused, on THIS path too. `safeFailure` writes its
+          // fixed label and numeric status for a request the boundary itself rejects, and the
+          // header above states that guarantee for the whole boundary — but an upstream error
+          // arriving INSIDE the stream was substituted silently, so a broken credential, an
+          // exhausted balance and a rate limit all reached the caller as one word and left the
+          // owner nothing to read. Same rule as `safeFailure`: a fixed label and numbers only,
+          // never a body, header, URL, bearer or upstream message.
+          const reported: unknown = event.error ?? event.message ?? event.partial ?? {};
+          const numeric = (value: unknown): string =>
+            typeof value === "number" && Number.isFinite(value) ? String(value) : "none";
+          const stop = (reported as { stopReason?: unknown }).stopReason;
+          writeSync(2, `gateway_stream_refused ${event.type} ${typeof stop === "string" ? stop : "none"} ${numeric((reported as { status?: unknown }).status)} ${numeric((reported as { code?: unknown }).code)}\n`);
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(failure)}\n\ndata: [DONE]\n\n`));
           controller.terminate();
           return;

@@ -320,6 +320,43 @@ describe("native account-pool gateway", () => {
     expect(event.error).toMatchObject({ provider: model.provider, model: model.id, api: model.api, stopReason: "error", content: [] });
   });
 
+  test("a masked stream refusal still tells the machine which check refused, in a child so fd 2 is real", async () => {
+    // `writeSync(2, …)` writes a real descriptor, so the assertion needs a real one: in-process
+    // capture would test a stub instead of the thing that reaches the machine's job output.
+    // Inside the plugin tree, because the child resolves `@oh-my-pi/*` through its node_modules.
+    const scriptDirectory = mkdtempSync(join(new URL("../../", import.meta.url).pathname, ".gateway-stream-"));
+    const script = join(scriptDirectory, "probe.ts");
+    const gateway = new URL("./boundary.ts", import.meta.url).pathname;
+    const inputs = new URL("./inputs.ts", import.meta.url).pathname;
+    const storage = new URL("./storage.ts", import.meta.url).pathname;
+    // The child's specifiers are absolute paths resolved at runtime, and its imports must come
+    // after `setTransports` for the same logging barrier this file observes at its own top.
+    writeFileSync(script, [
+      `import { setTransports } from "@oh-my-pi/pi-utils/logger";`,
+      `setTransports({ file: false, console: false });`,
+      `const { safeNativeStream } = await import(${JSON.stringify(gateway)});`,
+      `const { parseInputs } = await import(${JSON.stringify(inputs)});`,
+      `const { poolModels } = await import(${JSON.stringify(storage)});`,
+      `const pool = parseInputs(${JSON.stringify(broker)}, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] }, ${JSON.stringify(serviceBearer)}).accountPool;`,
+      `const model = [...poolModels(pool).values()][0];`,
+      // An upstream 402 with a message no caller may see and the machine must not print either.
+      `const raw = "data: " + JSON.stringify({ type: "error", error: { status: 402, code: 7, stopReason: "error", errorMessage: "fixture-source-token" } }) + "\\n\\n";`,
+      `const bytes = new TextEncoder().encode(raw);`,
+      `const source = new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } });`,
+      `process.stdout.write(await new Response(safeNativeStream(source, model)).text());`,
+    ].join("\n"));
+    const child = Bun.spawn([process.execPath, script], { stdout: "pipe", stderr: "pipe" });
+    const [, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+    rmSync(scriptDirectory, { force: true, recursive: true });
+
+    // The label names the path, and the numbers distinguish an exhausted balance from a bad
+    // credential or a rate limit. Before this, all three arrived as one word and logged nothing.
+    expect(stderr).toContain("gateway_stream_refused error error 402 7\n");
+    // Same rule as `safeFailure`: numbers and fixed labels, never the upstream's words.
+    expect(stderr).not.toContain("fixture-source-token");
+    expect(stdout).not.toContain("fixture-source-token");
+  });
+
   test("worker startup refusal contains stdout and raw exception output", async () => {
     const child = Bun.spawn([process.execPath, new URL("./entry.ts", import.meta.url).pathname], {
       env: { MANIFOLD_JOB_CONTEXT_FD: "invalid-fixture-source-token", ANTHROPIC_API_KEY: "fixture-provider-token" },
