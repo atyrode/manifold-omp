@@ -13,6 +13,7 @@ import { digestOf, type OmpContext } from "../atyrode.omp/machine-server.ts";
 import manifest from "../atyrode.omp/manifest.json";
 import { openSessionsRoot, prepareSessionFile, resolveSessionFile } from "../workers/harness/sessions.ts";
 import { materializeJobInputs } from "../../../manifold/packages/agent/src/job-inputs.ts";
+import { ABSENT_MODEL_ID, UNLISTED_PUBLISHED_ID } from "./fixtures/models.ts";
 
 function launchFixture() {
   const machineId = "fixture-machine";
@@ -254,7 +255,7 @@ test("a model this machine cannot serve refuses, and a colon is read for what it
       overlay: { modelRoles: { default: model } },
     });
   // A session used to run whatever the agent resolved instead, and the receipt named that.
-  await expect(resume("anthropic/stealth/not-a-model")).rejects.toThrow("omp_model_unavailable");
+  await expect(resume(`anthropic/${ABSENT_MODEL_ID}`)).rejects.toThrow("omp_model_unavailable");
   // A trailing thinking level names a level, so the model in front of it still resolves.
   const levelled = await resume("anthropic/claude-sonnet-4-5:high");
   expect(JSON.parse(String(levelled.runtime.input.config)).modelRoles.default).toBe(
@@ -265,7 +266,7 @@ test("a model this machine cannot serve refuses, and a colon is read for what it
   // A provider whose catalog the gateway resolves live is decided by the machine, not by this
   // build's snapshot. Identity is no longer judged here, so an id the SDK never carried stops
   // at the credential question instead of being refused for not existing.
-  await expect(resume("openrouter/stealth/union-alpha")).rejects.toThrow("omp_account_unavailable");
+  await expect(resume(UNLISTED_PUBLISHED_ID)).rejects.toThrow("omp_account_unavailable");
 });
 
 test("operator session doors reject non-owner and container-scoped authority", async () => {

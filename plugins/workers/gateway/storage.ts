@@ -117,9 +117,10 @@ export function poolModels(pool: RuntimeAccountPool): Map<string, Model<Api>> {
  * A published key is `${provider}/${model.id}`, and a client qualifies the id it was configured
  * with by a provider of its own choosing — the row's `owned_by` when it discovered the model
  * here, or the first account in its pool when it did not. So a session configured for
- * `openrouter/stealth/union-alpha` asks for `openrouter/openrouter/stealth/union-alpha` or
- * `openai-codex/openrouter/stealth/union-alpha`, and answering 404 blames the caller for
- * qualifying a name this gateway handed out.
+ * `openrouter/example.invalid/unlisted-alpha` — any id whose own vendor namespace the bundled
+ * catalog does not carry — asks for `openrouter/openrouter/example.invalid/unlisted-alpha` or
+ * `openai-codex/openrouter/example.invalid/unlisted-alpha`, and answering 404 blames the caller
+ * for qualifying a name this gateway handed out.
  *
  * Dropping that one leading segment is name parsing, not authority: the remainder must itself
  * be a published key, so it carries its own provider, and the model that comes back is served
