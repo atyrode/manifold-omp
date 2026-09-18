@@ -145,9 +145,14 @@ try {
     const destination = await call("describeDestination", target);
     check(destination.state === "offline" && destination.operations.every(operation => operation.state === "offline"), "offline-destination-reported-ready");
     phase = "non-owner-destination-without-broker";
+    // The native bridge is the CALLER's caps intersected with the door's `caps + delegates`
+    // (`plugin-host.ts`'s `nativeAuth`), so a non-owner reads a machine through this door only
+    // while holding the capability that reads one. Since #736/#739 that word is `machines:read`,
+    // not `machines:run`; this observer holds both, because `observeNative` still gates the
+    // caller on `machines:run` for that machine before it reads anything.
     const observer = await mintToken(server, {
       principal: { kind: "human", name: "Readiness observer", color: "#336699" },
-      caps: ["containers:read", "machines:run", "jobs:read", "services:read"],
+      caps: ["containers:read", "machines:read", "machines:run", "jobs:read", "services:read"],
     });
     const observerReply = await dispatch(hub, observer.token, actionDoor("describeDestination"), target);
     check(observerReply.ok, "broker-absence-erased-destination");
