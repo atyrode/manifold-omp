@@ -3,6 +3,7 @@ import {
   OMP_VERSION,
   PROBE_MODEL_LIMIT,
   parseBenchmarkInput,
+  parseBenchmarkObservation,
   ProbeIdentitiesSchema,
   type ProbeIdentity,
   type RuntimeAccountPool,
@@ -84,4 +85,38 @@ test("a variant suffix is benchmarkable and a thinking suffix is not", () => {
   // `high` IS a level, so this selector names a model and a level at once: still refused.
   expect(() => parseBenchmarkInput(candidate("anthropic/claude-sonnet-4-5:high"))).toThrow("invalid_input");
   expect(() => parseBenchmarkInput(candidate("vendor/model:minimal"))).toThrow("invalid_input");
+});
+
+/**
+ * A candidate the provider will not serve THIS account is a settled answer, and reporting it as
+ * inconclusive costs every model measured beside it: one `unresolved` row makes a catalog
+ * derivation refuse `inconclusive_probe` for the whole set.
+ */
+function reportFor(id: string, error: string) {
+  const input = parseBenchmarkInput(candidate(id));
+  const selector = `openrouter/${id}`;
+  return {
+    raw: { runs: 1, maxTokens: 4, profile: "chat", failures: 1,
+      models: [{ selector, model: selector, results: [{ ok: false, challenge: "chat", error }], stats: null }] },
+    input,
+  };
+}
+
+test("an endpoint excluded by the account's data policy is settled, not inconclusive", () => {
+  // The provider's own sentence, which carries no `not_found` token and so used to land in
+  // `unresolved`. Observed live on a free tier where two of four endpoints served.
+  const excluded = reportFor("minimax/minimax-m3:free",
+    "404 0 endpoints out of 1 requested are available matching your guardrail restrictions and data policy. We removed them for the following reasons: Free model training violation");
+  expect(parseBenchmarkObservation(excluded.raw, excluded.input, 1_700_000_000_001, 1_700_000_000_002).results[0]!.status).toBe("client_blocked");
+
+  // A genuinely unexplained failure stays inconclusive: this widens no other case.
+  const puzzling = reportFor("vendor/model:free", "socket hang up");
+  expect(parseBenchmarkObservation(puzzling.raw, puzzling.input, 1_700_000_000_001, 1_700_000_000_002).results[0]!.status).toBe("unresolved");
+
+  // And the upstream's words reach no receipt, on either path.
+  for (const built of [excluded, puzzling]) {
+    const receipt = parseBenchmarkObservation(built.raw, built.input, 1_700_000_000_001, 1_700_000_000_002);
+    expect(JSON.stringify(receipt)).not.toContain("guardrail");
+    expect(JSON.stringify(receipt)).not.toContain("socket hang up");
+  }
 });
