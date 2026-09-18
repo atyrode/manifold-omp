@@ -30,7 +30,8 @@ export async function startPoolGateway(inputs: GatewayInputs, ownerSignal: Abort
     signal.throwIfAborted();
     storage = await openPoolStorage(inputs.broker, inputs.accountPool, signal, fetchImpl);
     signal.throwIfAborted();
-    const models = await publishedModels(inputs.accountPool, signal, fetchImpl);
+    const catalog = await publishedModels(inputs.accountPool, signal, fetchImpl);
+    const models = catalog.models;
     // The SDK exposes diagnostic routes without a hook to disable them. Its
     // unannounced listener uses a separate private capability so possession of
     // the native service bearer cannot bypass the safe application boundary.
@@ -38,7 +39,7 @@ export async function startPoolGateway(inputs: GatewayInputs, ownerSignal: Abort
     sdk = startAuthGateway({ bind: "127.0.0.1:0", bearerTokens: [internalBearer], storage,
       resolveModel: id => resolvePublished(models, id), listModels: () => models.values(),
     });
-    boundary = startPrivateBoundary({ url: sdk.url, bearer: internalBearer }, inputs.serviceBearer, models, signal);
+    boundary = startPrivateBoundary({ url: sdk.url, bearer: internalBearer }, inputs.serviceBearer, models, signal, catalog.unreadable);
     signal.throwIfAborted();
     return { port: boundary.port, close };
   } catch {

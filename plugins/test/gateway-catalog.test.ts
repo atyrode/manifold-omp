@@ -19,7 +19,7 @@ const listing = (models: { id: string; context_length?: number; supported_parame
 
 describe("the gateway publishes what its provider serves", () => {
   test("a model the pinned SDK never carried is published from the provider's listing", async () => {
-    const models = await publishedModels(pool, AbortSignal.timeout(5_000), listing([{ id: UNLISTED_MODEL_ID }]));
+    const { models, unreadable } = await publishedModels(pool, AbortSignal.timeout(5_000), listing([{ id: UNLISTED_MODEL_ID }]));
     const published = models.get(UNLISTED_PUBLISHED_ID);
     expect(published?.id).toBe(UNLISTED_MODEL_ID);
     expect(published?.provider).toBe("openrouter");
@@ -27,18 +27,24 @@ describe("the gateway publishes what its provider serves", () => {
     // model that has none is what made a configured id resolve to something else.
     expect(published?.thinking ?? null).toBeNull();
     expect(models.size).toBeGreaterThan(poolModels(pool).size);
+    // A listing that WAS read reports nothing unreadable, which is what lets the boundary
+    // answer 404 for a model that genuinely is not published.
+    expect(unreadable).toBeNull();
   });
 
   test("a listing this gateway cannot read leaves the pinned catalog in place", async () => {
     const failing = (() => Promise.reject(new Error("offline"))) as unknown as typeof fetch;
-    const models = await publishedModels(pool, AbortSignal.timeout(5_000), failing);
+    const { models, unreadable } = await publishedModels(pool, AbortSignal.timeout(5_000), failing);
     expect(models.size).toBe(poolModels(pool).size);
     expect(models.size).toBeGreaterThan(0);
+    // And it says WHICH failure left it pinned-only, rather than looking like a live read that
+    // happened to carry fewer models.
+    expect(unreadable).toBe("Error");
   });
 
   test("a bundled model is never replaced by its listed row", async () => {
     const [firstKey, bundled] = [...poolModels(pool).entries()][0] as [string, Model<Api>];
-    const models = await publishedModels(
+    const { models } = await publishedModels(
       pool,
       AbortSignal.timeout(5_000),
       listing([{ id: bundled.id, context_length: 7 }]),
@@ -55,9 +61,12 @@ describe("the gateway publishes what its provider serves", () => {
       if (calls < 3) return Promise.resolve(Response.json({ error: "slow down" }, { status: 429 }));
       return Promise.resolve(Response.json({ data: [{ id: UNLISTED_MODEL_ID, pricing: { prompt: "0", completion: "0" }, context_length: 262_144 }] }));
     }) as unknown as typeof fetch;
-    const models = await publishedModels(pool, AbortSignal.timeout(10_000), flaky);
+    const { models, unreadable } = await publishedModels(pool, AbortSignal.timeout(10_000), flaky);
     expect(calls).toBe(3);
     expect(models.get(UNLISTED_PUBLISHED_ID)?.id).toBe(UNLISTED_MODEL_ID);
+    // Read on the third attempt, so nothing is degraded: a transient refusal that recovered is
+    // not a catalog this gateway could not read.
+    expect(unreadable).toBeNull();
   });
 });
 

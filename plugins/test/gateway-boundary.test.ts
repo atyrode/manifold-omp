@@ -81,6 +81,47 @@ test("an unpublished model is refused before any upstream hop", async () => {
   expect(reached).toBe(false);
 });
 
+test("a model missing while the live listing was unreadable is not the caller's 404", async () => {
+  // The difference a caller can act on: "the listing does not contain your model" is a 404 and
+  // theirs to fix, while "I could not read the listing your model would be in" is this
+  // gateway's and retryable. Answering the second as the first is what let an unreadable
+  // catalog look like a working one for hours (atyrode/manifold#751).
+  let reached = false;
+  upstream = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => {
+      reached = true;
+      return Response.json({ ok: true });
+    },
+  });
+  boundary = startPrivateBoundary(
+    { url: upstream.url.origin, bearer: "internal" },
+    BEARER,
+    models,
+    AbortSignal.timeout(10_000),
+    "TimeoutError",
+  );
+  const response = await fetch(`http://127.0.0.1:${boundary.port}/v1/pi/stream`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${BEARER}`, "content-type": "application/json" },
+    body: JSON.stringify({ modelId: `openrouter/${ABSENT_MODEL_ID}`, context: { messages: [] } }),
+  });
+  expect(response.status).toBe(503);
+  // Refused before any upstream hop, like the 404 case: the status is the only thing that
+  // changed, and it is the part a caller can act on.
+  expect(reached).toBe(false);
+  // A published model still resolves while the catalog is pinned-only, so the snapshot is not
+  // discarded — only stopped from impersonating a complete answer. Reaching the upstream hop is
+  // the proof; what that hop then answers is the upstream message contract, not this case.
+  await fetch(`http://127.0.0.1:${boundary.port}/v1/pi/stream`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${BEARER}`, "content-type": "application/json" },
+    body: JSON.stringify({ modelId: MODEL, context: { messages: [] } }),
+  });
+  expect(reached).toBe(true);
+});
+
 test("the service bearer is required", async () => {
   upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("unreachable", { status: 200 }) });
   boundary = startPrivateBoundary(

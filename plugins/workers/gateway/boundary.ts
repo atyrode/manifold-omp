@@ -59,7 +59,14 @@ export function safeNativeStream(body: ReadableStream<Uint8Array>, model: Model<
 }
 
 export interface PrivateBoundary { port: number; close(): void }
-export function startPrivateBoundary(target: { url: string; bearer: string }, bearer: string, models: ReadonlyMap<string, Model<Api>>, signal: AbortSignal): PrivateBoundary {
+/**
+ * `catalogUnreadable` is the reason the provider's live listing could not be read on this
+ * start, or null. It exists so an unresolved model is refused by the right name: a gateway
+ * serving only the SDK's bundled snapshot cannot tell a model that does not exist from one it
+ * could not look up, and answering the caller 404 for the second case blames them for a name
+ * this gateway simply never fetched (atyrode/manifold#751).
+ */
+export function startPrivateBoundary(target: { url: string; bearer: string }, bearer: string, models: ReadonlyMap<string, Model<Api>>, signal: AbortSignal, catalogUnreadable: string | null = null): PrivateBoundary {
   const expected = Buffer.from(`Bearer ${bearer}`);
   const server = Bun.serve({
     hostname: "127.0.0.1", port: 0, idleTimeout: 255, maxRequestBodySize: FRAME_LIMIT,
@@ -80,7 +87,11 @@ export function startPrivateBoundary(target: { url: string; bearer: string }, be
         if (payload) {
           const parsed = parseRequest(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(payload)));
           model = resolvePublished(models, parsed.modelId);
-          if (!model) return safeFailure(404, "model_not_published");
+          if (!model)
+            return catalogUnreadable === null
+              ? safeFailure(404, "model_not_published")
+              // 503, not 404: the model may well be serveable and this gateway does not know.
+              : safeFailure(503, `catalog_unreadable_${catalogUnreadable}`);
         }
         const requestSignal = AbortSignal.any([signal, request.signal]);
         const headers = new Headers(request.headers);
