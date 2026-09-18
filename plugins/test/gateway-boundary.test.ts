@@ -1,11 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import { startPrivateBoundary, type PrivateBoundary } from "../workers/gateway/boundary.ts";
+import { ABSENT_MODEL_ID, UNLISTED_MODEL_ID, UNLISTED_PUBLISHED_ID } from "./fixtures/models.ts";
 
 const BEARER = "service-bearer-for-this-test";
-const MODEL = "openrouter/stealth/union-alpha";
+const MODEL = UNLISTED_PUBLISHED_ID;
 const models = new Map<string, Model<Api>>([
-  [MODEL, { id: "stealth/union-alpha", provider: "openrouter", api: "openrouter" } as Model<Api>],
+  [MODEL, { id: UNLISTED_MODEL_ID, provider: "openrouter", api: "openrouter" } as Model<Api>],
 ]);
 
 let boundary: PrivateBoundary | undefined;
@@ -74,7 +75,7 @@ test("an unpublished model is refused before any upstream hop", async () => {
   const response = await fetch(`http://127.0.0.1:${boundary.port}/v1/pi/stream`, {
     method: "POST",
     headers: { authorization: `Bearer ${BEARER}`, "content-type": "application/json" },
-    body: JSON.stringify({ modelId: "openrouter/stealth/not-a-model", context: { messages: [] } }),
+    body: JSON.stringify({ modelId: `openrouter/${ABSENT_MODEL_ID}`, context: { messages: [] } }),
   });
   expect(response.status).toBe(404);
   expect(reached).toBe(false);
