@@ -22,7 +22,9 @@ import {
   SESSION_OPERATION_ID,
   SESSION_OUTPUT_NAME,
   RUNS_LOCATION_ID,
+  EXHAUSTED_DESTINATION,
   parseSessionArchive,
+  type SessionSilence,
   ProbeIdentitiesSchema,
   ThinkingLevelSchema,
   PreparedHarnessSessionSchema,
@@ -45,6 +47,7 @@ import {
   digestOf,
   OmpRefusal,
   readJobResult,
+  readNamedOutput,
   jobOfDoor,
   readSealedArchive,
   type OmpContext,
@@ -716,10 +719,60 @@ async function sessionProvenance(ctx: OmpContext, target: Target, jobId: string)
   return provenance;
 }
 /**
+ * HOW MUCH OF A SESSION'S STANDARD ERROR IS READ TO FIND THE WORD IT DIED WITH.
+ *
+ * The whole output is read and its sealed digest checked, because a substituted page is not
+ * evidence; a stderr larger than this is a run that had plenty to say, and the generic
+ * `omp_session_failed` is then the honest answer rather than a guess from a fragment.
+ */
+const SESSION_STDERR_LIMIT = 1 << 16;
+/**
+ * WHICH FACT STOPPED A SESSION THAT HAS NO RECEIPT — one word, never an absence (#43).
+ *
+ * Every one-shot on a machine writes its transcript into the same bounded run location. A
+ * session whose siblings filled it dies on ENOSPC mid-transcript and the owner reports a
+ * plain non-zero exit with no reason of its own, so `exited`/`exitCode: 1`/no output read
+ * identically to an agent that failed on its own account. The session said which it was on
+ * its stderr, and this reads it there rather than leaving the caller to guess.
+ *
+ * A stderr this cannot read leaves `omp_session_failed`: a diagnostic read must never turn
+ * an answerable poll into a refusal.
+ */
+async function sessionSilence(
+  ctx: OmpContext,
+  machineId: string,
+  job: PublicJob,
+): Promise<SessionSilence> {
+  if (job.state === "refused") return "omp_session_refused";
+  if (job.state === "cancelled") return "omp_session_cancelled";
+  if (job.state === "interrupted") return "omp_session_interrupted";
+  if (job.state !== "exited") return "omp_session_running";
+  if (job.result?.exitCode === 0) return "omp_session_unsealed";
+  const stderr = job.result?.outputs.find((output) => output.name === "stderr");
+  if (!stderr || stderr.bytes < 1 || stderr.bytes > SESSION_STDERR_LIMIT)
+    return "omp_session_failed";
+  let said: Uint8Array;
+  try {
+    said = await readNamedOutput(
+      ctx,
+      machineId,
+      SESSION_OPERATION_ID,
+      job,
+      "stderr",
+      SESSION_STDERR_LIMIT,
+    );
+  } catch {
+    return "omp_session_failed";
+  }
+  return EXHAUSTED_DESTINATION.test(new TextDecoder("utf-8").decode(said))
+    ? "omp_session_destination_full"
+    : "omp_session_failed";
+}
+/**
  * The run, and its receipt once there is one. A caller polling a session has to tell "not
  * yet" from "never", so a job that is still going, that failed, or whose transcript the
- * owner could not seal is answered with a null receipt and its own `state`/`exitCode`;
- * only a job this door never posted is refused.
+ * owner could not seal is answered with a null receipt AND the word for which of those it
+ * is; only a job this door never posted is refused.
  *
  * The `session` lease is created beneath `atyrode.omp.runs`, which every one-shot mounts
  * writable, and the owner withholds a seal until every overlapping writer exits: a
@@ -727,6 +780,10 @@ async function sessionProvenance(ctx: OmpContext, target: Target, jobId: string)
  * was alive when this lease was created is still running. Only one-shots hold that
  * location — an operator's interactive terminal runs `atyrode.omp.launch`, which never
  * mounts it, so a day-long terminal cannot withhold a receipt.
+ *
+ * That location is also BOUNDED and SHARED, and this door carries what that costs: a
+ * session whose siblings filled it never wrote a transcript, and says so as
+ * `omp_session_destination_full` instead of as an empty success (#43).
  */
 export async function readSession(
   ctx: OmpContext,
@@ -744,16 +801,20 @@ export async function readSession(
     SESSION_ARCHIVE_LIMIT,
   );
   checkJob(result.job, provenance, args.jobId);
+  if (result.archive === null)
+    return {
+      job: result.job,
+      session: null,
+      silence: await sessionSilence(ctx, args.machineId, result.job),
+    };
   return {
     job: result.job,
-    session:
-      result.archive === null
-        ? null
-        : parseSessionArchive(
-            result.archive,
-            SESSION_GUEST_PATH,
-            result.job.result?.exitCode ?? 0,
-          ),
+    session: parseSessionArchive(
+      result.archive,
+      SESSION_GUEST_PATH,
+      result.job.result?.exitCode ?? 0,
+    ),
+    silence: null,
   };
 }
 /**

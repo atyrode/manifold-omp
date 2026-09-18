@@ -21,7 +21,7 @@ import {
   BenchmarkReceiptSchema,
 } from "./probe.ts";
 import { PermittedUsageSnapshotSchema } from "./usage.ts";
-import { SessionReceiptSchema } from "./session.ts";
+import { SessionReceiptSchema, SessionSilenceSchema } from "./session.ts";
 export * from "./contracts.ts";
 export * from "./probe.ts";
 export * from "./session.ts";
@@ -409,12 +409,19 @@ export const rootActionSchemas = {
     }),
     result: PublicJobSchema,
   },
-  /** The job always, for a session this door posted; the receipt only once it is sealed. */
+  /**
+   * The job always, for a session this door posted; the receipt only once it is sealed, and
+   * when there is no receipt, the one word saying which fact stopped it (#43). Exactly one of
+   * `session` and `silence` is ever null: an absence answered five facts at once, and a
+   * caller settling a claim on it could not tell a run that is still going from one whose
+   * destination filled under it.
+   */
   readSession: {
     input: TargetSchema.extend({ jobId: id }),
     result: z.strictObject({
       job: PublicJobSchema,
       session: SessionReceiptSchema.nullable(),
+      silence: SessionSilenceSchema.nullable(),
     }),
   },
   /** Ends a session this door posted. Idempotent: a settled run is answered, not refused. */

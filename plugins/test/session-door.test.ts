@@ -34,7 +34,7 @@ type PostedJob = {
   inputs?: JobInputBinding[];
 };
 type JobOverrides = {
-  state?: "exited" | "started";
+  state?: "exited" | "started" | "cancelled" | "interrupted";
   exitCode?: number | null;
   door?: string;
   inputs?: JobInputBinding[];
@@ -48,6 +48,8 @@ interface Fixture {
   posted: PostedJob[];
   cancelled: string[];
   seal(jobId: string, archive: Buffer): void;
+  /** What the session process wrote to its standard error, as the owner sealed it. */
+  said(jobId: string, stderr: string): void;
   amend(jobId: string, overrides: JobOverrides): void;
   state: { gatewayRevision: string };
 }
@@ -162,6 +164,7 @@ const receipt = {
   finalMessage: "the repository builds one plugin",
   usage: { input: 30, output: 60, cacheRead: 2, cacheWrite: 4, cost: 0.75 },
   exitCode: 0,
+  failure: null,
 };
 
 function publicJob(
@@ -417,6 +420,19 @@ function fixture(): Fixture {
         },
       ];
     },
+    said(jobId, stderr) {
+      const job = jobs.get(jobId)!;
+      const outputId = `${jobId}-stderr`;
+      const bytes = Buffer.from(stderr, "utf8");
+      archives.set(outputId, bytes);
+      job.result!.outputs.push({
+        outputId,
+        name: "stderr",
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        bytes: bytes.length,
+        files: 1,
+      });
+    },
     amend: advance,
     state,
   };
@@ -656,6 +672,99 @@ test("readSession answers a run whose transcript was never sealed", async () => 
   if ("refused" in read) throw new Error(read.refused);
   expect(read.session).toBeNull();
   expect(read.job.result?.exitCode).toBe(0);
+});
+
+/**
+ * #43: FOUR SESSIONS THAT PRODUCED NOTHING, AND WHY EACH ONE PRODUCED NOTHING.
+ *
+ * Measured on the preview: six one-shots in one container, a shared 1 MiB run destination
+ * with 8 KiB free. Two sealed a transcript; four died on ENOSPC mid-transcript and came back
+ * as `exited`, `exitCode: 1`, no output and `reason: null` — the same answer as a session
+ * that ran and said nothing, which is how a conductor reported reviews that never reached a
+ * model as reviews that had nothing to say. A caller cannot act on an absence, so every one
+ * of these answers carries the word for the fact that stopped it, and no two facts share a
+ * word.
+ */
+test("a session stopped by its destination is distinguishable from one that ran", async () => {
+  const contended = fixture();
+  const starved = await run(contended);
+  // What the owner seals for a run whose transcript never landed: the process's own last
+  // words, and an exit status that says nothing about whose fault it was.
+  contended.amend(starved.jobId, { exitCode: 1 });
+  contended.said(
+    starved.jobId,
+    "ENOSPC: no space left on device, write\n  at writeTextSync (/$bunfs/root/omp-linux-x64)\n",
+  );
+  const denied = await contended.client.call("readSession", {
+    ...target,
+    jobId: starved.jobId,
+  });
+  if ("refused" in denied) throw new Error(denied.refused);
+  expect(denied.session).toBeNull();
+  expect(denied.silence).toBe("omp_session_destination_full");
+
+  const served = fixture();
+  const finished = await run(served);
+  served.seal(finished.jobId, ustar([[transcriptName, transcript]]));
+  const receipted = await served.client.call("readSession", {
+    ...target,
+    jobId: finished.jobId,
+  });
+  if ("refused" in receipted) throw new Error(receipted.refused);
+  expect(receipted.session).toEqual(receipt);
+  expect(receipted.silence).toBeNull();
+
+  // The other ways to have no receipt are not that one, and are not each other.
+  const words: string[] = [];
+  for (const overrides of [
+    { state: "started" as const, exitCode: null },
+    { exitCode: 1 },
+    { exitCode: 0 },
+    { state: "cancelled" as const, exitCode: null },
+  ]) {
+    const f = fixture();
+    const job = await run(f);
+    f.amend(job.jobId, overrides);
+    const read = await f.client.call("readSession", { ...target, jobId: job.jobId });
+    if ("refused" in read) throw new Error(read.refused);
+    expect(read.session).toBeNull();
+    words.push(read.silence!);
+  }
+  expect(words).not.toContain("omp_session_destination_full");
+  expect(new Set(words).size).toBe(words.length);
+});
+
+/**
+ * A model that was never reached leaves a receipt shaped exactly like an agent that ran and
+ * chose to say nothing: a model, an empty final message and no usage. Measured on the
+ * preview while the gateway could not read its provider's catalog — every session sealed a
+ * transcript whose last turn was `stopReason: "error"`, and the receipt threw that away.
+ */
+test("a receipt carries the ending the transcript recorded", async () => {
+  const f = fixture();
+  const job = await run(f);
+  const failed = [
+    JSON.stringify({ type: "session", version: 3, id: sessionId }),
+    JSON.stringify({
+      type: "message",
+      message: {
+        role: "assistant",
+        content: [],
+        provider: "openrouter",
+        model: "deepseek/deepseek-v4-flash:free",
+        stopReason: "error",
+        errorMessage: "gateway_unavailable",
+      },
+    }),
+    "",
+  ].join("\n");
+  f.seal(job.jobId, ustar([[transcriptName, failed]]));
+  const read = await f.client.call("readSession", { ...target, jobId: job.jobId });
+  if ("refused" in read) throw new Error(read.refused);
+  expect(read.silence).toBeNull();
+  expect(read.session?.finalMessage).toBe("");
+  expect(read.session?.usage).toBeNull();
+  expect(read.session?.failure).toBe("gateway_unavailable");
 });
 
 test("readSession refuses a transcript that does not name the session it reports", async () => {
