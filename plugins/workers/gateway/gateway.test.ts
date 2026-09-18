@@ -339,18 +339,29 @@ describe("native account-pool gateway", () => {
       `const { poolModels } = await import(${JSON.stringify(storage)});`,
       `const pool = parseInputs(${JSON.stringify(broker)}, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] }, ${JSON.stringify(serviceBearer)}).accountPool;`,
       `const model = [...poolModels(pool).values()][0];`,
-      // An upstream 402 with a message no caller may see and the machine must not print either.
-      `const raw = "data: " + JSON.stringify({ type: "error", error: { status: 402, code: 7, stopReason: "error", errorMessage: "fixture-source-token" } }) + "\\n\\n";`,
-      `const bytes = new TextEncoder().encode(raw);`,
-      `const source = new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } });`,
-      `process.stdout.write(await new Response(safeNativeStream(source, model)).text());`,
+      // BOTH REAL SHAPES, in the order the boundary meets them. The first is what an upstream
+      // rejection actually looks like arriving through the SDK — a `message_start` whose assistant
+      // message already failed, carrying `errorStatus`/`errorId` — observed as a live OpenRouter
+      // 404. The second is a bare error event with `status`/`code`. A fixture carrying only the
+      // second shape passed while the log printed `none none` against the first.
+      `const frames = [`,
+      `  { type: "start", message: { stopReason: "error", errorStatus: 404, errorId: 404, errorMessage: "fixture-source-token" } },`,
+      `  { type: "error", error: { stopReason: "error", status: 402, code: 7, errorMessage: "fixture-source-token" } },`,
+      `];`,
+      `for (const frame of frames) {`,
+      `  const bytes = new TextEncoder().encode("data: " + JSON.stringify(frame) + "\\n\\n");`,
+      `  const source = new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } });`,
+      `  process.stdout.write(await new Response(safeNativeStream(source, model)).text());`,
+      `}`,
     ].join("\n"));
     const child = Bun.spawn([process.execPath, script], { stdout: "pipe", stderr: "pipe" });
     const [, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
     rmSync(scriptDirectory, { force: true, recursive: true });
 
-    // The label names the path, and the numbers distinguish an exhausted balance from a bad
-    // credential or a rate limit. Before this, all three arrived as one word and logged nothing.
+    // The label names the path and the numbers distinguish an exhausted balance from a rejected
+    // credential, a data-policy refusal or a rate limit. Before this, all of them arrived as one
+    // word and logged nothing at all.
+    expect(stderr).toContain("gateway_stream_refused start error 404 404\n");
     expect(stderr).toContain("gateway_stream_refused error error 402 7\n");
     // Same rule as `safeFailure`: numbers and fixed labels, never the upstream's words.
     expect(stderr).not.toContain("fixture-source-token");
