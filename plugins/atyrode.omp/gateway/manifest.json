@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "title": "omp gateway",
   "description": "Independent OMP gateway over governed native Manifold resources.",
-  "capabilities": ["containers:read", "containers:write", "jobs:read", "machines:run", "services:read", "services:configure"],
+  "capabilities": ["containers:read", "containers:write", "jobs:read", "machines:read", "machines:run", "services:read", "services:configure"],
   "entry": { "server": true },
   "contributes": {
     "panels": [],

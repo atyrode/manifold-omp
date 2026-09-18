@@ -54,52 +54,53 @@ const implementations: RootHandlers = {
   listSessions,
   resumeSession,
 };
-const workspaceObservationCaps: readonly Cap[] = ["machines:run", "jobs:read"];
+/**
+ * READING A MACHINE'S OWN FACTS IS ITS OWN WORD, SEPARATE FROM RUNNING THERE. Every door
+ * below that observes a destination reaches `ctx.jobs.describe` and `describeDeployment`
+ * through `observeNative`, and since atyrode/manifold#736 that read takes `machines:read` in
+ * the calling plugin's capabilities — "reading what a folder IS is not authority to execute
+ * anything there". Nothing here named it, so every native observation in this family refused
+ * `job_capability_absent:machines:read` the moment the pin reached a Manifold carrying that
+ * rule, including the no-installation answer `describeDestination` exists to give (#45,
+ * atyrode/manifold#743).
+ *
+ * Declaring it lends this family a read it already needed and grants no new authority: a
+ * delegate is a ceiling the door spends with its own consented authority, bounded by the
+ * install grant (atyrode/manifold#740), and every door here still gates the CALLER on
+ * `machines:run` for that machine first (`observeNative`). `cancelSession` stays out because
+ * it observes no machine.
+ */
+const nativeObservationCaps: readonly Cap[] = ["machines:read", "machines:run", "jobs:read"];
 // The write door may execute either mode; Native still rechecks the exact operation's refs.
 const workspaceExecutionCaps: readonly Cap[] = [
-  ...workspaceObservationCaps,
+  ...nativeObservationCaps,
   "locations:read",
   "locations:create",
 ];
 const observedRuntimeCaps: readonly Cap[] = [
-  "machines:run",
-  "jobs:read",
+  ...nativeObservationCaps,
   "services:read",
   "services:invoke",
 ];
 const delegates: Record<RootAction, readonly Cap[]> = {
   readDefaults: [],
   writeDefaults: [],
-  describeDestination: ["machines:run", "jobs:read", "services:read"],
-  reviewWorkspace: workspaceObservationCaps,
+  describeDestination: [...nativeObservationCaps, "services:read"],
+  reviewWorkspace: nativeObservationCaps,
   prepareWorkspace: workspaceExecutionCaps,
-  startInventory: [
-    "machines:run",
-    "jobs:read",
-    "services:read",
-    "services:invoke",
-    "operations:invoke",
-    "network:host",
-  ],
-  readInventory: ["machines:run", "jobs:read"],
-  startBenchmark: [
-    "machines:run",
-    "jobs:read",
-    "services:read",
-    "services:invoke",
-    "operations:invoke",
-    "network:host",
-  ],
-  readBenchmark: ["machines:run", "jobs:read"],
+  startInventory: [...observedRuntimeCaps, "operations:invoke", "network:host"],
+  readInventory: nativeObservationCaps,
+  startBenchmark: [...observedRuntimeCaps, "operations:invoke", "network:host"],
+  readBenchmark: nativeObservationCaps,
   reviewSession: observedRuntimeCaps,
   prepareSession: observedRuntimeCaps,
   // Posting the one-shot job discharges that operation's own declared rights, not only
   // the observation `prepareSession` needs to hand a terminal its descriptor.
   runSession: [...observedRuntimeCaps, "network:host", "locations:write"],
-  readSession: ["machines:run", "jobs:read"],
+  readSession: nativeObservationCaps,
   // Ending a run needs no observation of the machine, only the job's own two verbs.
   cancelSession: ["jobs:read", "jobs:cancel"],
-  listSessions: ["machines:run", "jobs:read", "jobs:cancel", "locations:read"],
+  listSessions: [...nativeObservationCaps, "jobs:cancel", "locations:read"],
   resumeSession: [...observedRuntimeCaps, "jobs:cancel", "locations:read"],
 };
 const writes: Partial<Record<RootAction, true>> = {

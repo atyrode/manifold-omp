@@ -177,8 +177,11 @@ const implementations: AccountHandlers = {
 };
 const serviceObservationCaps: readonly Cap[] = ["services:read"];
 // Comparing the retained policy is an owner-only configuration read, even when
-// the action returns only a review or terminal descriptor.
+// the action returns only a review or terminal descriptor. `machines:read` is the
+// machine read itself: all four of these doors reach `ctx.jobs.describe` through
+// `observeNative`, directly here or through `accountRuntimeReview` (#45).
 const runtimeReviewCaps: readonly Cap[] = [
+  "machines:read",
   "machines:run",
   "jobs:read",
   "services:read",
