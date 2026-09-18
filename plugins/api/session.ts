@@ -58,6 +58,20 @@ export const SessionReceiptSchema = z.strictObject({
    * caller then reports. The transcript knew better and this is where it says so (#43).
    */
   failure: z.string().max(SESSION_FAILURE_LIMIT).nullable(),
+  /**
+   * THE MODEL THE SESSION WAS CONFIGURED WITH, beside the one that answered.
+   *
+   * `model` is read from the transcript's last assistant turn, so it names whatever actually
+   * served — which is not always what was asked for. A withdrawn id was replaced by a
+   * published PAID model and the receipt showed only the substitute, so the single artifact
+   * anyone audits could attest to a run nobody configured. A model-exclusivity claim proved by
+   * reading `model` off persisted receipts is sound only while the two are both present and a
+   * mismatch is refused rather than recorded (#49).
+   *
+   * `readSession` fills this from the retained provenance of the job it posted, never from the
+   * transcript, so the two sides of the comparison have independent origins.
+   */
+  configuredModel: modelId,
 });
 export type SessionReceipt = z.infer<typeof SessionReceiptSchema>;
 
@@ -164,6 +178,7 @@ export function parseSessionArchive(
   archive: Uint8Array,
   sessionDirectory: string,
   exitCode: number,
+  configuredModel: string,
 ): SessionReceipt {
   const member = transcript(archive);
   let sessionId: string | null = null;
@@ -233,6 +248,7 @@ export function parseSessionArchive(
           },
     exitCode,
     failure,
+    configuredModel,
   });
 }
 
