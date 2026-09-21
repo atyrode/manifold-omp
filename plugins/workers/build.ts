@@ -404,7 +404,8 @@ async function notices(importedFiles: Set<string>, codingAgent?: string): Promis
  */
 export async function buildWorkerArtifacts(target: WorkerTarget): Promise<WorkerArtifacts> {
   if (Bun.version !== runtime.bunVersion) throw new Error(`Worker packaging requires pinned Bun ${runtime.bunVersion}; received ${Bun.version}`);
-  for (const graph of new Set(Object.values(entrypoints[target]).map(entry => entry.graph)))
+  const entries: Readonly<Record<string, { readonly graph: GraphName; readonly source: string }>> = entrypoints[target];
+  for (const graph of new Set(Object.values(entries).map(entry => entry.graph)))
     await verifyPreparedDependencies(graph);
   const artifacts: WorkerArtifacts["artifacts"] = {};
   const tools: WorkerArtifacts["tools"] = {};
@@ -434,7 +435,7 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
   if (target === "root") tools[graphs.sdkHost.nativeAlias] = Object.fromEntries(
     platforms.map(platform => [platform, MachineArtifactSchema.parse(graphs.sdkHost.native[platform])]),
   );
-  for (const [name, { graph: graphName, source }] of Object.entries(entrypoints[target])) {
+  for (const [name, { graph: graphName, source }] of Object.entries(entries)) {
     const graph = graphs[graphName];
     const modules = await realpath(join(graph.root, "node_modules"));
     await Promise.all(["@oh-my-pi/pi-ai", "@oh-my-pi/pi-catalog", "@oh-my-pi/pi-utils"].map(packageName => packageRoot(graph, packageName)));

@@ -35,15 +35,18 @@ export const TerminalRuntimeSchema = z.strictObject({
   input,
   inputs: jobInputs,
   resourceBindingDigest: hash,
-});
+  session: z.strictObject({ harness: id, machineId: id, sessionId: id }).optional(),
+}).refine(value => value.session === undefined || value.session.machineId === value.machineId,
+  "session machine does not match runtime");
 export type TerminalRuntime = z.infer<typeof TerminalRuntimeSchema>;
 
-const JobInferenceLimitsSchema = z.strictObject({
+export const JobInferenceLimitsSchema = z.strictObject({
   calls: z.number().int().positive().max(1_000_000).optional(),
   inputTokens: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
   outputTokens: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
   costMicros: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
 });
+export type JobInferenceLimits = z.infer<typeof JobInferenceLimitsSchema>;
 const JobInferenceUsageSchema = z.strictObject({
   calls: count,
   inputTokens: count,
@@ -51,7 +54,7 @@ const JobInferenceUsageSchema = z.strictObject({
   cachedInputTokens: count,
   costMicros: count,
 });
-const jobLimits = z.strictObject({
+export const JobLimitsSchema = z.strictObject({
   timeoutMs: z.number().int().nonnegative().max(86400000),
   memoryBytes: z.number().int().positive().max(1099511627776),
   processes: z.number().int().positive().max(4096),
@@ -86,7 +89,7 @@ const JobResultSchema = z.strictObject({
     outputBytes: count,
     inference: JobInferenceUsageSchema.optional(),
   }).nullable(),
-  limits: jobLimits,
+  limits: JobLimitsSchema,
   outputs: z.array(z.strictObject({
     outputId: id,
     name: component,
@@ -178,6 +181,7 @@ export const PublicJobSchema = z.strictObject({
   resourceBindingDigest: hash,
   /** The bound inputs the hub admitted, echoed so a reader sees what this job was handed. */
   inputs: jobInputs,
+  limits: JobLimitsSchema.optional(),
   state: JobStateSchema,
   nextInputSeq: count.nullable(),
   result: JobResultSchema.nullable(),

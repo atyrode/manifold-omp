@@ -18,6 +18,7 @@ import {
   PROBE_MODEL_LIMIT,
   BenchmarkInputSchema,
   JobInputBindingSchema,
+  JobLimitsSchema,
   SESSION_ARCHIVE_LIMIT,
   SESSION_GUEST_PATH,
   SESSION_OPERATION_ID,
@@ -58,7 +59,7 @@ import {
 import { effectiveOverlay, expectedDefaults, readDefaults } from "./state.ts";
 import { resolveSkills } from "./skills.ts";
 import { bundledProbeModels } from "./sdk-metadata.macro.ts" with { type: "macro" };
-import runtimeArtifacts from "../runtime-artifacts.json";
+import sdkRuntimeArtifacts from "../sdk-host/runtime-artifacts.json";
 
 const registry = bundledProbeModels();
 const providers = Object.keys(registry);
@@ -99,6 +100,7 @@ const provenanceSchema = z.strictObject({
   candidates: BenchmarkInputSchema.nullable(),
   // Absent in provenance retained before bound inputs existed, which is no bindings at all.
   inputs: z.array(JobInputBindingSchema).max(16).default([]),
+  limits: JobLimitsSchema.optional(),
 });
 type Provenance = z.infer<typeof provenanceSchema>;
 /**
@@ -336,6 +338,7 @@ function checkJob(
     | "pins"
     | "inputDigest"
     | "inputs"
+    | "limits"
   >,
   jobId: string,
 ) {
@@ -350,6 +353,8 @@ function checkJob(
     job.resourceBindingDigest !== provenance.pins.resourceBindingDigest ||
     // What the hub says it bound must be what was asked for, in the order it was asked.
     digestOf(job.inputs ?? []) !== digestOf(provenance.inputs) ||
+    (provenance.limits !== undefined &&
+      digestOf(job.limits?.inference ?? null) !== digestOf(provenance.limits.inference ?? null)) ||
     job.authority.requester !== provenance.requester ||
     job.authority.origin.kind !== "action" ||
     job.authority.origin.door !== `${OMP_PLUGIN_ID}.${provenance.door}`
@@ -381,6 +386,7 @@ async function execute(
       input: provenance.input,
       outputs,
       ...(provenance.inputs.length === 0 ? {} : { inputs: provenance.inputs }),
+      ...(provenance.limits === undefined ? {} : { limits: provenance.limits }),
     }),
   );
   checkJob(job, provenance, jobId);
@@ -564,20 +570,22 @@ export async function readBenchmark(
 }
 function requireSkillRuntime(machine: MachineHalf | undefined, operationId: string) {
   const operation = machine?.operations[operationId];
-  if (machine?.tools?.omp?.["linux-x64"]?.entrySha256 !== runtimeArtifacts.tools.omp["linux-x64"].entrySha256 ||
+  if (!supportsSdkRuntime(machine, operationId) ||
     !operation?.input.skillRuntime || !operation.input.disableSkills ||
     !operation.runtimeTools?.includes("harness") ||
     !Array.from({ length: 15 }, (_, index) => `optionalSkill${index}`).every(name => operation.inputs?.includes(name)))
     throw new OmpRefusal("skills_runtime_unsupported");
 }
 
-function requireSdkRuntime(machine: MachineHalf | undefined, operationId: string) {
+function supportsSdkRuntime(machine: MachineHalf | undefined, operationId: string): boolean {
   const operation = machine?.operations[operationId];
-  if (runtimeArtifacts.sdkVersion !== "18.2.7" ||
-    machine?.tools?.omp?.["linux-x64"]?.entrySha256 !== runtimeArtifacts.tools.omp["linux-x64"].entrySha256 ||
-    !operation?.input.automation || !operation.input.resumeOverrides ||
-    !operation.runtimeTools?.includes("sdkHost") || !operation.runtimeTools.includes("pi-natives"))
-    throw new OmpRefusal("sdk_runtime_unsupported");
+  return sdkRuntimeArtifacts.sdkVersion === "18.2.7" &&
+    machine?.tools?.["sdk-pi-natives"]?.["linux-x64"]?.entrySha256 === sdkRuntimeArtifacts.tools["pi-natives"]["linux-x64"].entrySha256 &&
+    operation?.input.automation !== undefined && operation.input.resumeOverrides !== undefined &&
+    operation.runtimeTools?.includes("sdkHost") === true && operation.runtimeTools.includes("sdk-pi-natives");
+}
+function requireSdkRuntime(machine: MachineHalf | undefined, operationId: string) {
+  if (!supportsSdkRuntime(machine, operationId)) throw new OmpRefusal("sdk_runtime_unsupported");
 }
 /** Runtime preparation is machine-scoped. Container and terminal authorization
  * belongs to reviewed launch or, for operator resume, independent placement. */
@@ -601,7 +609,8 @@ async function sessionRuntimePreparation(
     configuredModels(overlay).map(ref => ref.slice(0, ref.indexOf("/"))));
   const { pool, reference } = await checkedAccountPool(ctx, requestedPool);
   checkOverlay(overlay, pool);
-  const gateway = await currentGateway(ctx, args.machineId);
+  const gateway = await currentGateway(ctx, args.machineId, undefined,
+    args.inferenceLimits === undefined ? undefined : { limits: args.inferenceLimits, models: configuredModels(overlay) });
   const current = await currentOperation(
     ctx,
     args.machineId,
@@ -610,6 +619,7 @@ async function sessionRuntimePreparation(
   const automation = args.automation ?? { mode: "ordinary" as const };
   if (args.automation || resume) requireSdkRuntime(current.deployment.installation?.machine, operationId);
   const skills = await resolveSkills(ctx, args.machineId, args.skills ?? (args.automation ? { mode: "disabled" } : undefined));
+  if (args.planYolo && skills.mode !== "preserve") throw new OmpRefusal("skills_plan_unsupported");
   if (skills.mode !== "preserve") requireSkillRuntime(current.deployment.installation?.machine, operationId);
   const inputs = skillInputBindings(skills);
   const skillConfig = skills.mode === "disabled" ? { skills: { enabled: false } }
@@ -655,6 +665,7 @@ async function sessionPreparation(
     accountPool: pool,
     skills,
     automation,
+    ...(args.inferenceLimits === undefined ? {} : { inferenceLimits: args.inferenceLimits }),
     reviewDigest: digestOf({
       actor: actor(ctx),
       destination,
@@ -667,6 +678,7 @@ async function sessionPreparation(
       input,
       skills,
       inputs,
+      inferenceLimits: args.inferenceLimits ?? null,
     }),
   };
   return { review, input, inputs, broker: reference, gateway };
@@ -683,6 +695,7 @@ async function prepareReviewedSession(
   sessionId?: string,
   resume = false,
 ): Promise<ActionResult<"prepareSession">> {
+  if (args.inferenceLimits !== undefined) throw new OmpRefusal("inference_limits_unsupported");
   await authorizeTarget(ctx, args, true);
   await authorizeTerminalSpawn(ctx, args.containerId);
   const first = await sessionPreparation(ctx, args, sessionId, resume);
@@ -691,6 +704,7 @@ async function prepareReviewedSession(
   const latest = await sessionPreparation(ctx, args, sessionId, resume);
   if (latest.review.reviewDigest !== first.review.reviewDigest)
     throw new OmpRefusal("resources_changed");
+  const placedSessionId = sessionId ?? randomUUID();
   return {
     destination: latest.review.destination,
     reviewDigest: latest.review.reviewDigest,
@@ -699,7 +713,8 @@ async function prepareReviewedSession(
       pluginId: OMP_PLUGIN_ID,
       operationId: latest.review.operationId,
       ...latest.review.pins,
-      input: latest.input,
+      input: sessionId ? latest.input : boundedInput({ ...latest.input, sessionId: placedSessionId }),
+      session: { harness: OMP_PLUGIN_ID, machineId: args.machineId, sessionId: placedSessionId },
       ...(latest.inputs.length > 0 ? { inputs: latest.inputs } : {}),
     }),
   };
@@ -711,11 +726,24 @@ async function oneShotPreparation(
 ) {
   const prepared = await sessionPreparation(ctx, args);
   const current = await currentOperation(ctx, args.machineId, SESSION_OPERATION_ID);
+  const declared = current.deployment.installation?.machine?.operations[SESSION_OPERATION_ID]?.limits;
+  let limits: PublicJob["limits"] | undefined;
+  if (args.inferenceLimits !== undefined) {
+    if (!declared) throw new OmpRefusal("inference_limits_unsupported");
+    for (const key of ["calls", "inputTokens", "outputTokens", "costMicros"] as const) {
+      const requested = args.inferenceLimits[key];
+      const ceiling = declared.inference?.[key];
+      if (requested !== undefined && ceiling !== undefined && requested > ceiling)
+        throw new OmpRefusal("inference_limit_exceeded");
+    }
+    limits = { ...JobLimitsSchema.strip().parse(declared), inference: { ...declared.inference, ...args.inferenceLimits } };
+  }
   if (prepared.review.skills.mode !== "preserve") requireSkillRuntime(current.deployment.installation?.machine, SESSION_OPERATION_ID);
   if (args.automation) requireSdkRuntime(current.deployment.installation?.machine, SESSION_OPERATION_ID);
   return {
     prepared,
     pins: current.pins,
+    limits,
     digest: digestOf({ review: prepared.review.reviewDigest, current }),
   };
 }
@@ -761,6 +789,7 @@ export async function runSession(
     inventoryJobId: null,
     candidates: null,
     inputs: [...(args.inputs ?? []), ...latest.prepared.inputs],
+    ...(latest.limits === undefined ? {} : { limits: latest.limits }),
   });
   return execute(ctx, jobId, provenance, [
     { name: SESSION_OUTPUT_NAME, locationId: RUNS_LOCATION_ID, components: [jobId] },
@@ -987,6 +1016,7 @@ export async function prepareInteractiveResume(
     runtime: TerminalRuntimeSchema.parse({
       machineId: args.machineId, pluginId: OMP_PLUGIN_ID, operationId,
       ...latest.current.pins, input: latest.input,
+      session: { harness: OMP_PLUGIN_ID, machineId: args.machineId, sessionId: args.sessionId },
       ...(latest.inputs.length > 0 ? { inputs: latest.inputs } : {}),
     }),
   };

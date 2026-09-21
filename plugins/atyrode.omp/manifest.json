@@ -596,6 +596,11 @@
           }
         ],
         "input": {
+          "sessionId": {
+            "type": "string",
+            "required": true,
+            "maxLength": 36
+          },
           "models": {
             "type": "string",
             "required": true,
@@ -706,6 +711,9 @@
           },
           "resumeOverrides": {
             "input": "resumeOverrides"
+          },
+          "sessionId": {
+            "input": "sessionId"
           },
           "prompt": {
             "input": "prompt"

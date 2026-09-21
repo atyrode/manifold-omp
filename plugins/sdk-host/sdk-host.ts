@@ -30,11 +30,12 @@ let heldFile: number | undefined;
 let code = 1;
 try {
   if (Object.keys(process.env).some(name => name.startsWith("MANIFOLD_"))) throw new Error("omp_sdk_environment_invalid");
-  const kind = z.enum(["interactive", "print", "resume", "rpc-resume"]).parse(process.argv[2]);
+  const kind = z.enum(["interactive", "print", "resume", "rpc", "rpc-resume"]).parse(process.argv[2]);
   const resume = kind === "resume" || kind === "rpc-resume";
+  const rpc = kind === "rpc" || kind === "rpc-resume";
   const automation = readAutomation();
   const restricted = automation.mode === "restricted";
-  if (kind === "rpc-resume" && restricted) throw new Error("omp_restricted_harness_unsupported");
+  if (rpc && restricted) throw new Error("omp_restricted_harness_unsupported");
   const overrides = readResumeOverrides();
   if (!resume && overrides) throw new Error("omp_sdk_input_invalid");
   const skillsRuntime = validateSkillInputs();
@@ -80,7 +81,7 @@ try {
   if (controller.signal.aborted) throw new Error("omp_sdk_cancelled");
   let original: Stats | undefined;
   let resumePath: string | undefined;
-  if (resume) {
+  if (resume || process.argv[3] !== undefined) {
     const filename = process.argv[3];
     if (!filename || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}\.jsonl$/.test(filename)) throw new Error("omp_resume_session_unavailable");
     const root = openSessionsRoot();
@@ -94,9 +95,10 @@ try {
       manager = await SessionManager.open(resumePath, SESSIONS_ROOT, undefined, { throwIfMissing: true });
       if (manager.getSessionId() !== id || manager.getSessionFile() !== resumePath || manager.getCwd() !== cwd)
         throw new Error("omp_resume_session_changed");
+      if (!resume && manager.getEntries().length !== 0) throw new Error("omp_sdk_session_changed");
     } finally { closeSync(root); }
   }
-  const admitted = admitSdkSession(registry, manager, config, overrides);
+  const admitted = admitSdkSession(registry, resume ? manager : undefined, config, overrides);
   if (!Object.hasOwn(models.providers, admitted.model.provider) || config.disabledProviders.includes(admitted.model.provider))
     throw new Error("omp_resume_model_unavailable");
   if (!await registry.getApiKey(admitted.model, manager?.getSessionId(), { signal: controller.signal }))
@@ -130,7 +132,7 @@ try {
     sessionManager: manager, agentRegistry: new AgentRegistry(), ...admitted,
     hasUI: kind === "interactive" || kind === "resume",
     ...(restricted || skillsRuntime.mode === "disabled" ? { skills } : {}),
-    ...(kind === "rpc-resume" ? { appendSystemPrompt: readFileSync(process.argv[4]!, "utf8") } : {}),
+    ...(rpc ? { appendSystemPrompt: readFileSync(process.argv[4]!, "utf8") } : {}),
     ...(restricted ? {
       systemPrompt: ["You are a coding assistant operating under an explicit native tool policy. Delegation is disabled. Selected skills are instructions only, never authorization.",
         ...skills.map(skill => `Selected skill ${skill.name}: ${skill.description}. Read skill://${skill.name} for instructions and resources.`)],
@@ -155,7 +157,7 @@ try {
   try {
     if (kind === "print") {
       code = await runPrintMode(created.session, { mode: "json", initialMessage: readSessionInput("prompt") });
-    } else if (kind === "rpc-resume") {
+    } else if (rpc) {
       await runRpcMode(created.session, created.setToolUIContext, created.eventBus);
     } else {
       mode = new InteractiveMode(created.session, "18.2.7", undefined, created.setToolUIContext,

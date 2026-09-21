@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   DeploymentProgressSchema,
   JobInputBindingSchema,
+  JobInferenceLimitsSchema,
   PublicJobSchema,
   TerminalRuntimeSchema,
 } from "./native.ts";
@@ -32,6 +33,9 @@ export * from "./session.ts";
 export {
   DeploymentProgressSchema,
   JobInputBindingSchema,
+  JobInferenceLimitsSchema,
+  type JobInferenceLimits,
+  JobLimitsSchema,
   PublicJobSchema,
   TerminalRuntimeSchema,
   type JobInputBinding,
@@ -254,6 +258,7 @@ export const SessionInputSchema = executionInput.extend({
   planYolo: z.boolean(),
   skills: SkillSelectionSchema.optional(),
   automation: RestrictedAutomationSchema.optional(),
+  inferenceLimits: JobInferenceLimitsSchema.refine(value => Object.keys(value).length > 0, "empty inference limits").optional(),
 });
 /** Durable dials share the exact validated launch settings; paths and credentials
  * are deliberately not part of a profile. Defaults are reviewed at each launch. */
@@ -264,6 +269,7 @@ export const OmpHarnessProfileSchema = SessionInputSchema.omit({
   prompt: true,
   skills: true,
   automation: true,
+  inferenceLimits: true,
 });
 export type OmpHarnessProfile = z.infer<typeof OmpHarnessProfileSchema>;
 export const SessionReviewSchema = ReviewSchema.extend({
@@ -272,6 +278,7 @@ export const SessionReviewSchema = ReviewSchema.extend({
   accountPool: RuntimeAccountPoolSchema,
   skills: SkillReviewSchema,
   automation: AutomationReviewSchema,
+  inferenceLimits: JobInferenceLimitsSchema.optional(),
 });
 export const PreparedSessionSchema = z
   .strictObject({
@@ -307,7 +314,10 @@ export const PreparedResumeSessionSchema = z.strictObject({
   sessionId: z.uuid(),
   runtime: TerminalRuntimeSchema,
 }).refine(value => value.runtime.machineId === value.machineId &&
-  value.runtime.input.sessionId === value.sessionId, {
+  value.runtime.input.sessionId === value.sessionId &&
+  value.runtime.session?.harness === OMP_PLUGIN_ID &&
+  value.runtime.session.machineId === value.machineId &&
+  value.runtime.session.sessionId === value.sessionId, {
   message: "resume session does not match admitted runtime",
 });
 export const PreparedSignInSchema = z
@@ -349,13 +359,27 @@ export const AccountRuntimeReviewSchema = z.strictObject({
   signIn: ResourcePinsSchema,
   reviewDigest: digest,
 });
+/** Reviewed policy prices are micro-dollars per million tokens, not live account quota. */
+const gatewayModelPrice = z.strictObject({
+  inputPerMillion: z.number().int().nonnegative().max(1_000_000_000_000),
+  outputPerMillion: z.number().int().nonnegative().max(1_000_000_000_000),
+  cachedInputPerMillion: z.number().int().nonnegative().max(1_000_000_000_000).optional(),
+});
+export const GatewayPricesSchema = z.strictObject({
+  default: gatewayModelPrice.optional(),
+  models: z.record(z.string().min(1).max(256), gatewayModelPrice)
+    .refine(value => Object.keys(value).length <= 256),
+});
 const gatewayReviewInput = TargetSchema.extend({
   expectedServiceRevision: id.nullable(),
+  // Omission retains the existing schedule; null explicitly removes it.
+  prices: GatewayPricesSchema.nullable().optional(),
 });
 export const GatewayReviewSchema = z.strictObject({
   destination: TargetSchema,
   expectedServiceRevision: id.nullable(),
   runtime: ResourcePinsSchema,
+  prices: GatewayPricesSchema.nullable(),
   reviewDigest: digest,
 });
 export const GatewaySetupSchema = z.strictObject({

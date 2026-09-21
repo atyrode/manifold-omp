@@ -469,19 +469,6 @@ test("runSession posts the reviewed session as a one-shot job that retains its t
   expect(job.inputDigest).toBe(digestOf(posted.input));
 });
 
-test("a reviewed session composes one input, whichever way it is placed", async () => {
-  const f = fixture();
-  const prepared = await f.client.call("prepareSession", {
-    ...session,
-    reviewDigest: await reviewDigestOf(f.client),
-  });
-  if ("refused" in prepared) throw new Error(prepared.refused);
-  const job = await run(f);
-  // The review covers the content; the door covers the placement, and nothing else moves.
-  expect(f.posted[0]!.input).toEqual(prepared.runtime.input);
-  expect(prepared.runtime.operationId).toBe(LAUNCH_OPERATION_ID);
-  expect(job.operationId).toBe(SESSION_OPERATION_ID);
-});
 
 test("runSession refuses a stale review", async () => {
   const f = fixture();

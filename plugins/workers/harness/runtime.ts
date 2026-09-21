@@ -98,12 +98,21 @@ export async function runOmpResume(signal: AbortSignal): Promise<boolean> {
 /** Ordinary terminal and one-shot argv remain native; the boundary only validates
  * selected immutable mounts before handing the terminal directly to OMP. */
 export async function runOmpNative(signal: AbortSignal): Promise<boolean> {
-  validateSkillInputs();
+  const skills = validateSkillInputs();
   if (signal.aborted) throw new Error("harness_cancelled");
-  if (readAutomation().mode === "restricted") {
-    const separator = process.argv.indexOf("--", 3);
-    const print = process.argv.slice(3, separator < 0 ? undefined : separator).includes("-p");
-    const child = spawn("/runtime/bin/bun", ["--no-env-file", "--no-install", "--config=/dev/null", "/runtime/bin/sdkHost", print ? "print" : "interactive"], {
+  const separator = process.argv.indexOf("--", 3);
+  const options = process.argv.slice(3, separator < 0 ? undefined : separator);
+  const print = options.includes("-p");
+  let sessionFile: string | undefined;
+  if (!print) {
+    const root = openSessionsRoot();
+    try { sessionFile = prepareSessionFile(root, SessionIdSchema.parse(inputText("sessionId", 36)), "/home/job/workspace", false); }
+    finally { closeSync(root); }
+  }
+  if (readAutomation().mode === "restricted" || skills.mode !== "preserve") {
+    if (options.includes("--plan-yolo")) throw new Error("omp_skills_plan_unsupported");
+    const child = spawn("/runtime/bin/bun", ["--no-env-file", "--no-install", "--config=/dev/null", "/runtime/bin/sdkHost",
+      print ? "print" : "interactive", ...(sessionFile ? [sessionFile] : [])], {
       cwd: "/inputs", env: ompEnvironment, stdio: "inherit",
     });
     const exit = Promise.withResolvers<number | null>();
@@ -122,7 +131,7 @@ export async function runOmpNative(signal: AbortSignal): Promise<boolean> {
   }
   const environment = { ...process.env };
   for (const name of Object.keys(environment)) if (name.startsWith("MANIFOLD_")) delete environment[name];
-  const child = spawn("/runtime/bin/omp", process.argv.slice(3), {
+  const child = spawn("/runtime/bin/omp", [...(sessionFile ? ["--session", `${SESSIONS_ROOT}/${sessionFile}`] : []), ...process.argv.slice(3)], {
     cwd: "/home/job/workspace", env: environment, stdio: "inherit",
   });
   const exit = Promise.withResolvers<number | null>();
@@ -143,7 +152,8 @@ export async function runOmpNative(signal: AbortSignal): Promise<boolean> {
 /** A native operation, not a shell command. OMP sees neither the runner credential
  * nor the private control descriptor; its only host boundary is the RPC pipe. */
 export async function runOmpHarness(signal: AbortSignal): Promise<boolean> {
-  validateSkillInputs();
+  const skills = validateSkillInputs();
+  if (skills.mode !== "preserve" && process.argv.includes("--plan-yolo")) throw new Error("omp_skills_plan_unsupported");
   if (readAutomation().mode === "restricted") throw new Error("omp_restricted_harness_unsupported");
   const binding = takeRunEnvironment(process.env);
   const sessionId = SessionIdSchema.parse(inputText("sessionId", 36));
@@ -190,12 +200,13 @@ export async function runOmpHarness(signal: AbortSignal): Promise<boolean> {
     emitted = []; emittedBytes = 0;
     if (signal.aborted || controlFailed) throw new Error("harness_cancelled");
     const resuming = process.argv.includes("--resume");
-    child = spawn(resuming ? "/runtime/bin/bun" : "/runtime/bin/omp", resuming
-      ? ["--no-env-file", "--no-install", "--config=/dev/null", "/runtime/bin/sdkHost", "rpc-resume", sessionFile, admission.path]
+    const useSdk = resuming || skills.mode !== "preserve";
+    child = spawn(useSdk ? "/runtime/bin/bun" : "/runtime/bin/omp", useSdk
+      ? ["--no-env-file", "--no-install", "--config=/dev/null", "/runtime/bin/sdkHost", resuming ? "rpc-resume" : "rpc", sessionFile, admission.path]
       : ompLaunchArgs(sessionFile, {
         admissionPath: admission.path, planYolo: process.argv.includes("--plan-yolo"),
         disableSkills: process.argv.includes("--no-skills"),
-      }), { cwd: resuming ? "/inputs" : "/home/job/workspace", env: ompEnvironment, stdio: ["pipe", "pipe", "pipe"] });
+      }), { cwd: useSdk ? "/inputs" : "/home/job/workspace", env: ompEnvironment, stdio: ["pipe", "pipe", "pipe"] });
     const processChild = child;
     const stdin = processChild.stdin!;
     // Provider diagnostics are not a safe public channel. RPC failures are fixed codes below.
