@@ -16,6 +16,7 @@ const saved = join(sessions, "saved.jsonl");
 const fresh = scenario.startsWith("fresh-");
 const rpc = scenario === "fresh-rpc-selected";
 const selected = scenario === "selected" || scenario === "fresh-sdk-selected" || rpc;
+const filtered = scenario === "fresh-sdk-filtered";
 const resumed = !fresh && !["selected", "disabled", "cancel"].includes(scenario);
 let owner: Socket | undefined;
 let child: Bun.Subprocess | undefined;
@@ -119,7 +120,7 @@ try {
   for (const name of await readdir(sessions)) if (name.endsWith(".jsonl")) before.set(name, await readFile(join(sessions, name), "utf8"));
   const refused = ["missing-model", "missing-thinking", "incompatible", "changed", "missing", "rpc-restricted"].includes(scenario);
   const expectedModel = scenario === "model-only" || scenario === "model-suffix" ? "fixture/openai/o3" : scenario === "both" ? "fixture/openai/gpt-4.1" : "fixture/openai/gpt-5";
-  const expectedThinking = scenario === "auto" ? "auto" : fresh || ["model-suffix", "thinking-only", "both", "disabled", "cancel"].includes(scenario) ? "off" : "high";
+  const expectedThinking = scenario === "auto" ? "auto" : fresh ? "low" : ["model-suffix", "thinking-only", "both", "disabled", "cancel"].includes(scenario) ? "off" : "high";
   gateway = Bun.serve({ hostname: "127.0.0.1", port: 38457, idleTimeout: 0, async fetch(request) {
     try {
       check(request.headers.get("authorization") === `Bearer ${["SYNTHETIC", "LOCAL", "FIXTURE", "NOT", "A", "CREDENTIAL"].join("-")}`, "synthetic-capability");
@@ -133,20 +134,32 @@ try {
       }
       check(request.method === "POST" && url.pathname === "/v1/pi/stream", "unexpected-gateway-route");
       const parsed = parseRequest(await request.json(), request.headers);
+      const names = (parsed.context.tools ?? []).map(tool => tool.name).sort();
+      const message: AssistantMessage = {
+        role: "assistant", api: "openai-completions", provider: "fixture", model: expectedModel.slice("fixture/".length),
+        content: [{ type: "text", text: resumed ? "SDK-PROOF-RESUMED-COMPLETE" : "SDK-PROOF-COMPLETE" }], stopReason: "stop", timestamp: Date.now(),
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      };
+      // The CLI may title a new session separately. This reply cannot satisfy
+      // the primary-turn completion or ordinary tool-registry proof.
+      if (fresh && names.length === 0) {
+        message.content = [{ type: "text", text: "Fixture session title" }];
+        return response(message);
+      }
       requests++;
       check(!refused, "refused-state-reached-inference");
       check(requests <= 2, "unexpected-extra-inference");
       check(parsed.modelId === expectedModel, "resumed-model-selection");
-      if (expectedThinking === "high") check(parsed.options.reasoning === "high", "resumed-thinking-preservation");
+      if (expectedThinking === "high" || expectedThinking === "low") check(parsed.options.reasoning === expectedThinking, "resumed-thinking-preservation");
       else check(parsed.options.reasoning === undefined && parsed.options.disableReasoning === true, "explicit-thinking-off");
-      const names = (parsed.context.tools ?? []).map(tool => tool.name).sort();
       if (!fresh) check(JSON.stringify(names) === JSON.stringify(["read"]), "restricted-registry-widened");
       else check(names.includes("read"), "ordinary-read-tool-missing");
       const instructions = JSON.stringify({ system: parsed.context.systemPrompt, tools: parsed.context.tools });
       check(!instructions.includes("HOSTILE-AMBIENT-SKILL") && !instructions.includes("HOSTILE-PROJECT-CONTEXT"), "ambient-discovery");
-      if (selected) check(instructions.includes("skill://sealed-proof"), "selected-skill-not-advertised");
-      else if (!fresh) check(!instructions.includes("skill://"), "disabled-skill-advertised");
-      else check(!instructions.includes("sealed-proof"), "historical-skill-restored");
+      if (selected) check(instructions.includes("sealed-proof"), "selected-skill-not-advertised");
+      else if (!fresh || scenario === "fresh-sdk-disabled") check(!instructions.includes("skill://"), "disabled-skill-advertised");
+      else check(!instructions.includes("sealed-proof"), filtered ? "filtered-skill-advertised" : "historical-skill-restored");
       if (fresh) {
         check(parsed.context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-PROMPT")), "fresh-prompt-missing");
         check(!JSON.stringify(parsed.context.messages).includes("SDK-PROOF-COMPLETE"), "historical-conversation-restored");
@@ -160,13 +173,7 @@ try {
           cancel() { cancelled = true; },
         }), { headers: { "Content-Type": "text/event-stream" } });
       }
-      const message: AssistantMessage = {
-        role: "assistant", api: "openai-completions", provider: "fixture", model: expectedModel.slice("fixture/".length),
-        content: [{ type: "text", text: resumed ? "SDK-PROOF-RESUMED-COMPLETE" : "SDK-PROOF-COMPLETE" }], stopReason: "stop", timestamp: Date.now(),
-        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-      };
-      if (selected && requests === 1) {
+      if ((selected || filtered) && requests === 1) {
         message.stopReason = "toolUse";
         message.content = [
           { type: "toolCall", id: "proof-read", name: "read", arguments: { path: "skill://sealed-proof/resource.txt" } },
@@ -176,9 +183,11 @@ try {
           ] : []),
         ];
       } else {
-        if (selected) {
+        if (selected || filtered) {
           const results = parsed.context.messages.filter((message): message is ToolResultMessage => message.role === "toolResult");
-          check(results.some(result => result.toolCallId === "proof-read" && !result.isError && JSON.stringify(result.content).includes("SDK-SEALED-RESOURCE-ONLY")), "sealed-resource-read");
+          const read = results.find(result => result.toolCallId === "proof-read");
+          check(read && (filtered ? read.isError : !read.isError && JSON.stringify(read.content).includes("SDK-SEALED-RESOURCE-ONLY")),
+            filtered ? "filtered-skill-remained-readable" : "sealed-resource-read");
           if (scenario === "selected") for (const id of ["proof-bash", "proof-task"]) check(results.some(result => result.toolCallId === id && result.isError), "forbidden-tool-executed");
         }
         completed = true;
@@ -229,8 +238,11 @@ try {
     if (!rpc) return await new Response(child!.stdout as ReadableStream).text();
     let pending = "";
     const decoder = new TextDecoder();
-    for await (const chunk of child!.stdout as ReadableStream<Uint8Array>) {
-      pending += decoder.decode(chunk, { stream: true });
+    const reader = (child!.stdout as ReadableStream<Uint8Array>).getReader();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      pending += decoder.decode(value, { stream: true });
       let end: number;
       while ((end = pending.indexOf("\n")) >= 0) {
         const frame = JSON.parse(pending.slice(0, end));
@@ -239,6 +251,7 @@ try {
         if (frame.type === "agent_end") rpcEnded = true;
       }
     }
+    reader.releaseLock();
     return "";
   })() : Promise.resolve("");
   if (rpc) {

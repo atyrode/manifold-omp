@@ -41,7 +41,7 @@ const graphs = {
   },
   sdkHost: {
     root: join(root, "sdk-host"), version: sdkRuntime.sdkVersion, nativeAlias: "sdk-pi-natives", native: sdkRuntime.tools["pi-natives"],
-    lockSha256: "fdc7b5985342662199e13fa1c0e8e0cdfe6e59b41a84f6d436df1fc7ea701c8d",
+    lockSha256: "65a8a3c3c73c29e18081a696bdaf924a7086b9c3cfc9f1853927b8394b4c8610",
     loaderSha256: "de59cfd780bfb4ff4411a542396ba2f7c512add3ad2d474cd2e30220c69e3930",
     patch: undefined,
   },
@@ -404,6 +404,7 @@ async function notices(importedFiles: Set<string>, codingAgent?: string): Promis
  */
 export async function buildWorkerArtifacts(target: WorkerTarget): Promise<WorkerArtifacts> {
   if (Bun.version !== runtime.bunVersion) throw new Error(`Worker packaging requires pinned Bun ${runtime.bunVersion}; received ${Bun.version}`);
+  const manifoldRoot = await realpath(resolve(root, "../../manifold"));
   const entries: Readonly<Record<string, { readonly graph: GraphName; readonly source: string }>> = entrypoints[target];
   for (const graph of new Set(Object.values(entries).map(entry => entry.graph)))
     await verifyPreparedDependencies(graph);
@@ -453,12 +454,19 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
     const plugin: BunPlugin = {
       name: "omp-pinned-native-worker",
       setup(build) {
-        // Resolve every package inside this worker's realization, including imports
-        // from shared owned sources and publisher virtual modules. Never fall through
-        // to an ancestor/caller's node_modules or the other graph.
+        // OMP packages stay inside this worker's prepared realization. The pinned
+        // Manifold SDK owns its own transitive dependencies; resolving those from
+        // an OMP graph would substitute versions or reject valid SDK imports.
         build.onResolve({ filter: /^[^./]/ }, async args => {
           if (args.path === "bun" || args.path.startsWith("bun:") || args.path.startsWith("node:") ||
               builtinModules.includes(args.path) || args.path.startsWith("@manifold/")) return undefined;
+          const sdkImport = args.importer && containsPath(manifoldRoot, args.importer) &&
+            !args.path.startsWith("@oh-my-pi/");
+          if (sdkImport) {
+            const path = await realpath(Bun.resolveSync(args.path, dirname(args.importer)));
+            if (!containsPath(manifoldRoot, path)) throw new Error(`Manifold dependency escapes its checkout: ${args.path}`);
+            return { path, namespace: "file" };
+          }
           const from = args.importer && containsPath(modules, args.importer) ? dirname(args.importer) : graph.root;
           const path = await realpath(Bun.resolveSync(args.path, from));
           if (!containsPath(modules, path)) throw new Error(`Worker dependency escapes ${graphName}: ${args.path}`);
@@ -466,7 +474,7 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
         });
         build.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async args => {
           const path = await realpath(args.path);
-          if (path.split(sep).includes("node_modules") && !containsPath(modules, path))
+          if (path.split(sep).includes("node_modules") && !containsPath(modules, path) && !containsPath(manifoldRoot, path))
             throw new Error(`Worker source escapes ${graphName}: ${path}`);
           importedFiles.add(path);
           if (path === nativeLoader) {
@@ -492,8 +500,8 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
       target: "bun", format: "esm", splitting: false, minify: true,
       sourcemap: "none", packages: "bundle", plugins: [...(legacyPlugin ? [legacyPlugin] : []), plugin],
       define: { "process.env.PI_DOCS_EMBED": JSON.stringify(docs) },
-      // Typecheck-only SDK paths do not participate in runtime resolution.
-      // The resolver above binds all packages to the selected prepared graph.
+      // The resolver binds OMP packages to the selected prepared graph and
+      // leaves the pinned Manifold SDK's transitive graph with its owner.
       tsconfig: join(root, "tsconfig.json"),
     });
     if (!result.success) throw new AggregateError(result.logs, `Worker bundling failed: ${name}`);

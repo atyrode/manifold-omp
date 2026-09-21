@@ -372,8 +372,8 @@ export async function pack(outputDirectory?: string): Promise<readonly (PackResu
       : dist.existing === undefined || !sameDirectory(fstatSync(previous, { bigint: true }), dist.existing)) {
       throw new Error("Publication destination identity changed during validation");
     }
-    const dependencyDigest = await verifyPreparedDependencies();
     const manifoldRevision = await verifyManifoldSource();
+    const dependencyDigest = await verifyPreparedDependencies();
     publication = directories.privateDirectory(parent, ".omp-publish-");
     directories.makeDirectory(publication.fd, "family", 0o755);
     outputFd = directories.openDirectory(publication.fd, "family")!;

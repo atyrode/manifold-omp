@@ -177,7 +177,9 @@ const LIVE_CATALOG_PROVIDERS: Readonly<Record<string, true>> = { openrouter: tru
 function checkOverlay(overlay: Overlay, pool: RuntimeAccountPool) {
   const roles = overlay.modelRoles ?? {};
   if (!roles.default) throw new OmpRefusal("model_configuration_missing");
-  for (const concrete of configuredModels(overlay)) {
+  const models = configuredModels(overlay);
+  for (let index = 0; index < models.length; index++) {
+    const concrete = models[index]!;
     const separator = concrete.indexOf("/");
     if (!concrete || separator <= 0) throw new OmpRefusal("model_configuration_missing");
     const provider = concrete.slice(0, separator);
@@ -198,9 +200,12 @@ function checkOverlay(overlay: Overlay, pool: RuntimeAccountPool) {
     // provider added since the SDK release, which is the same wrongness inverted.
     if (LIVE_CATALOG_PROVIDERS[provider] === true) continue;
     const serveable = registry[provider] ?? [];
-    if (!serveable.some(identity => identity.id === written || identity.id === bare))
-      throw new OmpRefusal("model_unavailable");
+    const resolved = serveable.find(identity => identity.id === written) ??
+      serveable.find(identity => identity.id === bare);
+    if (!resolved) throw new OmpRefusal("model_unavailable");
+    models[index] = `${provider}/${resolved.id}`;
   }
+  return models;
 }
 function boundedInput(input: Record<string, string | number | boolean>) {
   if (Buffer.byteLength(JSON.stringify(input)) > 65536)
@@ -341,6 +346,7 @@ function checkJob(
     | "limits"
   >,
   jobId: string,
+  requireLimits = true,
 ) {
   if (
     job.jobId !== jobId ||
@@ -353,7 +359,7 @@ function checkJob(
     job.resourceBindingDigest !== provenance.pins.resourceBindingDigest ||
     // What the hub says it bound must be what was asked for, in the order it was asked.
     digestOf(job.inputs ?? []) !== digestOf(provenance.inputs) ||
-    (provenance.limits !== undefined &&
+    (requireLimits && provenance.limits !== undefined &&
       digestOf(job.limits?.inference ?? null) !== digestOf(provenance.limits.inference ?? null)) ||
     job.authority.requester !== provenance.requester ||
     job.authority.origin.kind !== "action" ||
@@ -608,9 +614,9 @@ async function sessionRuntimePreparation(
   const requestedPool = args.accountPool ?? await enabledAccountPool(ctx,
     configuredModels(overlay).map(ref => ref.slice(0, ref.indexOf("/"))));
   const { pool, reference } = await checkedAccountPool(ctx, requestedPool);
-  checkOverlay(overlay, pool);
+  const models = checkOverlay(overlay, pool);
   const gateway = await currentGateway(ctx, args.machineId, undefined,
-    args.inferenceLimits === undefined ? undefined : { limits: args.inferenceLimits, models: configuredModels(overlay) });
+    args.inferenceLimits === undefined ? undefined : { limits: args.inferenceLimits, models });
   const current = await currentOperation(
     ctx,
     args.machineId,
@@ -950,7 +956,8 @@ export async function cancelSession(
     args.jobId,
     "runSession",
   );
-  checkJob(posted, provenance, args.jobId);
+  // A changed ceiling invalidates receipt attestation, not authority to stop this exact job.
+  checkJob(posted, provenance, args.jobId, false);
   const node = {
     kind: "job" as const,
     machineId: args.machineId,
@@ -959,7 +966,7 @@ export async function cancelSession(
   };
   await ctx.jobs.cancel(node);
   const job = PublicJobSchema.parse(await ctx.jobs.status(node));
-  checkJob(job, provenance, args.jobId);
+  checkJob(job, provenance, args.jobId, false);
   return { job };
 }
 

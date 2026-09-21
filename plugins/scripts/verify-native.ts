@@ -395,6 +395,7 @@ try {
     const freshUsage = await call("usage", {});
     check(freshUsage.accounts.status === "fresh" && freshUsage.accounts.accounts.length === 0
       && freshUsage.refreshStatus === "succeeded", "packed-broker-usage-not-observed");
+    phase = "packed-broker-run-discovery";
     const brokerRuns = ListJobRunsResultSchema.parse(await ownerAction(hub, "engine.jobs.listRuns", {
       machineId: target.machineId, pluginId: ACCOUNTS_PLUGIN_ID, operationId: BROKER_OPERATION_ID,
     }));

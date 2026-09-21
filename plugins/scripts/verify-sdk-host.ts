@@ -81,7 +81,7 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
     await writeFile(join(work, "control.js"), new Uint8Array(await control.outputs[0]!.arrayBuffer()), { mode: 0o400 });
     await mkdir(join(work, "state"), { mode: 0o700 });
     const cases = ["selected", "disabled", "preserve", "auto", "model-only", "model-suffix", "thinking-only", "both", "missing-model", "missing-thinking", "incompatible", "changed", "missing", "rpc-restricted", "cancel",
-      "fresh-cli-preserve", "fresh-sdk-selected", "fresh-sdk-disabled", "fresh-rpc-selected"] as const;
+      "fresh-cli-preserve", "fresh-sdk-selected", "fresh-sdk-disabled", "fresh-sdk-filtered", "fresh-rpc-selected"] as const;
     for (const scenario of cases) {
       phase = scenario;
       const directory = join(work, scenario);
@@ -91,12 +91,12 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
       for (const path of [home, inputs, outputs, join(outputs, "session"), join(home, "workspace"), join(home, "tmp"), join(home, "omp-sessions"), join(home, ".omp/agent")])
         await mkdir(path, { recursive: true, mode: 0o700 });
       const fresh = scenario.startsWith("fresh-");
-      const selected = scenario === "selected" || scenario === "fresh-sdk-selected" || scenario === "fresh-rpc-selected";
+      const selected = scenario === "selected" || scenario === "fresh-sdk-selected" || scenario === "fresh-sdk-filtered" || scenario === "fresh-rpc-selected";
       const preserve = scenario === "fresh-cli-preserve";
       const config = {
         extensions: [], disabledProviders: [], extendedContext: false, startup: { setupWizard: false },
         modelRoles: { default: fresh || scenario === "selected" || scenario === "disabled" || scenario === "cancel" ? "fixture/openai/gpt-5" : "fixture/openai/gpt-4.1" },
-        ...(scenario === "selected" ? { defaultThinkingLevel: "high" } : fresh ? { defaultThinkingLevel: "off" } : {}),
+        ...(scenario === "selected" ? { defaultThinkingLevel: "high" } : fresh ? { defaultThinkingLevel: "low" } : {}),
         task: { agentModelOverrides: { scout: "fixture/openai/gpt-4.1", task: "fixture/openai/o3", reviewer: "fixture/openai/gpt-5" } },
         ...(!preserve ? { skills: selected ? { customDirectories: ["/inputs/optionalSkill0"] } : { enabled: false } } : {}),
       };
@@ -152,6 +152,15 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
         await sealed(join(base, "extensions/hostile.ts"), `import {writeFileSync} from "node:fs"; writeFileSync("/home/job/discovery-executed", "bad"); export default function(api) { api.registerTool({name:"hostile",description:"hostile",parameters:{type:"object",properties:{}},execute:async()=>({content:[{type:"text",text:"bad"}]})}); }`);
         await mkdir(join(base, "skills/sealed-proof"), { recursive: true, mode: 0o700 });
         await sealed(join(base, "skills/sealed-proof/SKILL.md"), "---\nname: sealed-proof\ndescription: HOSTILE-AMBIENT-SKILL\n---\nHOSTILE-AMBIENT-SKILL\n");
+      }
+      if (scenario === "fresh-sdk-disabled") {
+        const ambient = join(home, ".omp/agent/skills/sealed-proof");
+        await mkdir(ambient, { recursive: true, mode: 0o700 });
+        await sealed(join(ambient, "SKILL.md"), "---\nname: sealed-proof\ndescription: HOSTILE-AMBIENT-SKILL\n---\nHOSTILE-AMBIENT-SKILL\n");
+      }
+      if (scenario === "fresh-sdk-filtered") {
+        await mkdir(join(home, "workspace/.omp"), { recursive: true, mode: 0o700 });
+        await sealed(join(home, "workspace/.omp/config.yml"), { skills: { ignoredSkills: ["sealed-proof"] } });
       }
       if (!fresh) {
         await sealed(join(home, "workspace/.omp/config.yml"), { tools: ["bash", "task", "hostile"], skills: { enabled: true } });

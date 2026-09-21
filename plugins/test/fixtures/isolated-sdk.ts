@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { AuthStorageOptions } from "@oh-my-pi/pi-ai/auth-storage";
 
 export async function runIsolatedSdkScenario(source: URL): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), "omp-sdk-scenario-"));
@@ -64,6 +65,7 @@ export interface SdkScenarioContext {
   root: string;
   check(condition: unknown, code: string): asserts condition;
   fetchTo(origin: string): typeof fetch;
+  refreshOAuthCredential: NonNullable<AuthStorageOptions["refreshOAuthCredential"]>;
 }
 
 class ScenarioFailure extends Error {
@@ -101,8 +103,14 @@ export async function runSdkScenario(run: (context: SdkScenarioContext) => Promi
     });
     const { setTransports } = await import("@oh-my-pi/pi-utils/logger");
     setTransports({ console: false, file: false });
+    const { getOAuthProvider } = await import("@oh-my-pi/pi-ai/registry/oauth/index");
     const context: SdkScenarioContext = {
       root,
+      async refreshOAuthCredential(provider, _id, credential, signal) {
+        const refresh = getOAuthProvider(provider)?.refreshToken;
+        if (!refresh) throw new ScenarioFailure("unexpected-provider-refresh");
+        return refresh(credential, signal);
+      },
       check(condition, code): asserts condition {
         if (!condition) throw new ScenarioFailure(/^[a-z][a-z0-9-]{0,79}$/.test(code) ? code : "scenario-assertion");
       },
