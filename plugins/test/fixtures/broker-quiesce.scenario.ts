@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import type { NativeBrokerHandle } from "../../workers/broker/server.ts";
+import type { AuthBrokerServerHandle } from "@oh-my-pi/pi-ai/auth-broker/server";
 import { runSdkScenario, type SdkScenarioContext } from "./isolated-sdk";
 
 await runSdkScenario(async (ctx: SdkScenarioContext) => {
   // Static SDK imports would precede the child's private-state and network barrier.
-  const { NativeBrokerStorage } = await import("../../workers/broker/storage.ts");
-  const { startNativeBroker } = await import("../../workers/broker/server.ts");
+  const { AuthStorage } = await import("@oh-my-pi/pi-ai/auth-storage");
+  const { startAuthBroker } = await import("@oh-my-pi/pi-ai/auth-broker/server");
   const { registerOAuthProvider, unregisterOAuthProvider } = await import("@oh-my-pi/pi-ai/registry/oauth/index");
   const nativeBearer = "synthetic-native-control-bearer-private-only";
   const peerBearer = "synthetic-other-plaintext-bearer-no-control";
@@ -34,7 +34,7 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
       },
     });
     const database = join(ctx.root, `quiesce-${outcome}.db`);
-    const storage = await NativeBrokerStorage.create(database, {
+    const storage = await AuthStorage.create(database, {
       usageRequestTimeoutMs: 20,
       usageProviderResolver: id => id === provider ? {
         id,
@@ -45,7 +45,7 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
         },
       } : undefined,
     });
-    let broker: NativeBrokerHandle | undefined;
+    let broker: AuthBrokerServerHandle | undefined;
     let usage: Promise<void> | undefined;
     let controlDrain: Promise<{ status: number; body: unknown }> | undefined;
     let handleDrain: Promise<boolean> | undefined;
@@ -60,17 +60,17 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
       ctx.check(initial, "quiesce-credential-missing");
       if (outcome === "persist") {
         for (const invalid of [null, "", oldBearer, oldHash]) {
-          let accepted: NativeBrokerHandle | undefined;
+          let accepted: AuthBrokerServerHandle | undefined;
           let rejected = false;
           try {
-            accepted = startNativeBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [nativeBearer],
+            accepted = startAuthBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [nativeBearer],
               bearerTokenHashes: [oldHash], controlBearerToken: invalid as string, disableRefresher: true });
           } catch { rejected = true; }
           finally { await accepted?.close(); }
           ctx.check(rejected, "quiesce-invalid-control-bearer-admitted");
         }
       }
-      broker = startNativeBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [nativeBearer, peerBearer],
+      broker = startAuthBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [nativeBearer, peerBearer],
         bearerTokenHashes: [oldHash], controlBearerToken: nativeBearer, disableRefresher: true });
       const origin = broker.url;
       const fetch = ctx.fetchTo(origin);
@@ -130,7 +130,7 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
       ctx.check(!refreshAborted && refreshCalls === 1, "quiesce-interrupted-or-restarted-rotation");
       if (outcome === "persist") {
         ctx.check(result.status === 200 && handleSucceeded && await controlState() === "drained", "quiesce-success-not-drained");
-        const reopened = await NativeBrokerStorage.create(database);
+        const reopened = await AuthStorage.create(database);
         try {
           await reopened.reload();
           const persisted = reopened.listStoredCredentials().find(row => row.id === initial.id)?.credential;
@@ -173,8 +173,8 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
         return { ...credential, access: "synthetic-late-access", refresh: "synthetic-late-refresh", expires: Date.now() + 3_600_000 };
       },
     });
-    const storage = await NativeBrokerStorage.create(join(ctx.root, `prior-${prior}.db`));
-    let broker: NativeBrokerHandle | undefined;
+    const storage = await AuthStorage.create(join(ctx.root, `prior-${prior}.db`));
+    let broker: AuthBrokerServerHandle | undefined;
     let draining: Promise<Response> | undefined;
     try {
       storage.upsertCredential(provider, {
@@ -183,7 +183,7 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
       });
       const row = storage.listStoredCredentials().find(entry => entry.provider === provider);
       ctx.check(row, "quiesce-prior-credential-missing");
-      broker = startNativeBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [nativeBearer],
+      broker = startAuthBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [nativeBearer],
         controlBearerToken: nativeBearer, disableRefresher: true });
       const fetch = ctx.fetchTo(broker.url);
       const headers = { authorization: `Bearer ${nativeBearer}` };

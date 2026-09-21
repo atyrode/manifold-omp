@@ -7,11 +7,11 @@ import {
 import type { SettingsOptions } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import { runRpcMode } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
-import { OverlaySchema } from "../../api/index.ts";
-import { ProbeConfigSchema, ProbeModelsConfigSchema, PROBE_AGENT, readProbeInput } from "../probe/inputs.ts";
-import { openSessionsRoot, resolveSessionFile, SESSIONS_ROOT, SessionIdSchema } from "./sessions.ts";
-import { validateSkillInputs } from "./skills.ts";
-import { readAutomation, readResumeOverrides, readSessionInput } from "./sdk-inputs.ts";
+import { OverlaySchema } from "../api/index.ts";
+import { ProbeConfigSchema, ProbeModelsConfigSchema, PROBE_AGENT, readProbeInput } from "../workers/probe/inputs.ts";
+import { openSessionsRoot, resolveSessionFile, SESSIONS_ROOT, SessionIdSchema } from "../workers/harness/sessions.ts";
+import { validateSkillInputs } from "../workers/harness/skills.ts";
+import { readAutomation, readResumeOverrides, readSessionInput } from "../workers/harness/sdk-inputs.ts";
 import { admitSdkSession } from "./sdk-admission.ts";
 
 // This entry is always a new, sanitized child, never imported by CLI passthrough.

@@ -2,7 +2,7 @@ import type { ModelRegistry, SessionManager } from "@oh-my-pi/pi-coding-agent";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { parseConfiguredThinkingLevel, resolveThinkingLevelForModel } from "@oh-my-pi/pi-tui/thinking";
-import type { ActionInput, Overlay } from "../../api/index.ts";
+import type { ActionInput, Overlay } from "../api/index.ts";
 
 /** No SDK default/fuzzy/fallback model selection is allowed across explicit resume. */
 export function admitSdkSession(registry: Pick<ModelRegistry, "find" | "hasConfiguredAuth">,

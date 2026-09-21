@@ -7,7 +7,7 @@
     "bun": "1.4.2"
   },
   "scripts": {
-    "check": "tsc -p .",
+    "check": "tsc -p . && tsc -p sdk-host",
     "test": "bun test",
     "pack": "./pack.sh",
     "verify": "bun scripts/verify.ts",
@@ -15,13 +15,9 @@
     "deps:prepare": "bun --no-install workers/build.ts --prepare-dependencies"
   },
   "dependencies": {
-    "@oh-my-pi/pi-ai": "18.2.7",
-    "@oh-my-pi/pi-catalog": "18.2.7",
-    "@oh-my-pi/pi-coding-agent": "18.2.7",
-    "@oh-my-pi/pi-tui": "18.2.7",
-    "@oh-my-pi/pi-utils": "18.2.7",
-    "proxy-agent": "8.0.1",
-    "quickjs-wasi": "2.2.0",
+    "@oh-my-pi/pi-ai": "18.1.14",
+    "@oh-my-pi/pi-catalog": "18.1.14",
+    "@oh-my-pi/pi-utils": "18.1.14",
     "zod": "4.4.3"
   },
   "devDependencies": {
@@ -29,5 +25,8 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "typescript": "^5.9.3"
+  },
+  "patchedDependencies": {
+    "@oh-my-pi/pi-ai@18.1.14": "patches/@oh-my-pi%2Fpi-ai@18.1.14.patch"
   }
 }

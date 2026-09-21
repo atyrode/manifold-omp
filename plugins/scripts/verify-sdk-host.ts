@@ -3,7 +3,7 @@ import { mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises
 import { dirname, join, resolve } from "node:path";
 import { JobOwnerConfigSchema, PluginBundleSchema, type JobOwnerConfig, type MachineArtifact } from "@manifold/protocol";
 import { deliveredArtifact, extractArtifact, verifyBundledArtifacts } from "../../../manifold/packages/plugin-kit/src/artifacts.ts";
-import pins from "../runtime-artifacts.json";
+import pins from "../sdk-host/runtime-artifacts.json";
 
 export interface VerifySdkHostOptions {
   root: string;
@@ -42,12 +42,12 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
     await verifyBundledArtifacts(bundle);
     const tools = bundle.manifest.machine?.tools;
     check(tools, "runtime-tools");
-    for (const alias of ["bun", "pi-natives", "sdkHost"] as const) {
+    for (const alias of ["bun", "sdk-pi-natives", "sdkHost"] as const) {
       phase = `artifact-${alias}`;
       const spec = tools[alias]?.["linux-x64"];
       check(spec, "runtime-alias");
       if (alias !== "sdkHost") {
-        const pinned = pins.tools[alias]["linux-x64"];
+        const pinned = pins.tools[alias === "sdk-pi-natives" ? "pi-natives" : alias]["linux-x64"];
         check(spec.sha256 === pinned.sha256 && spec.entrySha256 === pinned.entrySha256 && spec.url === pinned.url, "runtime-pin");
       }
       let archive = spec.bundleFile ? deliveredArtifact(spec, { bundleFile: spec.bundleFile, data: bundle.files[spec.bundleFile]! }) : undefined;
@@ -64,14 +64,14 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
     }
     phase = "fixture-control";
     // Bundle only the verifier control program. The program under test is always
-    // the already verified sdkHost alias above, never workers/harness source.
+    // the already verified sdkHost alias above, never SDK host source.
     const control = await Bun.build({
-      entrypoints: [resolve(import.meta.dir, "../test/fixtures/packaged-sdk-host.ts")],
+      entrypoints: [resolve(import.meta.dir, "../sdk-host/test/packaged-sdk-host.ts")],
       target: "bun", format: "esm", packages: "bundle", minify: false,
       plugins: [{ name: "fixture-pinned-native", setup(build) {
         build.onLoad({ filter: /\/pi-natives\/native\/loader-state\.js$/ }, async args => {
           check(hash(await readFile(args.path)) === "de59cfd780bfb4ff4411a542396ba2f7c512add3ad2d474cd2e30220c69e3930", "fixture-native-loader");
-          return { loader: "js", contents: `let bindings; export function loadNative() { if (bindings) return bindings; const module = { exports: {} }; process.dlopen(module, "/runtime/bin/pi-natives"); module.exports.__ompInstallTokioRuntime?.(); return bindings = module.exports; }` };
+          return { loader: "js", contents: `let bindings; export function loadNative() { if (bindings) return bindings; const module = { exports: {} }; process.dlopen(module, "/runtime/bin/sdk-pi-natives"); module.exports.__ompInstallTokioRuntime?.(); return bindings = module.exports; }` };
         });
       } }],
     });

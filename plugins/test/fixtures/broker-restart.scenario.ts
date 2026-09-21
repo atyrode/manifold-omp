@@ -2,15 +2,15 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { RemoteAuthCredentialStore as RemoteStore } from "@oh-my-pi/pi-ai/auth-broker/remote-store";
-import type { NativeBrokerHandle } from "../../workers/broker/server.ts";
+import type { AuthBrokerServerHandle } from "@oh-my-pi/pi-ai/auth-broker/server";
 import type { SnapshotStreamEvent } from "@oh-my-pi/pi-ai/auth-broker/types";
 import type { SdkScenarioContext } from "./isolated-sdk.ts";
 import { runSdkScenario } from "./isolated-sdk.ts";
 
 await runSdkScenario(async (ctx: SdkScenarioContext) => {
   // SDK loading must follow the child's environment, logging, and fetch isolation.
-  const { NativeBrokerStorage } = await import("../../workers/broker/storage.ts");
-  const { startNativeBroker } = await import("../../workers/broker/server.ts");
+  const { AuthStorage } = await import("@oh-my-pi/pi-ai/auth-storage");
+  const { startAuthBroker } = await import("@oh-my-pi/pi-ai/auth-broker/server");
   const { AuthBrokerClient } = await import("@oh-my-pi/pi-ai/auth-broker/client");
   const { RemoteAuthCredentialStore } = await import("@oh-my-pi/pi-ai/auth-broker/remote-store");
   const dbPath = join(ctx.root, "restart.db");
@@ -25,8 +25,8 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
     email: "restart@accounts.invalid",
   });
   const controller = new AbortController();
-  let storage = await NativeBrokerStorage.create(dbPath);
-  let broker: NativeBrokerHandle | undefined;
+  let storage = await AuthStorage.create(dbPath);
+  let broker: AuthBrokerServerHandle | undefined;
   let remote: RemoteStore | undefined;
   let streamController: TransformStreamDefaultController<Uint8Array> | undefined;
   let receivedStreamSnapshot = false;
@@ -45,7 +45,7 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
     for (let i = 0; i < 12; i++) storage.upsertCredential(selected, credential(`synthetic-before-${i}`));
     storage.upsertCredential(removed, credential("synthetic-removed"));
     storage.upsertCredential(marker, credential("synthetic-marker-before"));
-    broker = startNativeBroker({ storage, bind: "127.0.0.1:0", bearerTokens: ["synthetic-original-service"],
+    broker = startAuthBroker({ storage, bind: "127.0.0.1:0", bearerTokens: ["synthetic-original-service"],
       bearerTokenHashes: [bearerSha256], controlBearerToken: "synthetic-original-service", disableRefresher: true });
     const port = broker.port;
     const origin = broker.url;
@@ -83,12 +83,12 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
     await broker.close();
     broker = undefined;
     storage.close();
-    storage = await NativeBrokerStorage.create(dbPath);
+    storage = await AuthStorage.create(dbPath);
     await storage.reload();
     storage.upsertCredential(selected, credential("synthetic-after-restart"));
     await storage.remove(removed);
     ctx.check(storage.getGeneration() < oldGeneration, "restart-generation-not-lower");
-    broker = startNativeBroker({ storage, bind: `127.0.0.1:${port}`, bearerTokens: ["synthetic-replacement-service"],
+    broker = startAuthBroker({ storage, bind: `127.0.0.1:${port}`, bearerTokens: ["synthetic-replacement-service"],
       bearerTokenHashes: [bearerSha256], controlBearerToken: "synthetic-replacement-service", disableRefresher: true });
     ctx.check(broker.url === origin, "restart-origin-changed");
 
@@ -181,13 +181,13 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
     try { return await Promise.race([promise, timeout.promise]); }
     finally { clearTimeout(timer); }
   };
-  storage = await NativeBrokerStorage.create(join(ctx.root, "authority.db"));
+  storage = await AuthStorage.create(join(ctx.root, "authority.db"));
   broker = undefined;
   remote = undefined;
   try {
     storage.upsertCredential(selected, credential("synthetic-authority-before"));
     storage.upsertCredential(removed, credential("synthetic-authority-removed"));
-    broker = startNativeBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [token], disableRefresher: true });
+    broker = startAuthBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [token], disableRefresher: true });
     const fixtureFetch = ctx.fetchTo(broker.url);
     const fetchImpl: typeof fetch = Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
       const url = new URL(input instanceof Request ? input.url : String(input));

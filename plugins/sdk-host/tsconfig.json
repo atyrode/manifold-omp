@@ -1,0 +1,57 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@manifold/plugin": [
+        "../../manifold/packages/plugin/src/index.ts"
+      ],
+      "@manifold/plugin/hooks": [
+        "../../manifold/packages/plugin/src/hooks.ts"
+      ],
+      "@manifold/sdk/worker": [
+        "../../manifold/packages/sdk/src/worker.ts"
+      ],
+      "@manifold/plugin-kit/server": [
+        "../../manifold/packages/plugin-kit/src/server.ts"
+      ],
+      "@manifold/protocol": [
+        "../../manifold/packages/protocol/src/index.ts"
+      ],
+      "@manifold/ui": [
+        "../../manifold/packages/ui/src/index.ts"
+      ],
+      "@manifold/sdk": [
+        "../../manifold/packages/sdk/src/index.ts"
+      ],
+      "@manifold/scene": [
+        "../../manifold/packages/scene/src/index.ts"
+      ],
+      "react": [
+        "../../manifold/node_modules/react",
+        "./node_modules/@types/react"
+      ],
+      "react/*": [
+        "../../manifold/node_modules/react/*",
+        "./node_modules/@types/react/*"
+      ],
+      "react-dom": [
+        "../../manifold/node_modules/react-dom",
+        "./node_modules/@types/react-dom"
+      ],
+      "react-dom/*": [
+        "../../manifold/node_modules/react-dom/*",
+        "./node_modules/@types/react-dom/*"
+      ],
+      "@oh-my-pi/pi-utils/frontmatter": [
+        "sdk-host/node_modules/@oh-my-pi/pi-utils/dist/types/frontmatter.d.ts"
+      ],
+      "zod": [
+        "sdk-host/node_modules/zod"
+      ]
+    }
+  },
+  "include": [
+    "*.ts",
+    "test/**/*.ts"
+  ]
+}

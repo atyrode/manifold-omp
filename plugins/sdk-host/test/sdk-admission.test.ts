@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { admitSdkSession } from "../workers/harness/sdk-admission.ts";
+import { admitSdkSession } from "../sdk-admission.ts";
 
 const model: Model = buildModel({
   provider: "fixture", id: "saved", name: "Fixture", api: "openai-completions", baseUrl: "http://127.0.0.1:1",
