@@ -1014,7 +1014,7 @@ for (const platform of ["linux-x64", "linux-arm64"] as const) {
             "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
         deployment.installation!.machine = machine;
         f.ctx.jobs.describeDeployment = async () => deployment;
-        const input = { ...session, automation: { mode: "ordinary" as const } };
+        const input = { ...session, automation: { mode: "restricted" as const, toolNames: [], delegation: "disabled" as const } };
         const reviewDigest = await reviewDigestOf(f.client, input);
         machine.tools![alias]![platform]![field] = "f".repeat(64);
         expect(await f.client.call("reviewSession", input)).toEqual({ refused: "omp_sdk_runtime_unsupported" });

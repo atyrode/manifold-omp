@@ -55,6 +55,36 @@ async function priorFamily(destination: string): Promise<Record<string, string>>
   return snapshot(destination);
 }
 
+async function packWithReorderedAssets(destination: string) {
+  const script = `
+    const originalBuild = Bun.build;
+    let reordered = false;
+    Bun.build = async options => {
+      const result = await originalBuild(options);
+      if (typeof options.naming === "object" && options.naming.entry === "sdkHost.js") {
+        if (result.outputs.filter(output => output.kind === "asset").length < 2) throw new Error("Missing compiler assets");
+        result.outputs.reverse();
+        reordered = true;
+      }
+      return result;
+    };
+    const { fixture, destination } = JSON.parse(process.env.OMP_PACK_REORDER);
+    const { pack } = await import(fixture + "/pack.ts");
+    const bundles = await pack(destination);
+    if (!reordered) throw new Error("Compiler output ordering was not exercised");
+    process.stdout.write(JSON.stringify(bundles));
+  `;
+  const child = Bun.spawn([process.execPath, "--no-install", "--eval", script], {
+    cwd: fixture, stdin: "ignore", stdout: "pipe", stderr: "pipe",
+    env: { ...process.env, OMP_PACK_REORDER: JSON.stringify({ fixture, destination }) },
+  });
+  const [exit, stdout, stderr] = await Promise.all([
+    child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+  ]);
+  if (exit !== 0) throw new Error(`Reordered pack failed: ${stderr}`);
+  return JSON.parse(stdout) as readonly (PackResult & { readonly id: string })[];
+}
+
 for (const destinationKind of ["default", "caller"] as const) {
   describe(`${destinationKind} destination`, () => {
     for (const [part, id] of [["accounts", family[1]!], ["gateway", family[2]!]] as const) {
@@ -107,7 +137,7 @@ for (const destinationKind of ["default", "caller"] as const) {
         );
       }
       const firstBytes = await snapshot(destination);
-      const second = await fixturePack(destinationKind === "default" ? undefined : destination);
+      const second = await packWithReorderedAssets(destination);
       expect(second.map(({ id }) => id)).toEqual(family);
       expect(await snapshot(destination)).toEqual(firstBytes);
     }, 360_000);

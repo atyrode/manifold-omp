@@ -540,7 +540,8 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
         [`${name}-notices`]: { entry: ["licenses", "THIRD-PARTY-NOTICES.txt"], sha256: hash(licenses), relativeTarget: [`${name}-licenses`, "THIRD-PARTY-NOTICES.txt"] },
       };
       let index = 0;
-      for (const [member, asset] of assets) {
+      // Compiler completion order must not choose the runtime's public asset aliases.
+      for (const [member, asset] of [...assets].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
         declaredFiles[`${name}-asset-${index++}`] = { entry: member.split("/"), sha256: hash(asset), relativeTarget: member.split("/") };
       }
       bytes = archive(files);
