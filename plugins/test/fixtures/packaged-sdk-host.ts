@@ -71,7 +71,7 @@ try {
       const dropped = new Map(entries.filter(entry => entry.type === omitted).map(entry => [entry.id, entry.parentId]));
       const retained = entries.filter(entry => entry.type !== omitted);
       for (const entry of retained) {
-        while (entry.parentId && dropped.has(entry.parentId)) entry.parentId = dropped.get(entry.parentId);
+        while (entry.parentId && dropped.has(entry.parentId)) entry.parentId = dropped.get(entry.parentId) ?? null;
       }
       await writeFile(saved, retained.map(entry => JSON.stringify(entry)).join("\n") + "\n", { mode: 0o600 });
     } else if (scenario === "incompatible") {

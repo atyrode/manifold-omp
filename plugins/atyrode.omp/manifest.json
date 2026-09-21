@@ -545,6 +545,9 @@
       },
       "atyrode.omp.launch": {
         "argv": [
+          { "literal": "--no-env-file" },
+          { "literal": "--no-install" },
+          { "literal": "--config=/dev/null" },
           {
             "literal": "/runtime/bin/harness"
           },
@@ -718,9 +721,6 @@
             ]
           }
         ],
-        "workingDirectory": {
-          "locationId": "atyrode.omp.workspace"
-        },
         "locations": [
           {
             "locationId": "atyrode.omp.workspace",
@@ -760,6 +760,9 @@
       },
       "atyrode.omp.session": {
         "argv": [
+          { "literal": "--no-env-file" },
+          { "literal": "--no-install" },
+          { "literal": "--config=/dev/null" },
           {
             "literal": "/runtime/bin/harness"
           },
@@ -942,9 +945,6 @@
             ]
           }
         ],
-        "workingDirectory": {
-          "locationId": "atyrode.omp.workspace"
-        },
         "locations": [
           {
             "locationId": "atyrode.omp.workspace",
@@ -988,6 +988,9 @@
       },
       "atyrode.omp.harness": {
         "argv": [
+          { "literal": "--no-env-file" },
+          { "literal": "--no-install" },
+          { "literal": "--config=/dev/null" },
           {
             "literal": "/runtime/bin/harness"
           },
@@ -1154,9 +1157,6 @@
             ]
           }
         ],
-        "workingDirectory": {
-          "locationId": "atyrode.omp.workspace"
-        },
         "locations": [
           {
             "locationId": "atyrode.omp.workspace",
@@ -1196,6 +1196,9 @@
       },
       "atyrode.omp.harness-sessions": {
         "argv": [
+          { "literal": "--no-env-file" },
+          { "literal": "--no-install" },
+          { "literal": "--config=/dev/null" },
           {
             "literal": "/runtime/bin/harness"
           },
@@ -1230,6 +1233,9 @@
       },
       "atyrode.omp.resume": {
         "argv": [
+          { "literal": "--no-env-file" },
+          { "literal": "--no-install" },
+          { "literal": "--config=/dev/null" },
           {
             "literal": "/runtime/bin/harness"
           },
@@ -1382,9 +1388,6 @@
             ]
           }
         ],
-        "workingDirectory": {
-          "locationId": "atyrode.omp.workspace"
-        },
         "locations": [
           {
             "locationId": "atyrode.omp.workspace",

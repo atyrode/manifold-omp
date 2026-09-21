@@ -68,16 +68,20 @@ test("set and explicit selection canonicalize while conflicting names and declar
   expect(await resolveSkills(ctx, target.machineId, { mode: "disabled" })).toEqual({ mode: "disabled", catalogRevision: null, selected: [] });
 });
 
-test("catalog reads and selected launches recheck native source authority and sealed digests", async () => {
+test("unavailable sources remain repairable metadata but cannot be selected or retained", async () => {
   const { ctx, state } = fixture();
   await writeSkillCatalog(ctx, { machineId: target.machineId, expectedRevision: 0, skills: [entry("alpha")], sets: [] });
   const select = { mode: "select" as const, expectedCatalogRevision: 1, skillIds: ["alpha"], setIds: [] };
   state.sha256 = "b".repeat(64);
-  await expect(readSkillCatalog(ctx, target)).rejects.toThrow("skill_source_changed");
+  expect((await readSkillCatalog(ctx, target)).revision).toBe(1);
   await expect(resolveSkills(ctx, target.machineId, select)).rejects.toThrow("skill_source_changed");
   state.sha256 = "a".repeat(64); state.sourceAvailable = false;
-  await expect(readSkillCatalog(ctx, target)).rejects.toThrow();
+  expect((await readSkillCatalog(ctx, target)).skills).toEqual([entry("alpha")]);
   await expect(resolveSkills(ctx, target.machineId, select)).rejects.toThrow();
+  await expect(writeSkillCatalog(ctx, { machineId: target.machineId, expectedRevision: 1, skills: [entry("alpha")], sets: [] }))
+    .rejects.toThrow("input_authority_refused");
+  expect(await writeSkillCatalog(ctx, { machineId: target.machineId, expectedRevision: 1, skills: [], sets: [] }))
+    .toMatchObject({ revision: 2, skills: [], sets: [] });
 });
 
 test("catalog rejects dangling sets and bounds aggregate storage independently of per-field limits", async () => {

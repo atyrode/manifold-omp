@@ -64,10 +64,11 @@ try {
       "skills.enabled": skillsRuntime.mode === "selected",
     } : {}),
   };
-  // The TUI uses a public singleton as well as the session's explicit isolated Settings.
-  // Initialize it against the fresh native home, not project configuration discovery.
-  await Settings.init({ inMemory: true, cwd: "/home/job", agentDir: PROBE_AGENT, overrides: settingsOverrides });
-  const settings = Settings.isolated(settingsOverrides);
+  // Ordinary resume retains OMP's project layer; the sealed launch config still wins.
+  // Restricted startup never reads ambient settings. Both paths share the stock TUI singleton.
+  const settings = await Settings.init({ inMemory: true, cwd: restricted ? "/home/job" : cwd,
+    agentDir: PROBE_AGENT, configFiles: restricted ? [] : [`${PROBE_AGENT}/config.yml`],
+    overrides: restricted ? settingsOverrides : { "startup.setupWizard": false } });
   mkdirSync("/home/job/tmp", { recursive: true, mode: 0o700 });
   auth = await AuthStorage.create("/home/job/tmp/sdk-auth.db");
   const registry = new ModelRegistry(auth, `${PROBE_AGENT}/models.yml`, {
@@ -90,7 +91,7 @@ try {
       heldFile = openSync(`/proc/self/fd/${root}/${filename}`, constants.O_RDONLY | constants.O_NOFOLLOW);
       original = fstatSync(heldFile);
       if (!original.isFile() || original.nlink !== 1) throw new Error("omp_resume_session_unavailable");
-      manager = await SessionManager.open(resumePath, SESSIONS_ROOT);
+      manager = await SessionManager.open(resumePath, SESSIONS_ROOT, undefined, { throwIfMissing: true });
       if (manager.getSessionId() !== id || manager.getSessionFile() !== resumePath || manager.getCwd() !== cwd)
         throw new Error("omp_resume_session_changed");
     } finally { closeSync(root); }
@@ -152,6 +153,7 @@ try {
       mode = new InteractiveMode(created.session, "18.2.7", undefined, created.setToolUIContext,
         created.lspServers, created.mcpManager, created.eventBus);
       await mode.init();
+      if (resume) await mode.renderInitialMessages();
       if (!resume) {
         const prompt = readSessionInput("prompt");
         if (prompt) await created.session.prompt(prompt);

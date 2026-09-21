@@ -6,7 +6,7 @@ export const RestrictedAutomationSchema = z.strictObject({
   mode: z.literal("restricted"),
   toolNames: z.array(z.enum(RESTRICTED_TOOL_NAMES)).max(RESTRICTED_TOOL_NAMES.length)
     .refine(names => new Set(names).size === names.length, "duplicate restricted tool"),
-  delegation: z.literal("disabled"),
+  delegation: z.literal("disabled").describe("Disables OMP task/advisor spawning, not operating-system subprocess authority granted to a shell tool."),
 });
 export const AutomationReviewSchema = z.union([
   z.strictObject({ mode: z.literal("ordinary") }), RestrictedAutomationSchema,

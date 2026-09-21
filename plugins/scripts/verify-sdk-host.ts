@@ -55,7 +55,9 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
       const extracted = await extractArtifact(archive, spec, AbortSignal.timeout(120_000));
       await writeFile(join(runtime, "bin", alias), extracted.executable, { mode: alias === "bun" ? 0o500 : 0o400 });
       for (const [name, bytes] of Object.entries(extracted.files)) {
-        const destination = join(runtime, "bin", ...spec.files![name]!.relativeTarget);
+        const relativeTarget = spec.files![name]!.relativeTarget;
+        check(relativeTarget, "artifact-relative-target");
+        const destination = join(runtime, "bin", ...relativeTarget);
         await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
         await writeFile(destination, bytes, { mode: 0o400 });
       }
@@ -173,11 +175,16 @@ async function publicArtifact(spec: MachineArtifact): Promise<Buffer> {
     check(response.ok && response.body, "artifact-download");
     const chunks: Uint8Array[] = [];
     let size = 0;
-    for await (const chunk of response.body) {
-      size += chunk.byteLength;
-      check(size <= spec.maxBytes, "artifact-size");
-      chunks.push(chunk);
-    }
+    const reader = response.body.getReader();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        check(size <= spec.maxBytes, "artifact-size");
+        chunks.push(value);
+      }
+    } finally { await reader.cancel(); }
     const bytes = Buffer.concat(chunks);
     check(hash(bytes) === spec.sha256, "artifact-hash");
     return bytes;

@@ -77,7 +77,8 @@ export class NativeBrokerStorage extends AuthStorage {
   }
 
   override fetchUsageReports(options?: Parameters<AuthStorage["fetchUsageReports"]>[0]) {
-    return this.#waitForCaller(this.#track(super.fetchUsageReports({ ...options, signal: undefined })), options?.signal);
+    const { signal, ...operationOptions } = options ?? {};
+    return this.#waitForCaller(this.#track(super.fetchUsageReports(operationOptions)), signal);
   }
 
   override reload(): Promise<void> { return this.#track(super.reload()); }

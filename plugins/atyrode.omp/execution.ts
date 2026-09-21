@@ -610,7 +610,7 @@ async function sessionRuntimePreparation(
   const automation = args.automation ?? { mode: "ordinary" as const };
   if (args.automation || resume) requireSdkRuntime(current.deployment.installation?.machine, operationId);
   const skills = await resolveSkills(ctx, args.machineId, args.skills ?? (args.automation ? { mode: "disabled" } : undefined));
-  if (args.skills !== undefined) requireSkillRuntime(current.deployment.installation?.machine, operationId);
+  if (skills.mode !== "preserve") requireSkillRuntime(current.deployment.installation?.machine, operationId);
   const inputs = skillInputBindings(skills);
   const skillConfig = skills.mode === "disabled" ? { skills: { enabled: false } }
     : skills.mode === "selected" ? { skills: { customDirectories: inputs.map(binding => `/inputs/${binding.name}`) } }
@@ -711,7 +711,7 @@ async function oneShotPreparation(
 ) {
   const prepared = await sessionPreparation(ctx, args);
   const current = await currentOperation(ctx, args.machineId, SESSION_OPERATION_ID);
-  if (args.skills !== undefined) requireSkillRuntime(current.deployment.installation?.machine, SESSION_OPERATION_ID);
+  if (prepared.review.skills.mode !== "preserve") requireSkillRuntime(current.deployment.installation?.machine, SESSION_OPERATION_ID);
   if (args.automation) requireSdkRuntime(current.deployment.installation?.machine, SESSION_OPERATION_ID);
   return {
     prepared,

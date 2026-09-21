@@ -512,7 +512,9 @@ try {
       installationRevision: sourceTarget.installationRevision, artifactSha256: producerSha,
       node: formatManifoldUri({ kind: "operation", machineId: target.machineId, operationId: producerOperation }),
       cap: "jobs:read", enabled: false });
-    await refused("readSkillCatalog", target);
+    check(digest(await call("readSkillCatalog", target)) === digest(populatedCatalog), "unavailable-skill-metadata-not-repairable");
+    await refused("writeSkillCatalog", { machineId: target.machineId, expectedRevision: populatedCatalog.revision,
+      skills: skillEntries, sets: populatedCatalog.sets });
     await ownerAction(hub, "engine.jobs.consent", { machineId: target.machineId, pluginId: fixtureId,
       installationRevision: sourceTarget.installationRevision, artifactSha256: producerSha,
       node: formatManifoldUri({ kind: "operation", machineId: target.machineId, operationId: producerOperation }),
@@ -558,6 +560,10 @@ try {
     check((await call("accounts", {})).status === "fresh", "recovered-broker-not-readable");
     check(!(await roster(hub)).some(row => row.manifest.id === "atyrode.code" || row.manifest.id.startsWith("atyrode.code.")),
       "positive-worker-introduced-code-dependency");
+    phase = "packaged-sdk-host";
+    const { verifySdkHost } = await import("./verify-sdk-host.ts");
+    await verifySdkHost({ root, bubblewrap, systemBindings: system.system!,
+      bundlePath: bundles.find(bundle => bundle.id === OMP_PLUGIN_ID)!.file });
   } finally {
     try { await stopBroker(); } catch { cleanupFailed = true; }
     for (const id of installed.reverse()) {

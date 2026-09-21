@@ -35,9 +35,9 @@ async function authorizeSources(ctx: OmpContext, machineId: string, skills: read
 export async function readSkillCatalog(ctx: OmpContext, target: Target): Promise<SkillCatalog> {
   await authorizeTarget(ctx, target);
   await machineAuthority(ctx, target.machineId);
-  const catalog = await storedCatalog(ctx, target.machineId);
-  await authorizeSources(ctx, target.machineId, catalog.skills);
-  return catalog;
+  // Owner-published metadata stays readable so expired sources can be removed.
+  // Selecting or retaining a source still requires its current native authority.
+  return storedCatalog(ctx, target.machineId);
 }
 export async function writeSkillCatalog(ctx: OmpContext, args: ActionInput<"writeSkillCatalog">): Promise<SkillCatalog> {
   if (!ctx.auth.isRoot || ctx.auth.containerScope !== null) throw new OmpRefusal("skill_catalog_owner_required");

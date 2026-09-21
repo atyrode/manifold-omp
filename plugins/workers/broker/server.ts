@@ -65,7 +65,7 @@ export function startNativeBroker(options: NativeBrokerOptions): NativeBrokerHan
     const response = await fetch(`${upstream.url}${url.pathname}${url.search}`, {
       method: request.method,
       headers,
-      body: request.body ? await request.arrayBuffer() : undefined,
+      ...(request.body ? { body: await request.arrayBuffer() } : {}),
       redirect: "error",
     });
     if (!isStream || !response.ok || !response.body) {
@@ -122,7 +122,7 @@ export function startNativeBroker(options: NativeBrokerOptions): NativeBrokerHan
     idleTimeout: 0,
     async fetch(request): Promise<Response> {
       const url = new URL(request.url);
-      const bearer = request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1].trim();
+      const bearer = request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
       const digest = bearer ? createHash("sha256").update(bearer).digest() : undefined;
       const isControl = url.pathname.startsWith("/v1/control/");
       const authorized = digest && (isControl
