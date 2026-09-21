@@ -40,6 +40,7 @@ type JobOverrides = {
   door?: string;
   inputs?: JobInputBinding[];
   limits?: PublicJob["limits"] | null;
+  resultLimits?: PublicJob["limits"];
 };
 interface OmpClient {
   call<K extends OmpAction>(name: K, input: ActionInput<K>): Promise<ActionReply<K>>;
@@ -203,7 +204,7 @@ function publicJob(
             startedAt: 1,
             finishedAt: 2,
             usage: null,
-            limits: {
+            limits: overrides.resultLimits ?? overrides.limits ?? {
               timeoutMs: launch.limits.timeoutMs,
               memoryBytes: launch.limits.memoryBytes,
               processes: launch.limits.processes,
@@ -945,7 +946,7 @@ test("set reviews spend on the same explicit selection, but not on a changed cat
   const f = fixture();
   const deployment = structuredClone(await f.ctx.jobs.describeDeployment({ machineId: target.machineId, pluginId: OMP_PLUGIN_ID }));
   deployment.installation!.machine = MachineHalfSchema.parse({ ...deployment.installation!.machine,
-    tools: { ...deployment.installation!.machine.tools, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
+    tools: { ...deployment.installation!.machine.tools, bun: sdkRuntimeArtifacts.tools.bun, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
   f.ctx.jobs.describeDeployment = async () => deployment;
   f.ctx.jobs.inspectInputs = async ({ inputs }) => ({ inputs: inputs.map(input => ({
     ...input, sha256: "a".repeat(64), bytes: 4096, files: 1,
@@ -980,7 +981,7 @@ test("restricted review binds exact tools and disables ambient skills without ch
   const f = fixture();
   const deployment = structuredClone(await f.ctx.jobs.describeDeployment({ machineId: target.machineId, pluginId: OMP_PLUGIN_ID }));
   deployment.installation!.machine = MachineHalfSchema.parse({ ...deployment.installation!.machine,
-    tools: { ...deployment.installation!.machine.tools, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
+    tools: { ...deployment.installation!.machine.tools, bun: sdkRuntimeArtifacts.tools.bun, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
   f.ctx.jobs.describeDeployment = async () => deployment;
   const automation = { mode: "restricted" as const, toolNames: ["read" as const], delegation: "disabled" as const };
   // Code composes passive task routes even when delegation is disabled.
@@ -1001,6 +1002,28 @@ test("restricted review binds exact tools and disables ambient skills without ch
   expect(ordinary.automation).toEqual({ mode: "ordinary" });
   expect(ordinary.skills.mode).toBe("preserve");
 });
+
+for (const platform of ["linux-x64", "linux-arm64"] as const) {
+  for (const alias of ["sdk-pi-natives", "bun"] as const) {
+    for (const field of ["sha256", "entrySha256"] as const) {
+      test(`SDK admission refuses ${platform} ${alias} ${field} drift before dispatch`, async () => {
+        const f = fixture();
+        const deployment = structuredClone(await f.ctx.jobs.describeDeployment({ machineId: target.machineId, pluginId: OMP_PLUGIN_ID }));
+        const machine = MachineHalfSchema.parse({ ...deployment.installation!.machine,
+          tools: { ...deployment.installation!.machine!.tools, bun: sdkRuntimeArtifacts.tools.bun,
+            "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
+        deployment.installation!.machine = machine;
+        f.ctx.jobs.describeDeployment = async () => deployment;
+        const input = { ...session, automation: { mode: "ordinary" as const } };
+        const reviewDigest = await reviewDigestOf(f.client, input);
+        machine.tools![alias]![platform]![field] = "f".repeat(64);
+        expect(await f.client.call("reviewSession", input)).toEqual({ refused: "omp_sdk_runtime_unsupported" });
+        expect(await f.client.call("runSession", { ...input, reviewDigest })).toEqual({ refused: "omp_sdk_runtime_unsupported" });
+        expect(f.posted).toEqual([]);
+      });
+    }
+  }
+}
 
 test("unsupported restricted tool, duplicate tool and delegation requests refuse rather than widen", async () => {
   const f = fixture();
@@ -1045,6 +1068,40 @@ test("inference ceilings cannot be changed after review or raised above declared
   const stopped = await f.client.call("cancelSession", { ...target, jobId: admitted.jobId });
   if ("refused" in stopped) throw new Error(stopped.refused);
   expect(f.cancelled).toEqual([admitted.jobId]);
+});
+
+test("settled inference receipts require unchanged executed limits while cancellation bypasses only limits", async () => {
+  const f = fixture();
+  const input = { ...session, inferenceLimits: { calls: 2, costMicros: 20_000 } };
+  const admitted = await f.client.call("runSession", {
+    ...input, reviewDigest: await reviewDigestOf(f.client, input),
+  });
+  if ("refused" in admitted) throw new Error(admitted.refused);
+  f.seal(admitted.jobId, ustar([[transcriptName, transcript]]));
+  const valid = await f.client.call("readSession", { ...target, jobId: admitted.jobId });
+  if ("refused" in valid) throw new Error(valid.refused);
+  expect(valid.session).toEqual(receipt);
+  const limits = admitted.result!.limits;
+  for (const inference of [undefined, { ...input.inferenceLimits, calls: 3 }]) {
+    f.amend(admitted.jobId, { resultLimits: { ...limits, inference } });
+    expect(await f.client.call("readSession", { ...target, jobId: admitted.jobId }))
+      .toEqual({ refused: "omp_provenance_changed" });
+    const stopped = await f.client.call("cancelSession", { ...target, jobId: admitted.jobId });
+    if ("refused" in stopped) throw new Error(stopped.refused);
+    expect(stopped.job.jobId).toBe(admitted.jobId);
+  }
+  expect(f.cancelled).toEqual([admitted.jobId, admitted.jobId]);
+  f.amend(admitted.jobId, { resultLimits: limits });
+  const restored = await f.client.call("readSession", { ...target, jobId: admitted.jobId });
+  if ("refused" in restored) throw new Error(restored.refused);
+  expect(restored.session).toEqual(receipt);
+  f.amend(admitted.jobId, {
+    resultLimits: { ...limits, inference: undefined },
+    inputs: [{ name: "material", from: { jobId: "another-job", output: "material" } }],
+  });
+  expect(await f.client.call("cancelSession", { ...target, jobId: admitted.jobId }))
+    .toEqual({ refused: "omp_provenance_changed" });
+  expect(f.cancelled).toEqual([admitted.jobId, admitted.jobId]);
 });
 
 test("bounded review refuses missing metering or unpriced configured models before dispatch", async () => {

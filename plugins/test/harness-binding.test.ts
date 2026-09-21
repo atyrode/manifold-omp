@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { formatManifoldUri, MachineHalfSchema, PublicJobSchema, type Cap, type ManifoldRef } from "@manifold/protocol";
 import {
   ACCOUNTS_PLUGIN_ID, BROKER_SERVICE_ID, OMP_PLUGIN_ID, OmpHarnessProfileSchema, PreparedHarnessSessionSchema,
+  PreparedResumeSessionSchema, TerminalRuntimeSchema,
 } from "../api/index.ts";
 import { prepareHarnessSession } from "../atyrode.omp/execution.ts";
 import { listSessions, resumeSession } from "../atyrode.omp/sessions.ts";
@@ -19,7 +20,7 @@ import { ABSENT_MODEL_ID, UNLISTED_PUBLISHED_ID } from "./fixtures/models.ts";
 function launchFixture() {
   const machineId = "fixture-machine";
   const machine = MachineHalfSchema.parse({ ...manifest.machine,
-    tools: { ...manifest.machine.tools, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
+    tools: { ...manifest.machine.tools, bun: sdkRuntimeArtifacts.tools.bun, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
   const pins = { installationRevision: "fixture-installation", artifactSha256: "a".repeat(64), resourceBindingDigest: "b".repeat(64) };
   const consent = (cap: Cap, ref: ManifoldRef) => ({ cap, node: formatManifoldUri(ref), enabled: true, revision: "fixture-consent" });
   const operations = ["harness", "harness-sessions", "resume"].map(name => `${OMP_PLUGIN_ID}.${name}`);
@@ -120,6 +121,40 @@ test("two governed preparations bind distinct IDs to the transcripts OMP will op
     expect(() => PreparedHarnessSessionSchema.parse({ ...first, session: second.session })).toThrow();
     expect(() => PreparedHarnessSessionSchema.parse({ ...first, session: { ...first.session, machineId: "another-machine" } })).toThrow();
   } finally { closeSync(root); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("prepared harness contracts require the full nested session to match the outer binding", async () => {
+  const f = launchFixture();
+  const prepared = await prepareHarnessSession(f.ctx, f.input);
+  expect(PreparedHarnessSessionSchema.parse(prepared).session).toEqual(prepared.session);
+  for (const session of [
+    undefined,
+    { ...prepared.session, sessionId: randomUUID() },
+    { ...prepared.session, harness: "another.harness" },
+    { ...prepared.session, machineId: "another-machine" },
+  ]) {
+    expect(PreparedHarnessSessionSchema.safeParse({
+      ...prepared, runtime: { ...prepared.runtime, session },
+    }).success).toBe(false);
+  }
+});
+
+test("prepared resume contracts bind the OMP plugin and resume operation without restricting generic runtimes", async () => {
+  const f = launchFixture();
+  const sessionId = randomUUID();
+  f.setInventory([{ id: sessionId, title: null, cwd: "/home/job/workspace", updatedAt: 123 }]);
+  const prepared = await resumeSession(f.ctx, {
+    machineId: f.input.machineId, sessionId, overlay: f.input.overlay,
+  });
+  expect(PreparedResumeSessionSchema.parse(prepared).sessionId).toBe(sessionId);
+  for (const changed of [
+    { operationId: `${OMP_PLUGIN_ID}.launch` },
+    { pluginId: "another.plugin" },
+  ]) {
+    const runtime = { ...prepared.runtime, ...changed };
+    expect(TerminalRuntimeSchema.safeParse(runtime).success).toBe(true);
+    expect(PreparedResumeSessionSchema.safeParse({ ...prepared, runtime }).success).toBe(false);
+  }
 });
 
 test("a trusted resumed binding preserves its journal and never creates a missing conversation", async () => {

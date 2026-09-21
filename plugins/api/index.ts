@@ -59,6 +59,7 @@ export const VALIDATE_WORKSPACE_OPERATION_ID = `${OMP_PLUGIN_ID}.validate-worksp
 export const INVENTORY_OPERATION_ID = `${OMP_PLUGIN_ID}.inventory`;
 export const BENCHMARK_OPERATION_ID = `${OMP_PLUGIN_ID}.benchmark`;
 export const LAUNCH_OPERATION_ID = `${OMP_PLUGIN_ID}.launch`;
+export const RESUME_OPERATION_ID = `${OMP_PLUGIN_ID}.resume`;
 /** The one-shot sibling of `launch`: no stdin, its own bounded output lease. */
 export const SESSION_OPERATION_ID = `${OMP_PLUGIN_ID}.session`;
 /** A bound output name, never the implicit `stdout`/`stderr` streams. */
@@ -290,10 +291,14 @@ export const PreparedSessionSchema = z
     message: "runtime destination does not match review",
   });
 export const PreparedHarnessSessionSchema = PreparedSessionSchema.safeExtend({
+  runtime: TerminalRuntimeSchema.safeExtend({ session: OmpSessionRefSchema }),
   session: OmpSessionRefSchema,
 }).refine(value =>
   value.session.machineId === value.destination.machineId &&
-  value.runtime.input.sessionId === value.session.sessionId,
+  value.runtime.input.sessionId === value.session.sessionId &&
+  value.runtime.session.harness === value.session.harness &&
+  value.runtime.session.machineId === value.session.machineId &&
+  value.runtime.session.sessionId === value.session.sessionId,
   { message: "harness session does not match admitted runtime" },
 );
 export const ResumeSessionInputSchema = z.strictObject({
@@ -312,10 +317,13 @@ export const ResumeSessionInputSchema = z.strictObject({
 export const PreparedResumeSessionSchema = z.strictObject({
   machineId: id,
   sessionId: z.uuid(),
-  runtime: TerminalRuntimeSchema,
+  runtime: TerminalRuntimeSchema.safeExtend({
+    pluginId: z.literal(OMP_PLUGIN_ID),
+    operationId: z.literal(RESUME_OPERATION_ID),
+    session: OmpSessionRefSchema,
+  }),
 }).refine(value => value.runtime.machineId === value.machineId &&
   value.runtime.input.sessionId === value.sessionId &&
-  value.runtime.session?.harness === OMP_PLUGIN_ID &&
   value.runtime.session.machineId === value.machineId &&
   value.runtime.session.sessionId === value.sessionId, {
   message: "resume session does not match admitted runtime",

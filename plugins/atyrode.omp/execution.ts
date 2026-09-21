@@ -22,6 +22,7 @@ import {
   SESSION_ARCHIVE_LIMIT,
   SESSION_GUEST_PATH,
   SESSION_OPERATION_ID,
+  RESUME_OPERATION_ID,
   SESSION_OUTPUT_NAME,
   RUNS_LOCATION_ID,
   EXHAUSTED_DESTINATION,
@@ -31,6 +32,7 @@ import {
   ThinkingLevelSchema,
   modelId,
   PreparedHarnessSessionSchema,
+  PreparedResumeSessionSchema,
   skillInputBindings,
   OmpSessionRefSchema,
   type OmpSessionRef,
@@ -360,7 +362,9 @@ function checkJob(
     // What the hub says it bound must be what was asked for, in the order it was asked.
     digestOf(job.inputs ?? []) !== digestOf(provenance.inputs) ||
     (requireLimits && provenance.limits !== undefined &&
-      digestOf(job.limits?.inference ?? null) !== digestOf(provenance.limits.inference ?? null)) ||
+      (digestOf(job.limits?.inference ?? null) !== digestOf(provenance.limits.inference ?? null) ||
+        (job.result !== null &&
+          digestOf(job.result.limits.inference ?? null) !== digestOf(provenance.limits.inference ?? null)))) ||
     job.authority.requester !== provenance.requester ||
     job.authority.origin.kind !== "action" ||
     job.authority.origin.door !== `${OMP_PLUGIN_ID}.${provenance.door}`
@@ -585,8 +589,16 @@ function requireSkillRuntime(machine: MachineHalf | undefined, operationId: stri
 
 function supportsSdkRuntime(machine: MachineHalf | undefined, operationId: string): boolean {
   const operation = machine?.operations[operationId];
+  for (const platform of ["linux-x64", "linux-arm64"] as const) {
+    const addon = machine?.tools?.["sdk-pi-natives"]?.[platform];
+    const bun = machine?.tools?.bun?.[platform];
+    if (addon?.sha256 !== sdkRuntimeArtifacts.tools["pi-natives"][platform].sha256 ||
+      addon.entrySha256 !== sdkRuntimeArtifacts.tools["pi-natives"][platform].entrySha256 ||
+      bun?.sha256 !== sdkRuntimeArtifacts.tools.bun[platform].sha256 ||
+      bun.entrySha256 !== sdkRuntimeArtifacts.tools.bun[platform].entrySha256) return false;
+  }
   return sdkRuntimeArtifacts.sdkVersion === "18.2.7" &&
-    machine?.tools?.["sdk-pi-natives"]?.["linux-x64"]?.entrySha256 === sdkRuntimeArtifacts.tools["pi-natives"]["linux-x64"].entrySha256 &&
+    operation?.executable?.runtimeTool === "bun" &&
     operation?.input.automation !== undefined && operation.input.resumeOverrides !== undefined &&
     operation.runtimeTools?.includes("sdkHost") === true && operation.runtimeTools.includes("sdk-pi-natives");
 }
@@ -1007,7 +1019,7 @@ export async function prepareInteractiveResume(
   if (args.containerId !== undefined)
     await authorizeTarget(ctx, { containerId: args.containerId, machineId: args.machineId }, true);
   const defaults = await readDefaults(ctx);
-  const operationId = `${OMP_PLUGIN_ID}.resume`;
+  const operationId = RESUME_OPERATION_ID;
   const input = {
     machineId: args.machineId, expectedDefaultsRevision: defaults.revision,
     accountPool: args.accountPool, overlay: args.overlay ?? {}, prompt: "", planYolo: false,
@@ -1017,14 +1029,14 @@ export async function prepareInteractiveResume(
   const first = await sessionRuntimePreparation(ctx, input, operationId, args.sessionId, true, args.overrides);
   const latest = await sessionRuntimePreparation(ctx, input, operationId, args.sessionId, true, args.overrides);
   if (digestOf(first) !== digestOf(latest)) throw new OmpRefusal("resources_changed");
-  return {
+  return PreparedResumeSessionSchema.parse({
     machineId: args.machineId,
     sessionId: args.sessionId,
-    runtime: TerminalRuntimeSchema.parse({
+    runtime: {
       machineId: args.machineId, pluginId: OMP_PLUGIN_ID, operationId,
       ...latest.current.pins, input: latest.input,
       session: { harness: OMP_PLUGIN_ID, machineId: args.machineId, sessionId: args.sessionId },
       ...(latest.inputs.length > 0 ? { inputs: latest.inputs } : {}),
-    }),
-  };
+    },
+  });
 }
