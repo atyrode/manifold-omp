@@ -1,16 +1,23 @@
+import { closeSync } from "node:fs";
+import { connect, type Socket } from "node:net";
 import { copyFile, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import type { AssistantMessage, AssistantMessageEvent, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
+import { createSessionFile, openSessionsRoot } from "../../workers/harness/sessions.ts";
 
-// Fixture control, not a substitute host. Only the packaged /runtime/bin/sdkHost
-// constructs agent sessions or runs tools. This process uses the public journal
-// API to inspect/reopen its output and public pi-native messages to drive it.
+// Fixture control, not a substitute runtime. Only shipped /runtime/bin programs
+// construct agent sessions or run tools. Public journal inspection and pi-native
+// messages verify their output; fresh terminal cases enter the governed worker.
 const scenario = process.argv[2]!;
 const sessions = "/home/job/omp-sessions";
 const saved = join(sessions, "saved.jsonl");
-const resumed = !["selected", "disabled", "cancel"].includes(scenario);
+const fresh = scenario.startsWith("fresh-");
+const rpc = scenario === "fresh-rpc-selected";
+const selected = scenario === "selected" || scenario === "fresh-sdk-selected" || rpc;
+const resumed = !fresh && !["selected", "disabled", "cancel"].includes(scenario);
+let owner: Socket | undefined;
 let child: Bun.Subprocess | undefined;
 let gateway: Bun.Server<undefined> | undefined;
 let failure: string | undefined;
@@ -62,6 +69,19 @@ try {
   check(!Object.keys(process.env).some(key => /^(?:MANIFOLD_|AWS_|OPENAI_|ANTHROPIC_|CODE_)/.test(key)), "ambient-environment");
   const routes = (await readFile("/proc/net/route", "utf8")).trim().split("\n").slice(1);
   check(routes.every(line => line.split(/\s+/)[0] === "lo"), "network-namespace");
+  const launch: { argv: string[]; sessionId: string } | undefined = fresh ? JSON.parse(await readFile("/inputs/launch", "utf8")) : undefined;
+  if (fresh) {
+    // An unrelated prior selected-skill conversation must neither be continued
+    // nor contribute its historical optional skill choice to this fresh launch.
+    await copyFile("/proof-state/baseline.jsonl", saved);
+    if (rpc) {
+      // RPC tests the public packaged SDK protocol directly; no synthetic
+      // ActionRunner authority or production service is introduced.
+      const root = openSessionsRoot();
+      try { createSessionFile(root, launch!.sessionId, "/home/job/workspace"); }
+      finally { closeSync(root); }
+    }
+  }
   if (resumed && scenario !== "missing") {
     await copyFile("/proof-state/baseline.jsonl", saved);
     if (scenario === "missing-model" || scenario === "missing-thinking") {
@@ -99,7 +119,7 @@ try {
   for (const name of await readdir(sessions)) if (name.endsWith(".jsonl")) before.set(name, await readFile(join(sessions, name), "utf8"));
   const refused = ["missing-model", "missing-thinking", "incompatible", "changed", "missing", "rpc-restricted"].includes(scenario);
   const expectedModel = scenario === "model-only" || scenario === "model-suffix" ? "fixture/openai/o3" : scenario === "both" ? "fixture/openai/gpt-4.1" : "fixture/openai/gpt-5";
-  const expectedThinking = scenario === "auto" ? "auto" : ["model-suffix", "thinking-only", "both", "disabled", "cancel"].includes(scenario) ? "off" : "high";
+  const expectedThinking = scenario === "auto" ? "auto" : fresh || ["model-suffix", "thinking-only", "both", "disabled", "cancel"].includes(scenario) ? "off" : "high";
   gateway = Bun.serve({ hostname: "127.0.0.1", port: 38457, idleTimeout: 0, async fetch(request) {
     try {
       check(request.headers.get("authorization") === `Bearer ${["SYNTHETIC", "LOCAL", "FIXTURE", "NOT", "A", "CREDENTIAL"].join("-")}`, "synthetic-capability");
@@ -120,11 +140,18 @@ try {
       if (expectedThinking === "high") check(parsed.options.reasoning === "high", "resumed-thinking-preservation");
       else check(parsed.options.reasoning === undefined && parsed.options.disableReasoning === true, "explicit-thinking-off");
       const names = (parsed.context.tools ?? []).map(tool => tool.name).sort();
-      check(JSON.stringify(names) === JSON.stringify(["read"]), "restricted-registry-widened");
+      if (!fresh) check(JSON.stringify(names) === JSON.stringify(["read"]), "restricted-registry-widened");
+      else check(names.includes("read"), "ordinary-read-tool-missing");
       const instructions = JSON.stringify({ system: parsed.context.systemPrompt, tools: parsed.context.tools });
       check(!instructions.includes("HOSTILE-AMBIENT-SKILL") && !instructions.includes("HOSTILE-PROJECT-CONTEXT"), "ambient-discovery");
-      if (scenario === "selected") check(instructions.includes("skill://sealed-proof"), "selected-skill-not-advertised");
-      else check(!instructions.includes("skill://"), "disabled-skill-advertised");
+      if (selected) check(instructions.includes("skill://sealed-proof"), "selected-skill-not-advertised");
+      else if (!fresh) check(!instructions.includes("skill://"), "disabled-skill-advertised");
+      else check(!instructions.includes("sealed-proof"), "historical-skill-restored");
+      if (fresh) {
+        check(parsed.context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-PROMPT")), "fresh-prompt-missing");
+        check(!JSON.stringify(parsed.context.messages).includes("SDK-PROOF-COMPLETE"), "historical-conversation-restored");
+      }
+      if (rpc) check(String(parsed.context.systemPrompt).includes(await readFile("/inputs/admission", "utf8")), "rpc-admission-prompt-missing");
       if (scenario === "cancel") {
         waitingStream = true;
         request.signal.addEventListener("abort", () => { cancelled = true; }, { once: true });
@@ -139,18 +166,20 @@ try {
         usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
       };
-      if (scenario === "selected" && requests === 1) {
+      if (selected && requests === 1) {
         message.stopReason = "toolUse";
         message.content = [
           { type: "toolCall", id: "proof-read", name: "read", arguments: { path: "skill://sealed-proof/resource.txt" } },
-          { type: "toolCall", id: "proof-bash", name: "bash", arguments: { command: "touch /home/job/forbidden-executed" } },
-          { type: "toolCall", id: "proof-task", name: "task", arguments: { task: "Write /home/job/forbidden-executed" } },
+          ...(scenario === "selected" ? [
+            { type: "toolCall" as const, id: "proof-bash", name: "bash", arguments: { command: "touch /home/job/forbidden-executed" } },
+            { type: "toolCall" as const, id: "proof-task", name: "task", arguments: { task: "Write /home/job/forbidden-executed" } },
+          ] : []),
         ];
       } else {
-        if (scenario === "selected") {
+        if (selected) {
           const results = parsed.context.messages.filter((message): message is ToolResultMessage => message.role === "toolResult");
           check(results.some(result => result.toolCallId === "proof-read" && !result.isError && JSON.stringify(result.content).includes("SDK-SEALED-RESOURCE-ONLY")), "sealed-resource-read");
-          for (const id of ["proof-bash", "proof-task"]) check(results.some(result => result.toolCallId === id && result.isError), "forbidden-tool-executed");
+          if (scenario === "selected") for (const id of ["proof-bash", "proof-task"]) check(results.some(result => result.toolCallId === id && result.isError), "forbidden-tool-executed");
         }
         completed = true;
       }
@@ -161,13 +190,18 @@ try {
     }
   } });
   const kind = scenario === "rpc-restricted" ? "rpc-resume" : resumed ? "resume" : "print";
-  const argv = ["/runtime/bin/bun", "--no-env-file", "--no-install", "--config=/dev/null", "/runtime/bin/sdkHost", kind];
+  const argv = fresh && !rpc ? ["/runtime/bin/bun", ...launch!.argv]
+    : ["/runtime/bin/bun", "--no-env-file", "--no-install", "--config=/dev/null", "/runtime/bin/sdkHost", rpc ? "rpc" : kind];
   if (resumed) argv.push(scenario === "missing" ? "missing.jsonl" : "saved.jsonl");
+  if (rpc) argv.push(`${launch!.sessionId}.jsonl`, "/inputs/admission");
   const env = { ...process.env };
+  if (fresh && !rpc) env.MANIFOLD_JOB_CONTEXT_FD = "3";
   let rendered = false;
   const spawnOptions = { cwd: "/inputs", env, stderr: "pipe" as const };
-  if (resumed && !refused) {
-    child = Bun.spawn(argv, { ...spawnOptions, terminal: { cols: 120, rows: 40, name: "xterm-256color", data(pty, data) {
+  if ((resumed && !refused) || (fresh && !rpc)) {
+    child = Bun.spawn(argv, { ...spawnOptions,
+      ...(fresh ? { stdio: ["pipe", "pipe", "pipe", "socket-fd"] as ["pipe", "pipe", "pipe", "socket-fd"] } : {}),
+      terminal: { cols: 120, rows: 40, name: "xterm-256color", data(pty, data) {
       const text = new TextDecoder().decode(data);
       terminal = (terminal + text).slice(-256_000);
       // Standard terminal queries only; the stock renderer and editor are real.
@@ -176,10 +210,57 @@ try {
       if (text.includes("\x1b]11;?")) pty.write("\x1b]11;rgb:0000/0000/0000\x1b\\");
       if (terminal.includes("SDK-PROOF-COMPLETE")) rendered = true;
     } } });
-  } else child = Bun.spawn(argv, { ...spawnOptions, stdin: "ignore", stdout: "pipe" });
+  } else child = Bun.spawn(argv, { ...spawnOptions, stdin: rpc ? "pipe" : "ignore", stdout: "pipe" });
+  if (fresh && !rpc) {
+    // The pinned Bun exposes an owned socketpair endpoint for the native ABI.
+    const fd = child.stdio[3];
+    check(typeof fd === "number", "worker-context-socket");
+    owner = (connect as unknown as (options: { fd: number }) => Socket)({ fd });
+    owner.on("error", () => {});
+  }
+  owner?.write(`${JSON.stringify({ type: "context", locations: [
+    { locationId: "atyrode.omp.workspace", guestPath: "/home/job/workspace", access: "write" },
+    { locationId: "atyrode.omp.sessions", guestPath: sessions, access: "write" },
+  ] })}\n`);
   const stderrRead = child.stderr instanceof ReadableStream ? new Response(child.stderr).text().then(value => { stderr = value; }) : Promise.resolve();
-  const stdoutRead = child.stdout instanceof ReadableStream ? new Response(child.stdout).text() : Promise.resolve("");
-  if (resumed && !refused) {
+  const rpcResponses = new Map<string, { success: boolean; data?: { sessionId?: string; sessionFile?: string } }>();
+  let rpcEnded = false;
+  const stdoutRead = child.stdout instanceof ReadableStream ? (async () => {
+    if (!rpc) return await new Response(child!.stdout as ReadableStream).text();
+    let pending = "";
+    const decoder = new TextDecoder();
+    for await (const chunk of child!.stdout as ReadableStream<Uint8Array>) {
+      pending += decoder.decode(chunk, { stream: true });
+      let end: number;
+      while ((end = pending.indexOf("\n")) >= 0) {
+        const frame = JSON.parse(pending.slice(0, end));
+        pending = pending.slice(end + 1);
+        if (frame.type === "response" && typeof frame.id === "string") rpcResponses.set(frame.id, frame);
+        if (frame.type === "agent_end") rpcEnded = true;
+      }
+    }
+    return "";
+  })() : Promise.resolve("");
+  if (rpc) {
+    const send = (frame: unknown) => {
+      check(child!.stdin && typeof child!.stdin !== "number", "rpc-stdin");
+      child!.stdin.write(`${JSON.stringify(frame)}\n`);
+      child!.stdin.flush();
+    };
+    send({ id: "before", type: "get_session_stats" });
+    await until(() => rpcResponses.has("before"), "rpc-not-ready");
+    check(rpcResponses.get("before")?.success && rpcResponses.get("before")?.data?.sessionId === launch!.sessionId &&
+      rpcResponses.get("before")?.data?.sessionFile === join(sessions, `${launch!.sessionId}.jsonl`), "rpc-fresh-identity");
+    send({ id: "prompt", type: "prompt", message: "SDK-PROOF-PROMPT" });
+    await until(() => completed && rpcEnded, "rpc-did-not-complete");
+    send({ id: "after", type: "get_session_stats" });
+    await until(() => rpcResponses.has("after"), "rpc-stats-after-turn");
+    check(rpcResponses.get("after")?.success && rpcResponses.get("after")?.data?.sessionId === launch!.sessionId, "rpc-identity-changed");
+    child.kill("SIGTERM");
+  } else if (fresh) {
+    await until(() => completed && terminal.includes("SDK-PROOF-COMPLETE"), "fresh-result-not-rendered");
+    child.kill("SIGTERM");
+  } else if (resumed && !refused) {
     // The saved assistant message is a semantic stock-renderer readiness signal.
     await until(() => rendered, "resume-renderer-not-ready");
     if (scenario !== "auto") {
@@ -217,13 +298,21 @@ try {
     while (!cancelled && Date.now() < deadline) await Bun.sleep(20);
     check(cancelled, "gateway-stream-not-cancelled");
   } else {
-    check(discoveries > 0 && (scenario === "auto" ? requests === 0 : completed) && (resumed ? exit !== 0 : exit === 0), "program-completion");
-    const path = resumed ? saved : join("/outputs/session", (await readdir("/outputs/session")).find(name => name.endsWith(".jsonl")) ?? "missing");
-    const manager = await SessionManager.open(path, resumed ? sessions : "/outputs/session");
+    check(discoveries > 0 && (scenario === "auto" ? requests === 0 : completed) && (resumed || fresh ? exit !== 0 : exit === 0), "program-completion");
+    const path = fresh ? join(sessions, `${launch!.sessionId}.jsonl`) : resumed ? saved
+      : join("/outputs/session", (await readdir("/outputs/session")).find(name => name.endsWith(".jsonl")) ?? "missing");
+    const manager = await SessionManager.open(path, resumed || fresh ? sessions : "/outputs/session", undefined, { throwIfMissing: true });
+    if (fresh) {
+      check(manager.getSessionId() === launch!.sessionId && manager.getSessionFile() === path && manager.getCwd() === "/home/job/workspace", "fresh-durable-identity");
+      check(await readFile(saved, "utf8") === before.get("saved.jsonl"), "fresh-mutated-history");
+      const files = (await readdir(sessions)).filter(name => name.endsWith(".jsonl")).sort();
+      check(JSON.stringify(files) === JSON.stringify(["saved.jsonl", `${launch!.sessionId}.jsonl`].sort()), "fresh-extra-journal");
+    }
     const context = manager.buildSessionContext();
     check(context.messages.some(message => message.role === "assistant" && JSON.stringify(message.content).includes(resumed && scenario !== "auto" ? "SDK-PROOF-RESUMED-COMPLETE" : "SDK-PROOF-COMPLETE")), "durable-completion");
     check(context.models[manager.getLastModelChangeRole() ?? "default"] === expectedModel, "durable-model");
     check((context.configuredThinkingLevel ?? context.thinkingLevel) === expectedThinking, "durable-thinking");
+    if (fresh) check(context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-PROMPT")), "fresh-durable-prompt");
     if (resumed && scenario !== "auto") check(context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-RESUMED-TURN")), "durable-resumed-turn");
     if (scenario === "selected") {
       await manager.setSessionName("SDK proof saved session", "user");
@@ -233,6 +322,8 @@ try {
     await manager.close();
     if (scenario === "selected") await copyFile(path, "/proof-state/baseline.jsonl");
   }
+  owner?.destroy();
+  owner = undefined;
   for (const marker of ["discovery-executed", "forbidden-executed", "preload-executed", "env-executed"])
     check(!(await stat(`/home/job/${marker}`).catch(() => undefined)), "ambient-execution");
   check((await readFile(`/proc/self/task/${process.pid}/children`, "utf8")).trim() === "", "child-not-reaped");
@@ -246,6 +337,7 @@ try {
 } finally {
   if (child?.exitCode === null) { child.kill("SIGKILL"); await child.exited; }
   child?.terminal?.close();
+  owner?.destroy();
   await gateway?.stop(true);
 }
 console.log(failure ? `sdk-host-proof:${failure}` : "sdk-host-proof-ok");
