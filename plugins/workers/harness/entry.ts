@@ -1,7 +1,7 @@
 import { closeSync, writeSync } from "node:fs";
 import { openWorkerContext, type WorkerContext } from "@manifold/sdk/worker";
 import { listSessionSummaries, openSessionsRoot } from "./sessions.ts";
-import { runOmpHarness, runOmpResume } from "./runtime.ts";
+import { runOmpHarness, runOmpNative, runOmpResume } from "./runtime.ts";
 
 const controller = new AbortController();
 const cancel = () => controller.abort();
@@ -25,6 +25,8 @@ try {
     success = await runOmpHarness(context.signal);
   } else if (process.argv[2] === "resume") {
     success = await runOmpResume(context.signal);
+  } else if (process.argv[2] === "native") {
+    success = await runOmpNative(context.signal);
   } else throw new Error("invalid_harness_operation");
 } catch {
   // No exception, provider diagnostic, path or environment reaches public output.

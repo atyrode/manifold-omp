@@ -11,6 +11,8 @@ import { openSessionsRoot, prepareSessionFile, SESSIONS_ROOT, SessionIdSchema } 
 import { OmpRpcActivity, OmpSendInputSchema, rpcFrames, RPC_FRAME_BYTES } from "./rpc.ts";
 import { ADMISSION_CONTEXT_BYTES, writeAdmissionContext, type AdmissionContextFile } from "./admission.ts";
 import { dispatchOmpModelRequest, OmpModelToolInputSchema } from "./model.ts";
+import { validateSkillInputs } from "./skills.ts";
+import { readAutomation } from "./sdk-inputs.ts";
 
 const runnerEnvironment = z.strictObject({
   origin: z.string().url(), token: z.string().regex(/^[a-f0-9]{64}$/i), runId: z.string().min(1).max(128),
@@ -22,14 +24,14 @@ const ompEnvironment = {
   SSL_CERT_FILE: "/runtime/bin/ca-certificates", GIT_SSL_CAINFO: "/runtime/bin/ca-certificates",
 };
 
-/** Agent and operator launches select the same transcript and sealed config.
- * Only an admitted Agent adds the RPC transport and its private system context. */
-export function ompLaunchArgs(sessionFile: string, options: { planYolo?: boolean; admissionPath?: string } = {}): string[] {
+/** Fresh ordinary admitted Agents retain the published CLI RPC path. */
+function ompLaunchArgs(sessionFile: string, options: { planYolo?: boolean; admissionPath: string; disableSkills?: boolean }): string[] {
   const args = [
     "--session-dir", SESSIONS_ROOT, "--session", `${SESSIONS_ROOT}/${sessionFile}`,
     "--config", "/home/job/.omp/agent/config.yml", ...(options.planYolo ? ["--plan-yolo"] : []),
+    ...(options.disableSkills ? ["--no-skills"] : []),
   ];
-  return options.admissionPath === undefined ? args : ["--mode", "rpc", ...args, "--append-system-prompt", options.admissionPath];
+  return ["--mode", "rpc", ...args, "--append-system-prompt", options.admissionPath];
 }
 
 /** Consume launcher-only authority before any model or control stream is read. */
@@ -59,17 +61,18 @@ function inputText(name: "sessionId" | "prompt", limit: number): string {
   } finally { closeSync(fd); }
 }
 
-/** Operator resume needs only the native immutable session input, never Agent
- * authority. The terminal belongs directly to OMP; no RPC or prompt adapter. */
+/** Operator resume uses only immutable native inputs; the SDK child owns the
+ * stock terminal renderer and never receives private Agent authority. */
 export async function runOmpResume(signal: AbortSignal): Promise<boolean> {
   if (signal.aborted) throw new Error("harness_cancelled");
+  validateSkillInputs();
   const sessionId = SessionIdSchema.parse(inputText("sessionId", 36));
   const root = openSessionsRoot();
   let sessionFile: string;
   try { sessionFile = prepareSessionFile(root, sessionId, "/home/job/workspace", true); }
   finally { closeSync(root); }
   if (signal.aborted) throw new Error("harness_cancelled");
-  const child = spawn("/runtime/bin/omp", ompLaunchArgs(sessionFile), {
+  const child = spawn("/runtime/bin/bun", ["/runtime/bin/sdkHost", "resume", sessionFile], {
     cwd: "/home/job/workspace", env: ompEnvironment, stdio: "inherit",
   });
   const exit = Promise.withResolvers<number | null>();
@@ -92,9 +95,54 @@ export async function runOmpResume(signal: AbortSignal): Promise<boolean> {
   }
 }
 
+/** Ordinary terminal and one-shot argv remain native; the boundary only validates
+ * selected immutable mounts before handing the terminal directly to OMP. */
+export async function runOmpNative(signal: AbortSignal): Promise<boolean> {
+  validateSkillInputs();
+  if (signal.aborted) throw new Error("harness_cancelled");
+  if (readAutomation().mode === "restricted") {
+    const child = spawn("/runtime/bin/bun", ["/runtime/bin/sdkHost", process.argv.includes("-p") ? "print" : "interactive"], {
+      cwd: "/home/job/workspace", env: ompEnvironment, stdio: "inherit",
+    });
+    const exit = Promise.withResolvers<number | null>();
+    child.once("close", exit.resolve);
+    child.once("error", exit.reject);
+    let timeout: NodeJS.Timeout | undefined;
+    const stop = () => {
+      child.kill("SIGTERM");
+      timeout = setTimeout(() => child.kill("SIGKILL"), 1000);
+      timeout.unref();
+    };
+    signal.addEventListener("abort", stop, { once: true });
+    if (signal.aborted) stop();
+    try { return await exit.promise === 0 && !signal.aborted; }
+    finally { signal.removeEventListener("abort", stop); clearTimeout(timeout); }
+  }
+  const environment = { ...process.env };
+  for (const name of Object.keys(environment)) if (name.startsWith("MANIFOLD_")) delete environment[name];
+  const child = spawn("/runtime/bin/omp", process.argv.slice(3), {
+    cwd: "/home/job/workspace", env: environment, stdio: "inherit",
+  });
+  const exit = Promise.withResolvers<number | null>();
+  child.once("close", exit.resolve);
+  child.once("error", exit.reject);
+  let timeout: NodeJS.Timeout | undefined;
+  const stop = () => {
+    child.kill("SIGTERM");
+    timeout = setTimeout(() => child.kill("SIGKILL"), 1000);
+    timeout.unref();
+  };
+  signal.addEventListener("abort", stop, { once: true });
+  if (signal.aborted) stop();
+  try { return await exit.promise === 0 && !signal.aborted; }
+  finally { signal.removeEventListener("abort", stop); clearTimeout(timeout); }
+}
+
 /** A native operation, not a shell command. OMP sees neither the runner credential
  * nor the private control descriptor; its only host boundary is the RPC pipe. */
 export async function runOmpHarness(signal: AbortSignal): Promise<boolean> {
+  validateSkillInputs();
+  if (readAutomation().mode === "restricted") throw new Error("omp_restricted_harness_unsupported");
   const binding = takeRunEnvironment(process.env);
   const sessionId = SessionIdSchema.parse(inputText("sessionId", 36));
   const prompt = inputText("prompt", 16384 * 4);
@@ -139,9 +187,13 @@ export async function runOmpHarness(signal: AbortSignal): Promise<boolean> {
     admission = writeAdmissionContext(emitted);
     emitted = []; emittedBytes = 0;
     if (signal.aborted || controlFailed) throw new Error("harness_cancelled");
-    child = spawn("/runtime/bin/omp", ompLaunchArgs(sessionFile, {
-      admissionPath: admission.path, planYolo: process.argv.includes("--plan-yolo"),
-    }), { cwd: "/home/job/workspace", env: ompEnvironment, stdio: ["pipe", "pipe", "pipe"] });
+    const resuming = process.argv.includes("--resume");
+    child = spawn(resuming ? "/runtime/bin/bun" : "/runtime/bin/omp", resuming
+      ? ["/runtime/bin/sdkHost", "rpc-resume", sessionFile, admission.path]
+      : ompLaunchArgs(sessionFile, {
+        admissionPath: admission.path, planYolo: process.argv.includes("--plan-yolo"),
+        disableSkills: process.argv.includes("--no-skills"),
+      }), { cwd: "/home/job/workspace", env: ompEnvironment, stdio: ["pipe", "pipe", "pipe"] });
     const processChild = child;
     const stdin = processChild.stdin!;
     // Provider diagnostics are not a safe public channel. RPC failures are fixed codes below.

@@ -7,13 +7,15 @@ import { PluginManifestSchema, type Cap } from "@manifold/protocol";
 import manifestJson from "./manifest.json";
 import {
   rootActionSchemas,
+  RestrictedAutomationSchema,
   type RootAction,
   type ActionInput,
   type ActionResult,
 } from "../api/index.ts";
-import { describeDestination, type OmpContext } from "./machine-server.ts";
+import { describeDestination, OmpRefusal, type OmpContext } from "./machine-server.ts";
 import { refusal } from "./refusal.ts";
 import { readDefaults, writeDefaults } from "./state.ts";
+import { readSkillCatalog, writeSkillCatalog } from "./skills.ts";
 import { harness } from "./harness.ts";
 import { listSessions, resumeSession } from "./sessions.ts";
 import {
@@ -39,6 +41,8 @@ type RootHandlers = {
 const implementations: RootHandlers = {
   readDefaults,
   writeDefaults,
+  readSkillCatalog,
+  writeSkillCatalog,
   describeDestination,
   reviewWorkspace,
   prepareWorkspace,
@@ -85,6 +89,8 @@ const observedRuntimeCaps: readonly Cap[] = [
 const delegates: Record<RootAction, readonly Cap[]> = {
   readDefaults: [],
   writeDefaults: [],
+  readSkillCatalog: ["machines:run", "jobs:read"],
+  writeSkillCatalog: ["machines:run", "jobs:read"],
   describeDestination: [...nativeObservationCaps, "services:read"],
   reviewWorkspace: nativeObservationCaps,
   prepareWorkspace: workspaceExecutionCaps,
@@ -105,6 +111,7 @@ const delegates: Record<RootAction, readonly Cap[]> = {
 };
 const writes: Partial<Record<RootAction, true>> = {
   writeDefaults: true,
+  writeSkillCatalog: true,
   prepareWorkspace: true,
   prepareSession: true,
   runSession: true,
@@ -115,6 +122,9 @@ export const handlers = Object.fromEntries(
     name,
     async (ctx: OmpContext, raw: unknown) => {
       try {
+        if (typeof raw === "object" && raw !== null && "automation" in raw &&
+          raw.automation !== undefined && !RestrictedAutomationSchema.safeParse(raw.automation).success)
+          throw new OmpRefusal("automation_unsupported");
         const args = rootActionSchemas[name].input.parse(raw);
         const handler = implementations[name] as (
           context: OmpContext,
@@ -138,7 +148,7 @@ const plugin = {
       caps: name === "listSessions" || name === "resumeSession" ? [] : [writes[name] ? "containers:write" : "containers:read"],
       delegates: delegates[name],
       scope:
-        name === "readDefaults" || name === "writeDefaults" || name === "listSessions" || name === "resumeSession"
+        name === "readDefaults" || name === "writeDefaults" || name === "writeSkillCatalog" || name === "listSessions" || name === "resumeSession"
           ? "workspace"
           : "container",
       trace: "opaque",

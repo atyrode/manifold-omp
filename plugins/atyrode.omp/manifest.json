@@ -2,7 +2,7 @@
   "id": "atyrode.omp",
   "version": "0.1.0",
   "title": "omp",
-  "description": "Independent OMP execution over governed native Manifold resources. Operator doors atyrode.omp.listSessions and atyrode.omp.resumeSession expose body-free transcript metadata and prepare a machine-only interactive terminal runtime, without an Agent. Omitted resume knobs use current defaults and enabled broker credentials for configured providers; placement independently authorizes the container and terminal.",
+  "description": "Independent OMP execution over governed native Manifold resources. Restricted automation uses the supported OMP18.2.7 SDK registry with explicit tool names and no delegation. Operator resume preserves persisted exact model/thinking unless explicitly overridden; missing or incompatible state refuses before inference. Placement independently authorizes its container and terminal.",
   "capabilities": [
     "containers:read",
     "containers:write",
@@ -546,6 +546,19 @@
       "atyrode.omp.launch": {
         "argv": [
           {
+            "literal": "/runtime/bin/harness"
+          },
+          {
+            "literal": "native"
+          },
+          {
+            "literal": "--no-skills",
+            "when": {
+              "input": "disableSkills",
+              "equals": true
+            }
+          },
+          {
             "literal": "--session-dir"
           },
           {
@@ -607,6 +620,25 @@
           "planYolo": {
             "type": "boolean",
             "required": true
+          },
+          "skillRuntime": {
+            "type": "string",
+            "required": true,
+            "maxLength": 4096
+          },
+          "disableSkills": {
+            "type": "boolean",
+            "required": true
+          },
+          "automation": {
+            "type": "string",
+            "required": true,
+            "maxLength": 4096
+          },
+          "resumeOverrides": {
+            "type": "string",
+            "required": true,
+            "maxLength": 4096
           }
         },
         "environment": {
@@ -618,10 +650,13 @@
           "bun",
           "ca-certificates",
           "system",
-          "development"
+          "development",
+          "harness",
+          "sdkHost",
+          "pi-natives"
         ],
         "executable": {
-          "runtimeTool": "omp"
+          "runtimeTool": "bun"
         },
         "inputFiles": {
           "models": {
@@ -659,6 +694,18 @@
               "agent",
               "config.yml"
             ]
+          },
+          "skillRuntime": {
+            "input": "skillRuntime"
+          },
+          "automation": {
+            "input": "automation"
+          },
+          "resumeOverrides": {
+            "input": "resumeOverrides"
+          },
+          "prompt": {
+            "input": "prompt"
           }
         },
         "services": [
@@ -692,10 +739,40 @@
           "processes": 512,
           "outputBytes": 1073741824
         },
-        "stdin": true
+        "stdin": true,
+        "inputs": [
+          "optionalSkill0",
+          "optionalSkill1",
+          "optionalSkill2",
+          "optionalSkill3",
+          "optionalSkill4",
+          "optionalSkill5",
+          "optionalSkill6",
+          "optionalSkill7",
+          "optionalSkill8",
+          "optionalSkill9",
+          "optionalSkill10",
+          "optionalSkill11",
+          "optionalSkill12",
+          "optionalSkill13",
+          "optionalSkill14"
+        ]
       },
       "atyrode.omp.session": {
         "argv": [
+          {
+            "literal": "/runtime/bin/harness"
+          },
+          {
+            "literal": "native"
+          },
+          {
+            "literal": "--no-skills",
+            "when": {
+              "input": "disableSkills",
+              "equals": true
+            }
+          },
           {
             "literal": "--session-dir"
           },
@@ -767,6 +844,25 @@
           "planYolo": {
             "type": "boolean",
             "required": true
+          },
+          "skillRuntime": {
+            "type": "string",
+            "required": true,
+            "maxLength": 4096
+          },
+          "disableSkills": {
+            "type": "boolean",
+            "required": true
+          },
+          "automation": {
+            "type": "string",
+            "required": true,
+            "maxLength": 4096
+          },
+          "resumeOverrides": {
+            "type": "string",
+            "required": true,
+            "maxLength": 4096
           }
         },
         "environment": {
@@ -778,10 +874,13 @@
           "bun",
           "ca-certificates",
           "system",
-          "development"
+          "development",
+          "harness",
+          "sdkHost",
+          "pi-natives"
         ],
         "executable": {
-          "runtimeTool": "omp"
+          "runtimeTool": "bun"
         },
         "inputFiles": {
           "models": {
@@ -819,6 +918,18 @@
               "agent",
               "config.yml"
             ]
+          },
+          "skillRuntime": {
+            "input": "skillRuntime"
+          },
+          "automation": {
+            "input": "automation"
+          },
+          "resumeOverrides": {
+            "input": "resumeOverrides"
+          },
+          "prompt": {
+            "input": "prompt"
           }
         },
         "services": [
@@ -848,7 +959,22 @@
           "session"
         ],
         "inputs": [
-          "material"
+          "material",
+          "optionalSkill0",
+          "optionalSkill1",
+          "optionalSkill2",
+          "optionalSkill3",
+          "optionalSkill4",
+          "optionalSkill5",
+          "optionalSkill6",
+          "optionalSkill7",
+          "optionalSkill8",
+          "optionalSkill9",
+          "optionalSkill10",
+          "optionalSkill11",
+          "optionalSkill12",
+          "optionalSkill13",
+          "optionalSkill14"
         ],
         "network": "host",
         "limits": {
@@ -879,6 +1005,13 @@
             "literal": "--resume",
             "when": {
               "input": "resume",
+              "equals": true
+            }
+          },
+          {
+            "literal": "--no-skills",
+            "when": {
+              "input": "disableSkills",
               "equals": true
             }
           }
@@ -920,6 +1053,25 @@
           "resume": {
             "type": "boolean",
             "required": true
+          },
+          "skillRuntime": {
+            "type": "string",
+            "required": true,
+            "maxLength": 4096
+          },
+          "disableSkills": {
+            "type": "boolean",
+            "required": true
+          },
+          "automation": {
+            "type": "string",
+            "required": true,
+            "maxLength": 4096
+          },
+          "resumeOverrides": {
+            "type": "string",
+            "required": true,
+            "maxLength": 4096
           }
         },
         "environment": {
@@ -932,7 +1084,9 @@
           "ca-certificates",
           "system",
           "development",
-          "harness"
+          "harness",
+          "sdkHost",
+          "pi-natives"
         ],
         "executable": {
           "runtimeTool": "bun"
@@ -979,6 +1133,15 @@
           },
           "prompt": {
             "input": "prompt"
+          },
+          "skillRuntime": {
+            "input": "skillRuntime"
+          },
+          "automation": {
+            "input": "automation"
+          },
+          "resumeOverrides": {
+            "input": "resumeOverrides"
           }
         },
         "services": [
@@ -1012,7 +1175,24 @@
           "processes": 512,
           "outputBytes": 1073741824
         },
-        "stdin": true
+        "stdin": true,
+        "inputs": [
+          "optionalSkill0",
+          "optionalSkill1",
+          "optionalSkill2",
+          "optionalSkill3",
+          "optionalSkill4",
+          "optionalSkill5",
+          "optionalSkill6",
+          "optionalSkill7",
+          "optionalSkill8",
+          "optionalSkill9",
+          "optionalSkill10",
+          "optionalSkill11",
+          "optionalSkill12",
+          "optionalSkill13",
+          "optionalSkill14"
+        ]
       },
       "atyrode.omp.harness-sessions": {
         "argv": [
@@ -1055,6 +1235,13 @@
           },
           {
             "literal": "resume"
+          },
+          {
+            "literal": "--no-skills",
+            "when": {
+              "input": "disableSkills",
+              "equals": true
+            }
           }
         ],
         "input": {
@@ -1094,6 +1281,25 @@
           "resume": {
             "type": "boolean",
             "required": true
+          },
+          "skillRuntime": {
+            "type": "string",
+            "required": true,
+            "maxLength": 4096
+          },
+          "disableSkills": {
+            "type": "boolean",
+            "required": true
+          },
+          "automation": {
+            "type": "string",
+            "required": true,
+            "maxLength": 4096
+          },
+          "resumeOverrides": {
+            "type": "string",
+            "required": true,
+            "maxLength": 4096
           }
         },
         "environment": {
@@ -1106,7 +1312,9 @@
           "ca-certificates",
           "system",
           "development",
-          "harness"
+          "harness",
+          "sdkHost",
+          "pi-natives"
         ],
         "executable": {
           "runtimeTool": "bun"
@@ -1153,6 +1361,15 @@
           },
           "prompt": {
             "input": "prompt"
+          },
+          "skillRuntime": {
+            "input": "skillRuntime"
+          },
+          "automation": {
+            "input": "automation"
+          },
+          "resumeOverrides": {
+            "input": "resumeOverrides"
           }
         },
         "services": [
@@ -1186,7 +1403,24 @@
           "processes": 512,
           "outputBytes": 1073741824
         },
-        "stdin": true
+        "stdin": true,
+        "inputs": [
+          "optionalSkill0",
+          "optionalSkill1",
+          "optionalSkill2",
+          "optionalSkill3",
+          "optionalSkill4",
+          "optionalSkill5",
+          "optionalSkill6",
+          "optionalSkill7",
+          "optionalSkill8",
+          "optionalSkill9",
+          "optionalSkill10",
+          "optionalSkill11",
+          "optionalSkill12",
+          "optionalSkill13",
+          "optionalSkill14"
+        ]
       }
     },
     "locations": {

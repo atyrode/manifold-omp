@@ -4,6 +4,7 @@ import {
   PublicJobSchema,
   TerminalRuntimeSchema,
   type PublicJob,
+  type MachineHalf,
 } from "@manifold/protocol";
 import {
   OMP_PLUGIN_ID,
@@ -29,6 +30,7 @@ import {
   ThinkingLevelSchema,
   modelId,
   PreparedHarnessSessionSchema,
+  skillInputBindings,
   OmpSessionRefSchema,
   type OmpSessionRef,
   type ActionInput,
@@ -54,7 +56,9 @@ import {
   type OmpContext,
 } from "./machine-server.ts";
 import { effectiveOverlay, expectedDefaults, readDefaults } from "./state.ts";
+import { resolveSkills } from "./skills.ts";
 import { bundledProbeModels } from "./sdk-metadata.macro.ts" with { type: "macro" };
+import runtimeArtifacts from "../runtime-artifacts.json";
 
 const registry = bundledProbeModels();
 const providers = Object.keys(registry);
@@ -558,6 +562,23 @@ export async function readBenchmark(
     throw new OmpRefusal("provenance_changed");
   return { job: result.job, benchmark };
 }
+function requireSkillRuntime(machine: MachineHalf | undefined, operationId: string) {
+  const operation = machine?.operations[operationId];
+  if (machine?.tools?.omp?.["linux-x64"]?.entrySha256 !== runtimeArtifacts.tools.omp["linux-x64"].entrySha256 ||
+    !operation?.input.skillRuntime || !operation.input.disableSkills ||
+    !operation.runtimeTools?.includes("harness") ||
+    !Array.from({ length: 15 }, (_, index) => `optionalSkill${index}`).every(name => operation.inputs?.includes(name)))
+    throw new OmpRefusal("skills_runtime_unsupported");
+}
+
+function requireSdkRuntime(machine: MachineHalf | undefined, operationId: string) {
+  const operation = machine?.operations[operationId];
+  if (runtimeArtifacts.sdkVersion !== "18.2.7" ||
+    machine?.tools?.omp?.["linux-x64"]?.entrySha256 !== runtimeArtifacts.tools.omp["linux-x64"].entrySha256 ||
+    !operation?.input.automation || !operation.input.resumeOverrides ||
+    !operation.runtimeTools?.includes("sdkHost") || !operation.runtimeTools.includes("pi-natives"))
+    throw new OmpRefusal("sdk_runtime_unsupported");
+}
 /** Runtime preparation is machine-scoped. Container and terminal authorization
  * belongs to reviewed launch or, for operator resume, independent placement. */
 async function sessionRuntimePreparation(
@@ -566,9 +587,16 @@ async function sessionRuntimePreparation(
   operationId: string,
   sessionId?: string,
   resume = false,
+  overrides?: ActionInput<"resumeSession">["overrides"],
 ) {
   const defaults = await expectedDefaults(ctx, args.expectedDefaultsRevision);
   const overlay = effectiveOverlay(defaults, args.overlay);
+  if (args.automation && (args.planYolo || overlay.task?.agentAdvisor?.task === "on" || overlay.task?.prewalk === true ||
+    overlay.advisor?.enabled === true || overlay.prewalk?.enabled === true ||
+    overlay.retry?.modelFallback === true)) throw new OmpRefusal("restricted_delegation_unsupported");
+  if (args.automation && operationId === `${OMP_PLUGIN_ID}.harness`)
+    throw new OmpRefusal("restricted_harness_unsupported");
+  if (resume && args.planYolo) throw new OmpRefusal("resume_plan_unsupported");
   const requestedPool = args.accountPool ?? await enabledAccountPool(ctx,
     configuredModels(overlay).map(ref => ref.slice(0, ref.indexOf("/"))));
   const { pool, reference } = await checkedAccountPool(ctx, requestedPool);
@@ -579,17 +607,29 @@ async function sessionRuntimePreparation(
     args.machineId,
     operationId,
   );
+  const automation = args.automation ?? { mode: "ordinary" as const };
+  if (args.automation || resume) requireSdkRuntime(current.deployment.installation?.machine, operationId);
+  const skills = await resolveSkills(ctx, args.machineId, args.skills ?? (args.automation ? { mode: "disabled" } : undefined));
+  if (args.skills !== undefined) requireSkillRuntime(current.deployment.installation?.machine, operationId);
+  const inputs = skillInputBindings(skills);
+  const skillConfig = skills.mode === "disabled" ? { skills: { enabled: false } }
+    : skills.mode === "selected" ? { skills: { customDirectories: inputs.map(binding => `/inputs/${binding.name}`) } }
+    : {};
   const native = nativeModelConfiguration(pool);
   const input = boundedInput({
     models: JSON.stringify(native.models),
-    config: JSON.stringify({ ...overlay, ...native.config }),
+    config: JSON.stringify({ ...overlay, ...native.config, ...skillConfig }),
     accountPool: JSON.stringify(pool),
     prompt: args.prompt,
     hasPrompt: args.prompt.length > 0,
     planYolo: args.planYolo,
+    skillRuntime: JSON.stringify({ mode: skills.mode, names: skills.selected.map(skill => skill.name) }),
+    disableSkills: skills.mode === "disabled",
+    automation: JSON.stringify(automation),
+    resumeOverrides: JSON.stringify(overrides ?? {}),
     ...(sessionId ? { sessionId, resume } : {}),
   });
-  return { defaults, overlay, pool, reference, gateway, current, input };
+  return { defaults, overlay, pool, reference, gateway, current, input, skills, inputs, automation };
 }
 
 async function sessionPreparation(
@@ -600,7 +640,7 @@ async function sessionPreparation(
 ) {
   await authorizeTarget(ctx, args);
   const operationId = `${OMP_PLUGIN_ID}.${sessionId ? "harness" : "launch"}`;
-  const { defaults, overlay, pool, reference, gateway, current, input } =
+  const { defaults, overlay, pool, reference, gateway, current, input, skills, inputs, automation } =
     await sessionRuntimePreparation(ctx, args, operationId, sessionId, resume);
   const destination = {
     containerId: args.containerId,
@@ -613,6 +653,8 @@ async function sessionPreparation(
     defaultsRevision: defaults.revision,
     effectiveOverlay: overlay,
     accountPool: pool,
+    skills,
+    automation,
     reviewDigest: digestOf({
       actor: actor(ctx),
       destination,
@@ -623,9 +665,11 @@ async function sessionPreparation(
       gateway,
       current,
       input,
+      skills,
+      inputs,
     }),
   };
-  return { review, input, broker: reference, gateway };
+  return { review, input, inputs, broker: reference, gateway };
 }
 export async function reviewSession(
   ctx: OmpContext,
@@ -656,6 +700,7 @@ async function prepareReviewedSession(
       operationId: latest.review.operationId,
       ...latest.review.pins,
       input: latest.input,
+      ...(latest.inputs.length > 0 ? { inputs: latest.inputs } : {}),
     }),
   };
 }
@@ -666,6 +711,8 @@ async function oneShotPreparation(
 ) {
   const prepared = await sessionPreparation(ctx, args);
   const current = await currentOperation(ctx, args.machineId, SESSION_OPERATION_ID);
+  if (args.skills !== undefined) requireSkillRuntime(current.deployment.installation?.machine, SESSION_OPERATION_ID);
+  if (args.automation) requireSdkRuntime(current.deployment.installation?.machine, SESSION_OPERATION_ID);
   return {
     prepared,
     pins: current.pins,
@@ -689,6 +736,8 @@ export async function runSession(
 ): Promise<ActionResult<"runSession">> {
   await authorizeTarget(ctx, args, true);
   if (args.prompt.length === 0) throw new OmpRefusal("prompt_required");
+  if ((args.inputs ?? []).some(binding => binding.name !== "material") || (args.inputs?.length ?? 0) > 1)
+    throw new OmpRefusal("invalid_material_input");
   const first = await oneShotPreparation(ctx, args);
   if (first.prepared.review.reviewDigest !== args.reviewDigest)
     throw new OmpRefusal("review_changed");
@@ -711,8 +760,7 @@ export async function runSession(
     modelIdentities: null,
     inventoryJobId: null,
     candidates: null,
-    // Passed to the hub verbatim: this door binds material, it never reads it.
-    inputs: args.inputs ?? [],
+    inputs: [...(args.inputs ?? []), ...latest.prepared.inputs],
   });
   return execute(ctx, jobId, provenance, [
     { name: SESSION_OUTPUT_NAME, locationId: RUNS_LOCATION_ID, components: [jobId] },
@@ -927,9 +975,11 @@ export async function prepareInteractiveResume(
   const input = {
     machineId: args.machineId, expectedDefaultsRevision: defaults.revision,
     accountPool: args.accountPool, overlay: args.overlay ?? {}, prompt: "", planYolo: false,
+    skills: args.skills,
+    automation: args.automation,
   };
-  const first = await sessionRuntimePreparation(ctx, input, operationId, args.sessionId, true);
-  const latest = await sessionRuntimePreparation(ctx, input, operationId, args.sessionId, true);
+  const first = await sessionRuntimePreparation(ctx, input, operationId, args.sessionId, true, args.overrides);
+  const latest = await sessionRuntimePreparation(ctx, input, operationId, args.sessionId, true, args.overrides);
   if (digestOf(first) !== digestOf(latest)) throw new OmpRefusal("resources_changed");
   return {
     machineId: args.machineId,
@@ -937,6 +987,7 @@ export async function prepareInteractiveResume(
     runtime: TerminalRuntimeSchema.parse({
       machineId: args.machineId, pluginId: OMP_PLUGIN_ID, operationId,
       ...latest.current.pins, input: latest.input,
+      ...(latest.inputs.length > 0 ? { inputs: latest.inputs } : {}),
     }),
   };
 }

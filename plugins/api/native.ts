@@ -33,6 +33,7 @@ export const TerminalRuntimeSchema = z.strictObject({
   installationRevision: id,
   artifactSha256: hash,
   input,
+  inputs: jobInputs,
   resourceBindingDigest: hash,
 });
 export type TerminalRuntime = z.infer<typeof TerminalRuntimeSchema>;

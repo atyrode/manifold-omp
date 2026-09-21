@@ -36,7 +36,7 @@ try {
   const { JobDescriptionSchema, JobDeploymentDescriptionSchema, JobDeploymentReviewSchema,
     JobDeploymentListResultSchema, JobDeploymentSchema, ListJobRunsResultSchema, MachineHalfSchema,
     JobOwnerConfigSchema, PublicJobSchema, InstanceServiceDescriptionSchema, InstanceServiceConfigurationReadSchema,
-    canonicalJobJson, machineArtifacts } = await import("@manifold/protocol");
+    canonicalJobJson, machineArtifacts, PluginBundleSchema, formatManifoldUri } = await import("@manifold/protocol");
 
   const expectedFamily: readonly string[] = [OMP_PLUGIN_ID, ACCOUNTS_PLUGIN_ID, GATEWAY_PLUGIN_ID];
   phase = "pack";
@@ -289,10 +289,13 @@ try {
     const origins = new Set(["https://github.com", "https://release-assets.githubusercontent.com", "https://registry.npmjs.org"]);
     check(machineArtifacts(accountMachine).every(artifact => !artifact.url || origins.has(new URL(artifact.url).origin)),
       "packed-runtime-expanded-download-authority");
+    await mkdir(join(root, "data", "skill-bundles"), { mode: 0o700 });
     const ownerConfiguration = JobOwnerConfigSchema.parse({
       machineId: target.machineId, admissionPublicKey: initialNative.admissionPublicKey,
       stateDirectory, delegatedCgroup: ownerGroup, bubblewrap,
-      protectedDirectories: [controlDirectory], anchors: {}, runtimeTools: system,
+      protectedDirectories: [controlDirectory],
+      anchors: { home: join(root, "home"), state: join(root, "state"), data: join(root, "data"), runtime: join(root, "runtime") },
+      runtimeTools: system,
       artifactOrigins: [...origins],
     });
     await writeFile(config, JSON.stringify(ownerConfiguration), { mode: 0o600 });
@@ -417,6 +420,104 @@ try {
       && signIn.runtime.artifactSha256 === ready.installation.artifactSha256
       && signIn.runtime.resourceBindingDigest === brokerReview.signIn.resourceBindingDigest, "prepared-sign-in-pins-mismatch");
     await refused("startInventory", { ...target, expectedDefaultsRevision: changed.revision, accountPool: {} });
+
+    // These are real governed producer outputs, not storage seeds or forged receipts.
+    // Calling the installed catalog doors crosses the hardened inspectInputs bridge.
+    phase = "packed-skill-producer";
+    const fixtureId = "fixture.omp-skills";
+    const producerOperation = `${fixtureId}.produce`;
+    const producerLocation = `${fixtureId}.bundles`;
+    const producerSource = Buffer.from(`
+      import { mkdirSync, writeFileSync } from "node:fs";
+      for (const name of ["alpha", "beta", "private"]) {
+        const path = "/home/job/skill-bundles/" + name + "/" + name;
+        mkdirSync(path + "/resources", { recursive: true });
+        writeFileSync(path + "/SKILL.md", "---\\nname: " + name + "\\ndescription: Offline reviewed skill\\n---\\nRead resources/witness.txt.\\n");
+        writeFileSync(path + "/resources/witness.txt", "SEALED_SKILL_" + name + "\\n");
+      }
+    `);
+    const producerSha = createHash("sha256").update(producerSource).digest("hex");
+    check(rootMachine.tools?.bun, "packed-bun-tool-missing");
+    const producerMachine = MachineHalfSchema.parse({
+      artifacts: { "linux-x64": { bundleFile: "producer", sha256: producerSha, format: "raw",
+        entry: ["producer.js"], entrySha256: producerSha, maxBytes: producerSource.length,
+        maxExpandedBytes: producerSource.length, maxMembers: 1 } },
+      tools: { bun: rootMachine.tools.bun }, requiresResourceBindings: true,
+      locations: { [producerLocation]: { anchor: "data", components: ["skill-bundles"], revision: "1",
+        kind: "directory", guestPath: "/home/job/skill-bundles" } },
+      operations: { [producerOperation]: {
+        executable: { runtimeTool: "bun" }, argv: [{ literal: "/job/artifact" }], input: {},
+        runtimeTools: ["bun", "system"], locations: [{ locationId: producerLocation, access: "write" }],
+        outputs: ["alpha", "beta", "private"], exports: ["alpha", "beta"], network: "none", stdin: false,
+        limits: { timeoutMs: 30_000, memoryBytes: 256 * 1024 * 1024, processes: 32, outputBytes: 1024 * 1024 },
+      } },
+    });
+    const producerBundle = Buffer.from(JSON.stringify(PluginBundleSchema.parse({
+      format: 1, hardenedContract: 4,
+      manifest: { id: fixtureId, version: "1.0.0", title: "Offline skill producer",
+        description: "Disposable governed skill metadata proof", capabilities: [],
+        contributes: { panels: [], sections: [], elements: [], tools: [], events: [] },
+        entry: { web: "web.js" }, machine: producerMachine },
+      files: { producer: producerSource.toString("base64"),
+        "web.js": Buffer.from(`export default { id: ${JSON.stringify(fixtureId)}, panels: {} };`).toString("base64") },
+    })));
+    const producerBundlePath = join(root, "skill-producer.manifold-plugin.json");
+    await writeFile(producerBundlePath, producerBundle, { mode: 0o600 });
+    installed.push(fixtureId);
+    await installBundle({ source: producerBundlePath, sha256: createHash("sha256").update(producerBundle).digest("hex"), hub, hardened: true });
+    const producerRequest = { deploymentId: randomUUID(), pluginId: fixtureId,
+      targets: [{ machineId: target.machineId, platform: "linux-x64" }], operationIds: [producerOperation] };
+    const producerReview = JobDeploymentReviewSchema.parse(await ownerAction(hub, "engine.jobs.reviewDeployment", producerRequest));
+    check(producerReview.approvable, "skill-producer-review-refused");
+    await ownerAction(hub, "engine.jobs.applyDeployment", { request: producerRequest, reviewDigest: producerReview.reviewDigest });
+    await waitFor(async () => {
+      const value = JobDeploymentSchema.parse(await ownerAction(hub, "engine.jobs.readDeployment", { deploymentId: producerRequest.deploymentId }));
+      check(!value.targets.some(item => ["refused", "needs_review", "cancelled", "superseded"].includes(item.state)), "skill-producer-deployment-refused");
+      return value.targets.every(item => item.state === "ready");
+    }, 120_000, 100);
+    const producerJobId = randomUUID();
+    await ownerAction(hub, "engine.jobs.execute", { machineId: target.machineId, pluginId: fixtureId,
+      operationId: producerOperation, jobId: producerJobId, input: {},
+      outputs: ["alpha", "beta", "private"].map(name => ({ name, locationId: producerLocation, components: [name] })) });
+    const producedSkills = await waitFor(async () => {
+      const value = PublicJobSchema.parse(await ownerAction(hub, "engine.jobs.status", {
+        node: { kind: "job", machineId: target.machineId, operationId: producerOperation, jobId: producerJobId } }));
+      return value.result ? value : false;
+    }, 30_000, 50);
+    check(producedSkills.state === "exited" && producedSkills.result?.exitCode === 0, "skill-producer-execution-failed");
+    const skillEntries = ["alpha", "beta"].map(name => {
+      const output = producedSkills.result!.outputs.find(value => value.name === name);
+      check(output?.sha256 && output.files === 2, "skill-output-not-sealed");
+      return { id: name, name, title: `Reviewed ${name}`, purpose: "Offline sealed-input verification", revision: "1",
+        source: { jobId: producerJobId, output: name, sha256: output.sha256 },
+        license: { spdx: "MIT" }, review: { reviewedBy: "disposable-verifier", reviewedAt: Date.now(), reference: "offline-fixture" },
+        conflicts: [], classification: "optional" as const };
+    });
+    const emptyCatalog = await call("readSkillCatalog", target);
+    check(emptyCatalog.revision === 0 && emptyCatalog.skills.length === 0, "optional-skills-not-default-empty");
+    const populatedCatalog = await call("writeSkillCatalog", { machineId: target.machineId, expectedRevision: 0,
+      skills: skillEntries, sets: [{ id: "pair", title: "Reviewed pair", skillIds: ["alpha", "beta"] },
+        { id: "overlap", title: "Overlapping selection", skillIds: ["alpha"] }] });
+    const observedCatalog = await call("readSkillCatalog", target);
+    check(digest(observedCatalog) === digest(populatedCatalog), "sealed-skill-catalog-not-observed");
+    await refused("writeSkillCatalog", { machineId: target.machineId, expectedRevision: 0, skills: [], sets: [] });
+    await refused("writeSkillCatalog", { machineId: target.machineId, expectedRevision: populatedCatalog.revision,
+      skills: [{ ...skillEntries[0]!, revision: "2", source: { ...skillEntries[0]!.source, sha256: "0".repeat(64) } }], sets: [] });
+    const privateOutput = producedSkills.result!.outputs.find(value => value.name === "private");
+    check(privateOutput?.sha256, "private-skill-output-missing");
+    await refused("writeSkillCatalog", { machineId: target.machineId, expectedRevision: populatedCatalog.revision,
+      skills: [{ ...skillEntries[0]!, revision: "2", source: { jobId: producerJobId, output: "private", sha256: privateOutput.sha256 } }], sets: [] });
+    const sourceTarget = producerReview.targets[0]!;
+    await ownerAction(hub, "engine.jobs.consent", { machineId: target.machineId, pluginId: fixtureId,
+      installationRevision: sourceTarget.installationRevision, artifactSha256: producerSha,
+      node: formatManifoldUri({ kind: "operation", machineId: target.machineId, operationId: producerOperation }),
+      cap: "jobs:read", enabled: false });
+    await refused("readSkillCatalog", target);
+    await ownerAction(hub, "engine.jobs.consent", { machineId: target.machineId, pluginId: fixtureId,
+      installationRevision: sourceTarget.installationRevision, artifactSha256: producerSha,
+      node: formatManifoldUri({ kind: "operation", machineId: target.machineId, operationId: producerOperation }),
+      cap: "jobs:read", enabled: true });
+    check(digest(await call("readSkillCatalog", target)) === digest(populatedCatalog), "refused-skill-update-mutated-catalog");
     phase = "packed-broker-graceful-stop";
     await stopBroker();
     const stoppedJob = await waitFor(async () => {

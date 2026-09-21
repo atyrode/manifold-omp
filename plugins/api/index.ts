@@ -22,6 +22,10 @@ import {
 } from "./probe.ts";
 import { PermittedUsageSnapshotSchema } from "./usage.ts";
 import { SessionReceiptSchema, SessionSilenceSchema } from "./session.ts";
+import { SkillCatalogSchema, SkillCatalogContentsSchema, SkillSelectionSchema, SkillReviewSchema } from "./skills.ts";
+import { RestrictedAutomationSchema, AutomationReviewSchema } from "./automation.ts";
+export * from "./automation.ts";
+export * from "./skills.ts";
 export * from "./contracts.ts";
 export * from "./probe.ts";
 export * from "./session.ts";
@@ -71,6 +75,7 @@ const id = z.string().min(1).max(128);
 const empty = z.strictObject({});
 export const TargetSchema = z.strictObject({ containerId: id, machineId: id });
 export type Target = z.infer<typeof TargetSchema>;
+export const OmpHarnessTargetSchema = TargetSchema.extend({ skills: SkillSelectionSchema.optional(), automation: RestrictedAutomationSchema.optional() });
 export const OmpSessionRefSchema = z.strictObject({
   harness: z.literal(OMP_PLUGIN_ID),
   sessionId: z.uuid(),
@@ -247,6 +252,8 @@ export const SessionInputSchema = executionInput.extend({
       "prompt exceeds 44 KiB",
     ),
   planYolo: z.boolean(),
+  skills: SkillSelectionSchema.optional(),
+  automation: RestrictedAutomationSchema.optional(),
 });
 /** Durable dials share the exact validated launch settings; paths and credentials
  * are deliberately not part of a profile. Defaults are reviewed at each launch. */
@@ -255,12 +262,16 @@ export const OmpHarnessProfileSchema = SessionInputSchema.omit({
   machineId: true,
   expectedDefaultsRevision: true,
   prompt: true,
+  skills: true,
+  automation: true,
 });
 export type OmpHarnessProfile = z.infer<typeof OmpHarnessProfileSchema>;
 export const SessionReviewSchema = ReviewSchema.extend({
   defaultsRevision: revision,
   effectiveOverlay: OverlaySchema,
   accountPool: RuntimeAccountPoolSchema,
+  skills: SkillReviewSchema,
+  automation: AutomationReviewSchema,
 });
 export const PreparedSessionSchema = z
   .strictObject({
@@ -284,7 +295,13 @@ export const ResumeSessionInputSchema = z.strictObject({
   containerId: id.optional(),
   accountPool: RuntimeAccountPoolSchema.optional(),
   overlay: OverlaySchema.optional(),
-}).describe("Resume an existing OMP transcript in an interactive terminal without an Agent. Omitted settings use current plugin defaults and currently enabled broker credentials for the configured providers. Explicit overlay keys replace default keys; an explicit accountPool is used exactly. Preparation authorizes the machine runtime only; terminal placement independently authorizes its container and terminal.");
+  skills: SkillSelectionSchema.optional(),
+  automation: RestrictedAutomationSchema.optional(),
+  overrides: z.strictObject({
+    model: modelReference.optional(),
+    thinking: z.union([ThinkingLevelSchema, z.literal("off")]).optional(),
+  }).refine(value => value.model !== undefined || value.thinking !== undefined, "empty resume overrides").optional(),
+}).describe("Resume an existing OMP transcript without an Agent. Omitted model/thinking overrides preserve persisted exact state; supplied overrides replace only that field. Missing, ambiguous, unavailable or incompatible state refuses before inference. Overlay configures the sealed runtime and an explicit accountPool is used exactly. Placement independently authorizes its container and terminal.");
 export const PreparedResumeSessionSchema = z.strictObject({
   machineId: id,
   sessionId: z.uuid(),
@@ -364,6 +381,11 @@ export const rootActionSchemas = {
       overlay: OverlaySchema,
     }),
     result: DefaultsSchema,
+  },
+  readSkillCatalog: { input: TargetSchema, result: SkillCatalogSchema },
+  writeSkillCatalog: {
+    input: SkillCatalogContentsSchema.safeExtend({ machineId: id, expectedRevision: revision }),
+    result: SkillCatalogSchema,
   },
   describeDestination: { input: TargetSchema, result: DestinationSchema },
   reviewWorkspace: { input: workspaceInput, result: ReviewSchema },

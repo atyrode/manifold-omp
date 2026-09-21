@@ -120,7 +120,7 @@ for (const dependency of ["@oh-my-pi/pi-ai", "@oh-my-pi/pi-wire"]) {
     const entrypoint = Bun.resolveSync(dependency, fixture);
     const original = await readFile(entrypoint);
     const manifest = JSON.parse(await readFile(join(fixture, "node_modules", dependency, "package.json"), "utf8"));
-    expect(manifest.version).toBe("18.1.14");
+    expect(manifest.version).toBe("18.2.7");
     try {
       await writeFile(entrypoint, Buffer.concat([original, Buffer.from("\n// changed installed SDK bytes\n")]));
       await expect(fixturePack(destination)).rejects.toThrow("SDK preparation");
@@ -131,21 +131,19 @@ for (const dependency of ["@oh-my-pi/pi-ai", "@oh-my-pi/pi-wire"]) {
   }, 180_000);
 }
 
-for (const [filename, refusal] of [["bun.lock", "Unreviewed bun.lock"], ["patches/@oh-my-pi%2Fpi-ai@18.1.14.patch", "Unreviewed pi-ai patch"]]) {
-  test(`${filename} drift refuses the previously prepared SDK`, async () => {
-    const destination = join(scratch, "changed-input");
-    const previous = await priorFamily(destination);
-    const file = join(fixture, filename!);
-    const original = await readFile(file);
-    try {
-      await writeFile(file, Buffer.concat([original, Buffer.from("\n")]));
-      await expect(fixturePack(destination)).rejects.toThrow(refusal!);
-      expect(await snapshot(destination)).toEqual(previous);
-    } finally {
-      await writeFile(file, original);
-    }
-  });
-}
+test("bun.lock drift refuses the previously prepared SDK", async () => {
+  const destination = join(scratch, "changed-input");
+  const previous = await priorFamily(destination);
+  const file = join(fixture, "bun.lock");
+  const original = await readFile(file);
+  try {
+    await writeFile(file, Buffer.concat([original, Buffer.from("\n")]));
+    await expect(fixturePack(destination)).rejects.toThrow("Unreviewed bun.lock");
+    expect(await snapshot(destination)).toEqual(previous);
+  } finally {
+    await writeFile(file, original);
+  }
+});
 
 test("a MANIFOLD_REV that does not name the sibling source refuses publication", async () => {
   const destination = join(scratch, "changed-manifold-pin");

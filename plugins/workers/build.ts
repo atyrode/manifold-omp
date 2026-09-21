@@ -16,6 +16,7 @@ const entrypoints = {
     inventory: "probe/inventory.ts",
     benchmark: "probe/benchmark.ts",
     harness: "harness/entry.ts",
+    sdkHost: "harness/sdk-host.ts",
   },
   accounts: {
     broker: "broker/entry.ts",
@@ -27,12 +28,10 @@ const entrypoints = {
 export type WorkerTarget = keyof typeof entrypoints;
 const hash = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 const maxEmbeddedBytes = 16 * 1024 * 1024;
-const loaderSha256 = "6d46cb5c28e1ed40ae94c6019c90399b9b326f4d2b5bf944a802542147356bf8";
+const loaderSha256 = "de59cfd780bfb4ff4411a542396ba2f7c512add3ad2d474cd2e30220c69e3930";
 const dependencyMarker = ".omp-prepared-dependencies.json";
-const patchFile = "patches/@oh-my-pi%2Fpi-ai@18.1.14.patch";
-// Review these together with bun.lock and the complete patch, never installed files.
-const lockSha256 = "ad91009fa29101b83f5311ad863d652e2b0c79173ebca2cbd57075ff83878b3d";
-const patchSha256 = "ef3aaf1d847e1cc2729819b695e28c96ac697561987a49f4951c566141c8c40d";
+// Review together with the complete published dependency graph in bun.lock, never installed files.
+const lockSha256 = "fdc7b5985342662199e13fa1c0e8e0cdfe6e59b41a84f6d436df1fc7ea701c8d";
 
 export function containsPath(parent: string, child: string): boolean {
   const path = relative(parent, child);
@@ -86,20 +85,18 @@ export async function replaceDirectory(staged: string, destination: string): Pro
 
 async function dependencyInputs(directory: string) {
   if (Bun.version !== "1.4.2" || runtime.bunVersion !== "1.4.2") throw new Error("Dependency preparation and packaging require pinned Bun 1.4.2");
-  const [lock, patch, manifest] = await Promise.all([
-    readFile(join(directory, "bun.lock")), readFile(join(directory, patchFile)),
+  const [lock, manifest] = await Promise.all([
+    readFile(join(directory, "bun.lock")),
     readFile(join(directory, "package.json"), "utf8").then(text => JSON.parse(text)),
   ]);
   if (hash(lock) !== lockSha256) throw new Error("Unreviewed bun.lock bytes");
-  if (hash(patch) !== patchSha256) throw new Error("Unreviewed pi-ai patch bytes");
+  if (manifest.patchedDependencies !== undefined) throw new Error("Private SDK patches are not supported");
   const dependencies = {
     dependencies: manifest.dependencies, devDependencies: manifest.devDependencies,
-    patchedDependencies: manifest.patchedDependencies,
   };
-  if (JSON.stringify(manifest.patchedDependencies) !== JSON.stringify({ "@oh-my-pi/pi-ai@18.1.14": patchFile })) throw new Error("Unreviewed SDK patch declaration");
   return {
-    format: 1, bunVersion: Bun.version, platform: process.platform, arch: process.arch,
-    lockSha256, patchSha256, manifestSha256: hash(Buffer.from(JSON.stringify(dependencies))),
+    format: 2, bunVersion: Bun.version, platform: process.platform, arch: process.arch,
+    lockSha256, manifestSha256: hash(Buffer.from(JSON.stringify(dependencies))),
   };
 }
 
@@ -150,7 +147,7 @@ export async function verifyPreparedDependencies(): Promise<string> {
   }
 }
 
-/** Explicit setup only: fresh cache, frozen lock, exact patch, no lifecycle scripts.
+/** Explicit setup only: fresh cache, frozen published lock, no lifecycle scripts.
  * Normal pack/build paths only read this realization and never run an installer.
  */
 async function prepareDependencies(): Promise<void> {
@@ -159,8 +156,8 @@ async function prepareDependencies(): Promise<void> {
   const stage = await mkdtemp(join(root, ".omp-deps-"));
   try {
     const installation = join(stage, "installation");
-    await mkdir(join(installation, "patches"), { recursive: true });
-    await Promise.all(["package.json", "bun.lock", patchFile].map(file => cp(join(root, file), join(installation, file))));
+    await mkdir(installation);
+    await Promise.all(["package.json", "bun.lock"].map(file => cp(join(root, file), join(installation, file))));
     const home = join(stage, "home");
     await mkdir(home);
     const installer = Bun.spawn([
@@ -218,7 +215,7 @@ export interface WorkerArtifacts {
   systemRequirements: typeof runtime.requiredRuntimeTools.system;
 }
 
-async function packageRoot(name: string): Promise<string> {
+async function packageRoot(name: string, version = runtime.sdkVersion): Promise<string> {
   let directory = dirname(await realpath(Bun.resolveSync(name, root)));
   for (;;) {
     const file = Bun.file(join(directory, "package.json"));
@@ -226,7 +223,7 @@ async function packageRoot(name: string): Promise<string> {
       const manifest = await file.json();
       if (manifest.name === name) {
         if (!containsPath(await realpath(join(root, "node_modules")), directory)) throw new Error(`Pinned dependency resolves outside prepared node_modules: ${name}`);
-        if (manifest.version !== runtime.sdkVersion) throw new Error(`Pinned dependency mismatch: ${name}`);
+        if (manifest.version !== version) throw new Error(`Pinned dependency mismatch: ${name}`);
         return directory;
       }
     }
@@ -235,6 +232,74 @@ async function packageRoot(name: string): Promise<string> {
     directory = parent;
   }
 }
+
+function replacePublishedSource(source: string, before: string, after: string): string {
+  if (source.split(before).length !== 2) throw new Error("Published packaging adapter no longer matches exactly once");
+  return source.replace(before, after);
+}
+
+/** Execute the complete shipped helper, changing only its monorepo path mapping.
+ * Its export expansion, exclusions, shims and lazy registry remain publisher code.
+ * The private copy is temporary; installed packages and upstream checkouts are untouched.
+ */
+async function legacyPiPlugin(codingAgent: string): Promise<BunPlugin> {
+  const packages = {
+    agent: "@oh-my-pi/pi-agent-core", ai: "@oh-my-pi/pi-ai",
+    "coding-agent": "@oh-my-pi/pi-coding-agent", natives: "@oh-my-pi/pi-natives",
+    tui: "@oh-my-pi/pi-tui", utils: "@oh-my-pi/pi-utils",
+  };
+  const installed = Object.fromEntries(await Promise.all(Object.entries(packages).map(async ([key, name]) => [key, await packageRoot(name)])));
+  let source = await readFile(join(codingAgent, "scripts/legacy-pi-virtual-module.ts"), "utf8");
+  source = replacePublishedSource(source, 'const packageDir = path.resolve(import.meta.dir, "..");', `const packageDir = ${JSON.stringify(codingAgent)};`);
+  source = replacePublishedSource(source, 'path.join(repoRoot, "packages", pkg.dir)', `(${JSON.stringify(installed)} as Record<string, string>)[pkg.dir]!`);
+  const stage = await mkdtemp(join(root, ".omp-sdk-helper-"));
+  try {
+    const file = join(stage, "legacy-pi-virtual-module.ts");
+    await writeFile(file, source);
+    const helper = await import(file);
+    return await helper.createLegacyPiVirtualModulePlugin();
+  } finally {
+    await rm(stage, { recursive: true, force: true });
+  }
+}
+
+// quickjs-wasi@2.2.0 publishes MIT metadata but no standalone license, including
+// at its release tag cc1fea4a6a4ac1d960e0db68d35e1459064a1a23. Do not invent a
+// publisher copyright. Preserve that provenance and the canonical MIT terms,
+// plus the exact QuickJS-NG submodule's publisher copyright/permission notice.
+// https://github.com/quickjs-ng/quickjs/blob/dec012362bd93876449f3ecff4f835b2eba89bab/LICENSE
+const quickjsNotice = `quickjs-wasi@2.2.0
+Publisher: vercel-labs/quickjs-wasi; package.json license: MIT.
+https://github.com/vercel-labs/quickjs-wasi/tree/cc1fea4a6a4ac1d960e0db68d35e1459064a1a23
+The publisher supplies no standalone LICENSE or copyright notice for this package.
+Canonical MIT permission terms follow with the bundled QuickJS-NG engine notice.
+
+QuickJS-NG submodule dec012362bd93876449f3ecff4f835b2eba89bab
+The MIT License (MIT)
+
+Copyright (c) 2017-2026 Fabrice Bellard
+Copyright (c) 2017-2024 Charlie Gordon
+Copyright (c) 2023-2026 Ben Noordhuis
+Copyright (c) 2023-2026 Saúl Ibarra Corretgé
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+`;
 
 /** Deterministic ustar: regular members only, fixed mode/uid/gid/mtime, no PAX,
  * host tar/gzip invocation, unbounded directory walks, links or extra files. */
@@ -262,7 +327,7 @@ function archive(files: ReadonlyMap<string, Buffer>): Buffer {
 }
 
 /** Collect license/notice text from packages actually read by the bundler. */
-async function notices(importedFiles: Set<string>): Promise<Buffer> {
+async function notices(importedFiles: Set<string>, codingAgent: string): Promise<Buffer> {
   const visited = new Set<string>();
   const packages = new Map<string, string>();
   for (const imported of [...importedFiles].sort()) {
@@ -281,13 +346,24 @@ async function notices(importedFiles: Set<string>): Promise<Buffer> {
     }
   }
   const sections: string[] = [];
+  const publisherNotices = await readFile(join(codingAgent, "THIRD-PARTY-NOTICES.txt"), "utf8");
+  let needsPublisherNotices = false;
   for (const [name, directory] of [...packages].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
     const entries = (await readdir(directory, { withFileTypes: true }))
       .filter(entry => entry.isFile() && /^(?:licen[cs]e|copying|notice|third-party-notices)(?:[.-].*)?$/i.test(entry.name))
       .map(entry => entry.name).sort();
     for (const filename of entries) sections.push(`${name} / ${filename}\n${await readFile(join(directory, filename), "utf8")}`);
-    if (entries.length === 0 && directory.includes("node_modules")) throw new Error(`Bundled dependency has no packaged license: ${name}`);
+    if (entries.length === 0 && directory.includes("node_modules")) {
+      if (name === "quickjs-wasi@2.2.0") sections.push(quickjsNotice);
+      else if (name === "@puppeteer/browsers@3.0.6" || name === "puppeteer-core@25.3.0") {
+        if (!publisherNotices.includes(`- ${name}: canonical Apache-2.0 text`)) throw new Error(`Missing exact publisher attribution: ${name}`);
+        sections.push(`${name} / Apache-2.0\nLicense supplied by @oh-my-pi/pi-coding-agent@${runtime.sdkVersion} THIRD-PARTY-NOTICES.txt below.`);
+        needsPublisherNotices = true;
+      } else throw new Error(`Bundled dependency has no packaged license: ${name}`);
+    }
   }
+  if (needsPublisherNotices && !packages.has(`@oh-my-pi/pi-coding-agent@${runtime.sdkVersion}`))
+    sections.push(`@oh-my-pi/pi-coding-agent@${runtime.sdkVersion} / THIRD-PARTY-NOTICES.txt\n${publisherNotices}`);
   return Buffer.from(sections.join("\n\n------------------------------------------------------------\n\n") + "\n");
 }
 
@@ -299,7 +375,12 @@ async function notices(importedFiles: Set<string>): Promise<Buffer> {
 export async function buildWorkerArtifacts(target: WorkerTarget): Promise<WorkerArtifacts> {
   if (Bun.version !== runtime.bunVersion) throw new Error(`Worker packaging requires pinned Bun ${runtime.bunVersion}; received ${Bun.version}`);
   await verifyPreparedDependencies();
-  await Promise.all(["@oh-my-pi/pi-ai", "@oh-my-pi/pi-catalog", "@oh-my-pi/pi-utils"].map(packageRoot));
+  await Promise.all(["@oh-my-pi/pi-ai", "@oh-my-pi/pi-catalog", "@oh-my-pi/pi-utils"].map(name => packageRoot(name)));
+  const codingAgent = await packageRoot("@oh-my-pi/pi-coding-agent");
+  const legacyPlugin = await legacyPiPlugin(codingAgent);
+  const docs = await readFile(join(codingAgent, "dist/docs-index.generated.txt"), "utf8");
+  const quickjs = await packageRoot("quickjs-wasi", "2.2.0");
+  const quickjsModule = await realpath(join(quickjs, "dist/index.js"));
   const nativePackage = await packageRoot("@oh-my-pi/pi-natives");
   const nativeLoader = await realpath(join(nativePackage, "native/loader-state.js"));
   if (hash(await readFile(nativeLoader)) !== loaderSha256) throw new Error("Unreviewed native SDK loader bytes");
@@ -309,7 +390,6 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
   let embeddedBase64Bytes = 0;
   for (const [alias, layouts] of Object.entries(runtime.tools)) {
     if (target === "gateway" && alias === "omp") continue;
-    if (target === "root" && alias === "pi-natives") continue;
     tools[alias] = {};
     for (const platform of platforms) {
       const declaration = MachineArtifactSchema.parse(layouts[platform]);
@@ -330,49 +410,76 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
   }
   for (const [name, source] of Object.entries(entrypoints[target])) {
     const importedFiles = new Set<string>();
-    let usesNative = false;
+    const assets = new Map<string, Buffer>();
     const plugin: BunPlugin = {
       name: "omp-pinned-native-worker",
       setup(build) {
         build.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async args => {
           const path = await realpath(args.path);
           importedFiles.add(path);
-          if (path !== nativeLoader) return undefined;
-          usesNative = true;
-          return { contents: pinnedLoader, loader: "js" };
+          if (path === nativeLoader) return { contents: pinnedLoader, loader: "js" };
+          if (path === quickjsModule) {
+            const asset = `${name}-assets/quickjs.wasm`;
+            assets.set(asset, await readFile(join(quickjs, "quickjs.wasm")));
+            // Preserve the real PAC implementation, relocating only its default file read.
+            const contents = replacePublishedSource(await readFile(path, "utf8"),
+              "new URL('../quickjs.wasm', import.meta.url)", `new URL(${JSON.stringify(`./${asset}`)}, import.meta.url)`);
+            return { contents, loader: "js" };
+          }
+          return undefined;
         });
       },
     };
+    const outputDirectory = join(root, ".omp-worker-output");
     const result = await Bun.build({
-      entrypoints: [join(import.meta.dir, source)], naming: `${name}.js`,
+      entrypoints: [join(import.meta.dir, source)], outdir: outputDirectory,
+      naming: { entry: `${name}.js`, asset: `${name}-assets/[name]-[hash].[ext]` },
       target: "bun", format: "esm", splitting: false, minify: true,
-      sourcemap: "none", packages: "bundle", plugins: [plugin],
+      sourcemap: "none", packages: "bundle", plugins: [legacyPlugin, plugin],
+      define: { "process.env.PI_DOCS_EMBED": JSON.stringify(docs) },
       tsconfig: join(root, "tsconfig.json"),
     });
     if (!result.success) throw new AggregateError(result.logs, `Worker bundling failed: ${name}`);
-    if (result.outputs.length !== 1) throw new Error(`Undeclared worker bundle outputs: ${name}`);
-    const javascript = Buffer.from(await result.outputs[0]!.arrayBuffer());
+    const entry = result.outputs.find(output => output.kind === "entry-point");
+    if (!entry) throw new Error(`Missing worker entrypoint: ${name}`);
+    for (const output of result.outputs) {
+      if (output === entry) continue;
+      const member = relative(outputDirectory, resolve(output.path)).split(sep).join("/");
+      const prefix = `${name}-assets/`;
+      if (output.kind !== "asset" || !member.startsWith(prefix) ||
+          !/^(?:template-[a-z0-9]+\.(?:css|html|js)|tool-views\.generated-[a-z0-9]+\.js|CHANGELOG-[a-z0-9]+\.md)$/.test(member.slice(prefix.length)) ||
+          assets.has(member)) throw new Error(`Undeclared worker bundle output: ${name}: ${member}`);
+      assets.set(member, Buffer.from(await output.arrayBuffer()));
+    }
+    const javascript = Buffer.from(await entry.arrayBuffer());
     const imports = new Bun.Transpiler({ loader: "js" }).scanImports(javascript);
     for (const item of imports) {
       if (item.path === "bun" || item.path.startsWith("bun:") || item.path.startsWith("node:") || builtinModules.includes(item.path)) continue;
       throw new Error(`Unbundled worker import: ${name}: ${item.path}`);
     }
-    if (usesNative && target === "root") throw new Error(`Worker unexpectedly needs native addon: ${name}`);
-    const licenses = await notices(importedFiles);
+    const licenses = await notices(importedFiles, codingAgent);
     let bytes: Buffer;
     let declaration: MachineArtifact;
     if (name === "inventory" || name === "benchmark") {
+      if (assets.size !== 0) throw new Error(`Raw worker has undeclared assets: ${name}`);
       // License comments cannot terminate early on third-party text.
       bytes = Buffer.concat([javascript, Buffer.from(`\n/*\n${licenses.toString("utf8").replaceAll("*/", "* /")}\n*/\n`)]);
       const filename = `omp-${name}.js`;
       declaration = { bundleFile: filename, sha256: hash(bytes), format: "raw", entry: [filename], entrySha256: hash(bytes), maxBytes: bytes.length, maxExpandedBytes: bytes.length, maxMembers: 1 };
     } else {
-      const files = new Map([[`${name}.js`, javascript], ["licenses/THIRD-PARTY-NOTICES.txt", licenses]]);
+      const files = new Map([[`${name}.js`, javascript], ["licenses/THIRD-PARTY-NOTICES.txt", licenses], ...assets]);
+      const declaredFiles: NonNullable<MachineArtifact["files"]> = {
+        [`${name}-notices`]: { entry: ["licenses", "THIRD-PARTY-NOTICES.txt"], sha256: hash(licenses), relativeTarget: [`${name}-licenses`, "THIRD-PARTY-NOTICES.txt"] },
+      };
+      let index = 0;
+      for (const [member, asset] of assets) {
+        declaredFiles[`${name}-asset-${index++}`] = { entry: member.split("/"), sha256: hash(asset), relativeTarget: member.split("/") };
+      }
       bytes = archive(files);
       declaration = {
         bundleFile: `omp-${name}.tar.gz`, sha256: hash(bytes), format: "tar.gz", entry: [`${name}.js`], entrySha256: hash(javascript),
-        maxBytes: bytes.length, maxExpandedBytes: 2048 + Math.ceil(javascript.length / 512) * 512 + Math.ceil(licenses.length / 512) * 512, maxMembers: files.size,
-        files: { [`${name}-notices`]: { entry: ["licenses", "THIRD-PARTY-NOTICES.txt"], sha256: hash(licenses), relativeTarget: [`${name}-licenses`, "THIRD-PARTY-NOTICES.txt"] } },
+        maxBytes: bytes.length, maxExpandedBytes: 1024 + [...files.values()].reduce((total, file) => total + 512 + Math.ceil(file.length / 512) * 512, 0), maxMembers: files.size,
+        files: declaredFiles,
       };
     }
     declaration = MachineArtifactSchema.parse(declaration);
