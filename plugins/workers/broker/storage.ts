@@ -13,6 +13,7 @@ export class NativeBrokerStorage extends AuthStorage {
   readonly #pending = new Set<Promise<void>>();
   #failed = false;
   #refreshAdmission = true;
+  #drainStarted = false;
 
   constructor(store: SqliteAuthCredentialStore, options: AuthStorageOptions = {}) {
     super(store, {
@@ -40,8 +41,15 @@ export class NativeBrokerStorage extends AuthStorage {
 
   #track<T>(operation: Promise<T>): Promise<T> {
     const settled = operation.then(
-      () => { this.#pending.delete(settled); },
-      () => { this.#failed = true; this.#pending.delete(settled); },
+      () => {
+        this.#pending.delete(settled);
+        if (!this.#drainStarted && !this.#pending.size) this.#failed = false;
+      },
+      () => {
+        this.#failed = true;
+        this.#pending.delete(settled);
+        if (!this.#drainStarted && !this.#pending.size) this.#failed = false;
+      },
     );
     this.#pending.add(settled);
     return operation;
@@ -84,10 +92,19 @@ export class NativeBrokerStorage extends AuthStorage {
   override reload(): Promise<void> { return this.#track(super.reload()); }
   override pollExternalChanges(): Promise<boolean> { return this.#track(super.pollExternalChanges()); }
 
-  startRefreshAdmission(): void { this.#refreshAdmission = true; }
+  startRefreshAdmission(): void {
+    if (this.#pending.size === 0 && !this.#failed) this.#drainStarted = false;
+    this.#refreshAdmission = true;
+  }
   stopRefreshAdmission(): void { this.#refreshAdmission = false; }
 
+  // Freeze failures at admission closure, not after admitted HTTP work settles.
+  // An earlier completed failure is harmless; a timed-out logical write whose
+  // raw provider still runs must remain a failure when this drain starts.
+  beginDrain(): void { this.#drainStarted = true; }
+
   async drainRefreshes(): Promise<void> {
+    this.beginDrain();
     // Nested public work can be registered while an earlier operation settles.
     while (this.#pending.size) await Promise.all(this.#pending);
     if (this.#failed) throw new Error("Broker storage drain failed");

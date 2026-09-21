@@ -1,11 +1,11 @@
 import { join } from "node:path";
-import type { AuthBrokerServerHandle } from "@oh-my-pi/pi-ai/auth-broker/server";
+import type { NativeBrokerHandle } from "../../workers/broker/server.ts";
 import { runSdkScenario, type SdkScenarioContext } from "./isolated-sdk";
 
 await runSdkScenario(async (ctx: SdkScenarioContext) => {
   // SDK evaluation must follow the harness's network and private-state isolation.
-  const { AuthStorage } = await import("@oh-my-pi/pi-ai/auth-storage");
-  const { startAuthBroker } = await import("@oh-my-pi/pi-ai/auth-broker/server");
+  const { NativeBrokerStorage } = await import("../../workers/broker/storage.ts");
+  const { startNativeBroker } = await import("../../workers/broker/server.ts");
   const { registerOAuthProvider, unregisterOAuthProvider } = await import("@oh-my-pi/pi-ai/registry/oauth/index");
 
   for (const mode of ["automatic", "http"] as const) {
@@ -15,8 +15,6 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
     const bearer = "SYNTHETIC-SHUTDOWN-BEARER";
     const rotatedRefresh = "SYNTHETIC-SHUTDOWN-ROTATED-REFRESH";
     const rotatedAccess = "SYNTHETIC-SHUTDOWN-ROTATED-ACCESS";
-    let refreshStarted = false;
-    let released = false;
     let providerAborted = false;
     let refreshCalls = 0;
     registerOAuthProvider({
@@ -24,7 +22,6 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
       name: "Synthetic shutdown regression",
       async login() { throw new Error("synthetic-login-forbidden"); },
       async refreshToken(credential, signal) {
-        refreshStarted = true;
         refreshCalls++;
         entered.resolve();
         await release.promise;
@@ -39,9 +36,9 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
     });
 
     const database = join(ctx.root, `${mode}.db`);
-    const storage = await AuthStorage.create(database);
+    const storage = await NativeBrokerStorage.create(database);
     let storageOpen = true;
-    let broker: AuthBrokerServerHandle | undefined;
+    let broker: NativeBrokerHandle | undefined;
     let request: Promise<void> | undefined;
     const streamAbort = new AbortController();
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -55,7 +52,7 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
       });
       const entry = storage.listStoredCredentials().find(row => row.provider === provider);
       ctx.check(entry !== undefined, "shutdown-credential-missing");
-      broker = startAuthBroker({
+      broker = startNativeBroker({
         storage,
         bind: "127.0.0.1:0",
         bearerTokens: [bearer],
@@ -86,7 +83,6 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
       await Bun.sleep(50);
       ctx.check(!firstClosed && !secondClosed, "shutdown-returned-before-refresh");
       release.resolve();
-      released = true;
       // The SSE connection is intentionally still open on the client: shutdown
       // must terminate it rather than waiting indefinitely for client cleanup.
       await Promise.all([firstClose, secondClose]);
@@ -95,7 +91,7 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
       storage.close();
       storageOpen = false;
 
-      const reopened = await AuthStorage.create(database);
+      const reopened = await NativeBrokerStorage.create(database);
       try {
         await reopened.reload();
         const persisted = reopened.listStoredCredentials().find(row => row.provider === provider)?.credential;
@@ -106,13 +102,8 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
       }
       await broker.close();
     } finally {
-      // On the unfixed SDK, join its real single-flight before releasing the
-      // provider so failure cleanup does not race storage closure as well.
-      const drain = refreshStarted && !released && storageOpen
-        ? storage.refreshCredentialById(storage.listStoredCredentials().find(row => row.provider === provider)!.id)
-        : undefined;
       release.resolve();
-      await drain?.catch(() => {});
+      await storage.drainRefreshes().catch(() => {});
       streamAbort.abort();
       await reader?.cancel().catch(() => {});
       await broker?.close();

@@ -43,6 +43,7 @@ export function startNativeBroker(options: NativeBrokerOptions): NativeBrokerHan
   const quiesce = (): Promise<void> => {
     if (draining) return draining;
     state = "draining";
+    storage.beginDrain();
     for (const close of streams) close();
     draining = (async () => {
       // Do not abort admitted writes (nor usage's detached rotation). The stock
@@ -125,9 +126,12 @@ export function startNativeBroker(options: NativeBrokerOptions): NativeBrokerHan
       const bearer = request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
       const digest = bearer ? createHash("sha256").update(bearer).digest() : undefined;
       const isControl = url.pathname.startsWith("/v1/control/");
-      const authorized = digest && (isControl
+      // Published healthz is deliberately unauthenticated (the stock client's
+      // health probe omits its bearer). It reveals no credential or control data.
+      const publicHealth = request.method === "GET" && url.pathname === "/v1/healthz";
+      const authorized = publicHealth || (digest && (isControl
         ? controlHash && timingSafeEqual(digest, controlHash)
-        : accepted.some(hash => timingSafeEqual(digest, hash)));
+        : accepted.some(hash => timingSafeEqual(digest, hash))));
       if (!authorized) return Response.json({ error: "unauthorized" }, { status: 401 });
       if (isControl) {
         if (url.pathname === "/v1/control/state" && request.method === "GET") return Response.json({ state });
