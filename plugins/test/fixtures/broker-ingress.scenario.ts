@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import type { AuthBrokerServerHandle } from "@oh-my-pi/pi-ai/auth-broker/server";
+import type { NativeBrokerHandle } from "../../workers/broker/server.ts";
 import { parseClientAccess } from "../../workers/broker/inputs.ts";
 import { runSdkScenario, type SdkScenarioContext } from "./isolated-sdk";
 
 await runSdkScenario(async (ctx: SdkScenarioContext) => {
   // Static SDK imports would run before the harness's private-state and network barrier.
-  const { AuthStorage } = await import("@oh-my-pi/pi-ai/auth-storage");
-  const { startAuthBroker } = await import("@oh-my-pi/pi-ai/auth-broker/server");
+  const { NativeBrokerStorage } = await import("../../workers/broker/storage.ts");
+  const { startNativeBroker } = await import("../../workers/broker/server.ts");
   const { AuthBrokerClient } = await import("@oh-my-pi/pi-ai/auth-broker/client");
   const { registerOAuthProvider, unregisterOAuthProvider } = await import("@oh-my-pi/pi-ai/registry/oauth/index");
   const nativeBearer = "synthetic-native-ingress-service-bearer";
@@ -24,8 +24,8 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
       return { ...credential, access: "synthetic-unexpected-rotation", expires: Date.now() + 3_600_000 };
     },
   });
-  const storage = await AuthStorage.create(join(ctx.root, "ingress.db"));
-  let broker: AuthBrokerServerHandle | undefined;
+  const storage = await NativeBrokerStorage.create(join(ctx.root, "ingress.db"), { refreshOAuthCredential: ctx.refreshOAuthCredential });
+  let broker: NativeBrokerHandle | undefined;
   try {
     storage.upsertCredential(provider, {
       type: "oauth", email: "ingress@accounts.invalid", expires: Date.now() - 1_000,
@@ -43,7 +43,7 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
 
     // The required "{}" clientAccess input selects native-only ephemeral binding.
     const ordinaryAccess = parseClientAccess(JSON.parse("{}"));
-    broker = startAuthBroker({ storage, bind: ordinaryAccess?.bind ?? "127.0.0.1:0", bearerTokens: [nativeBearer], disableRefresher: true });
+    broker = startNativeBroker({ storage, bind: ordinaryAccess?.bind ?? "127.0.0.1:0", bearerTokens: [nativeBearer], disableRefresher: true });
     const origin = broker.url;
     const clientAccess = parseClientAccess({ bind: `127.0.0.1:${broker.port}`, bearerSha256 });
     ctx.check(clientAccess, "ingress-fixed-configuration-missing");
@@ -54,10 +54,10 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
 
     // An occupied reviewed endpoint must fail synchronously, without a fallback
     // listener or a background rotation by a broker that never acquired custody.
-    let contender: AuthBrokerServerHandle | undefined;
+    let contender: NativeBrokerHandle | undefined;
     let occupiedRejected = false;
     try {
-      contender = startAuthBroker({ storage, bind: clientAccess.bind, bearerTokens: [nativeBearer], bearerTokenHashes: [bearerSha256] });
+      contender = startNativeBroker({ storage, bind: clientAccess.bind, bearerTokens: [nativeBearer], bearerTokenHashes: [bearerSha256] });
     } catch { occupiedRejected = true; }
     finally { await contender?.close(); }
     ctx.check(occupiedRejected, "ingress-occupied-port-did-not-refuse");
@@ -69,7 +69,7 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
 
     // The old client's URL and plaintext Authorization header do not change;
     // only its SHA-256 verifier is installed in the new canonical broker.
-    broker = startAuthBroker({ storage, bind: clientAccess.bind, bearerTokens: [nativeBearer],
+    broker = startNativeBroker({ storage, bind: clientAccess.bind, bearerTokens: [nativeBearer],
       bearerTokenHashes: [clientAccess.bearerSha256], disableRefresher: true });
     ctx.check(broker.url === origin, "ingress-fixed-endpoint-changed");
     const oldClient = new AuthBrokerClient({ url: origin, token: externalBearer, fetchImpl: ctx.fetchTo(origin), maxRetries: 0 });
@@ -103,7 +103,7 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
     broker = undefined;
 
     // Hash-only callers must not inherit the legacy empty-token auth bypass.
-    broker = startAuthBroker({ storage, bind: clientAccess.bind, bearerTokens: [],
+    broker = startNativeBroker({ storage, bind: clientAccess.bind, bearerTokens: [],
       bearerTokenHashes: ["0".repeat(64), bearerSha256], disableRefresher: true });
     await expectDenied(origin);
     await expectDenied(origin, `Bearer ${nativeBearer}`);
@@ -116,9 +116,9 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
     for (const invalid of [null, "", bearerSha256, [], [""], [null], new Array(1), [bearerSha256, ""],
       ["g".repeat(64)], [bearerSha256.slice(1)], [bearerSha256.toUpperCase()], [`${bearerSha256}\n`]]) {
       let rejected = false;
-      let invalidBroker: AuthBrokerServerHandle | undefined;
+      let invalidBroker: NativeBrokerHandle | undefined;
       try {
-        invalidBroker = startAuthBroker({ storage, bind: clientAccess.bind, bearerTokens: [],
+        invalidBroker = startNativeBroker({ storage, bind: clientAccess.bind, bearerTokens: [],
           bearerTokenHashes: invalid as readonly string[], disableRefresher: true });
       } catch { rejected = true; }
       finally { await invalidBroker?.close(); }

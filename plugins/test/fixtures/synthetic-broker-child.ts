@@ -1,6 +1,7 @@
 import { join } from "node:path";
-import type { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
-import type { AuthBrokerServerHandle } from "@oh-my-pi/pi-ai/auth-broker/server";
+import type { OAuthProvider } from "@oh-my-pi/pi-ai/registry/oauth";
+import type { NativeBrokerStorage } from "../../workers/broker/storage.ts";
+import type { NativeBrokerHandle } from "../../workers/broker/server.ts";
 import type { SyntheticBrokerAccount } from "./synthetic-broker.ts";
 
 // Only built-ins and erased types may precede isolation and network containment.
@@ -9,11 +10,14 @@ const root = process.env.CODE_SYNTHETIC_BROKER_ROOT;
 const bearer = process.env.CODE_SYNTHETIC_BROKER_TOKEN;
 delete process.env.CODE_SYNTHETIC_BROKER_TOKEN;
 
-let storage: AuthStorage | undefined;
-let broker: AuthBrokerServerHandle | undefined;
+let storage: NativeBrokerStorage | undefined;
+let broker: NativeBrokerHandle | undefined;
 let failed = false;
 let stopping: Promise<void> | undefined;
 let boot: Promise<void>;
+const originalFetch = globalThis.fetch;
+const originalServe = Bun.serve;
+const fixtureOrigins = new Set<string>();
 
 function send(message: object): Promise<boolean> {
   if (!process.connected || !process.send) return Promise.resolve(false);
@@ -34,6 +38,7 @@ function shutdown(): Promise<void> {
     await boot.catch(() => {});
     try { await broker?.close(); } catch { fail("cleanup"); }
     try { storage?.close(); } catch { fail("cleanup"); }
+    fixtureOrigins.clear();
     const sent = await send({ kind: "closed", ok: !failed });
     if (process.connected) process.disconnect?.();
     process.exit(!failed && sent ? 0 : 1);
@@ -47,9 +52,15 @@ function blockOutbound(): never {
   throw new Error("Synthetic broker fixture forbids outbound traffic");
 }
 
-const blockedFetch = Object.assign(blockOutbound, { preconnect: blockOutbound });
-// Guard the SDK's global fetch before importing its runtime modules.
-Object.defineProperty(globalThis, "fetch", { value: blockedFetch, configurable: false, writable: false });
+// Only this child's concrete listeners are reachable, never arbitrary loopback
+// services, redirects or providers. The private broker hop uses ordinary fetch.
+Object.defineProperty(globalThis, "fetch", {
+  value: Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (!fixtureOrigins.has(url.origin)) return blockOutbound();
+    return originalFetch(input, { ...init, redirect: "error" });
+  }, { preconnect: blockOutbound }), configurable: false, writable: false,
+});
 
 process.on("message", message => {
   if (message && typeof message === "object" && "kind" in message && message.kind === "close") {
@@ -76,9 +87,12 @@ boot = (async () => {
   // HOME/cwd/XDG were isolated by exec, so even eager SDK dotenv reads stay private.
   const { setTransports } = await import("@oh-my-pi/pi-utils/logger");
   setTransports({ console: false, file: false });
-  const { AuthStorage } = await import("@oh-my-pi/pi-ai/auth-storage");
-  const { startAuthBroker } = await import("@oh-my-pi/pi-ai/auth-broker/server");
-  storage = await AuthStorage.create(join(root, "state", "synthetic-auth.db"));
+  const { NativeBrokerStorage } = await import("../../workers/broker/storage.ts");
+  const { startNativeBroker } = await import("../../workers/broker/server.ts");
+  const { refreshOAuthToken } = await import("@oh-my-pi/pi-ai/registry/oauth");
+  storage = await NativeBrokerStorage.create(join(root, "state", "synthetic-auth.db"), {
+    refreshOAuthCredential: (provider, _id, credential, signal) => refreshOAuthToken(provider as OAuthProvider, credential, signal),
+  });
 
   const accounts: SyntheticBrokerAccount[] = [];
   const expires = Date.now() + 365 * 24 * 60 * 60 * 1_000;
@@ -111,7 +125,18 @@ boot = (async () => {
   }
   if (storage.exportSnapshot().credentials.length !== 6 || failed) throw new Error("Synthetic fixture seed failed");
 
-  broker = startAuthBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [bearer], disableRefresher: true });
+  Bun.serve = new Proxy(originalServe, {
+    apply(target, receiver, args) {
+      const server = Reflect.apply(target, receiver, args) as Bun.Server<unknown>;
+      if (server.hostname === "127.0.0.1" && server.port) fixtureOrigins.add(`http://127.0.0.1:${server.port}`);
+      return server;
+    },
+  });
+  try {
+    broker = startNativeBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [bearer], disableRefresher: true });
+  } finally {
+    Bun.serve = originalServe;
+  }
   if (!await send({ kind: "ready", url: broker.url, accounts })) throw new Error("Synthetic fixture parent unavailable");
 })().catch(() => {
   fail("startup");

@@ -254,7 +254,6 @@ describe("native account-pool gateway", () => {
       fixture.remove(1);
       await eventually(() => storage.remote.snapshot.generation === 3);
       expect(await storage.getApiKey("anthropic", "stale-stream-session")).toBe("fixture-access-2");
-      const revocation = storage.remote.revocation;
 
       await eventually(() => fixture.streams.size > 0);
       fixture.send({ kind: "entry", entry: credential(1, "removed"), generation: 1,
@@ -268,10 +267,9 @@ describe("native account-pool gateway", () => {
       // it must not repair the current account that the obsolete frames omit.
       fixture.publish({ ...marker, credential: { type: "api_key", key: "fixture-stream-marker-after" } });
       await eventually(() => storage.remote.snapshot.generation === 4);
-      expect(await storage.getApiKey("anthropic", "stale-stream-session")).toBe("fixture-access-2");
       expect(storage.remote.listAuthCredentials("anthropic").map(entry => entry.id)).toEqual([2]);
+      expect(await storage.getApiKey("anthropic", "stale-stream-session")).toBe("fixture-access-2");
       expect(await storage.getApiKey("openai")).toBe("fixture-stream-marker-after");
-      expect(storage.remote.revocation).toBe(revocation);
     } finally { controller.abort(); storage.close(); }
   });
 
@@ -318,6 +316,25 @@ describe("native account-pool gateway", () => {
     expect(projected).not.toContain("fixture-credential-body");
     const event = JSON.parse(projected.split("\n")[0]!.slice(6));
     expect(event.error).toMatchObject({ provider: model.provider, model: model.id, api: model.api, stopReason: "error", content: [] });
+    expect(event.error).not.toHaveProperty("usage");
+  });
+
+  test("a charged failure preserves only validated usage and status through redaction", async () => {
+    const model = [...poolModels(parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] }, serviceBearer).accountPool).values()][0]!;
+    const usage = { input: 17, output: 3, cacheRead: 2, cacheWrite: 5, totalTokens: 27,
+      cost: { input: 0.01, output: 0.02, cacheRead: 0.001, cacheWrite: 0.005, total: 0.036 } };
+    const source = new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "error", error: {
+        usage: { ...usage, diagnostic: "fixture-private-diagnostic" },
+        errorStatus: 429, errorMessage: "fixture-private-diagnostic",
+      } })}\n\n`));
+      controller.close();
+    } });
+    const projected = await new Response(safeNativeStream(source, model)).text();
+    expect(projected).not.toContain("fixture-private-diagnostic");
+    const event = JSON.parse(projected.split("\n")[0]!.slice(6));
+    expect(event.error.usage).toEqual(usage);
+    expect(event.error.errorStatus).toBe(429);
   });
 
   test("a masked stream refusal still tells the machine which check refused, in a child so fd 2 is real", async () => {

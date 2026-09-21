@@ -8,31 +8,46 @@ import type { BunPlugin } from "bun";
 import { dlopen, ptr } from "bun:ffi";
 import { MachineArtifactSchema, type MachineArtifact, type MachineHalf } from "../../../manifold/packages/protocol/src/jobs.ts";
 import runtime from "../runtime-artifacts.json";
+import sdkRuntime from "../sdk-host/runtime-artifacts.json";
 
 const root = resolve(import.meta.dir, "..");
 const platforms = ["linux-x64", "linux-arm64"] as const;
 const entrypoints = {
   root: {
-    inventory: "probe/inventory.ts",
-    benchmark: "probe/benchmark.ts",
-    harness: "harness/entry.ts",
+    inventory: { graph: "baseline", source: "workers/probe/inventory.ts" },
+    benchmark: { graph: "baseline", source: "workers/probe/benchmark.ts" },
+    harness: { graph: "baseline", source: "workers/harness/entry.ts" },
+    sdkHost: { graph: "sdkHost", source: "sdk-host/sdk-host.ts" },
   },
   accounts: {
-    broker: "broker/entry.ts",
+    broker: { graph: "baseline", source: "workers/broker/entry.ts" },
   },
   gateway: {
-    gateway: "gateway/entry.ts",
+    gateway: { graph: "baseline", source: "workers/gateway/entry.ts" },
   },
 } as const;
 export type WorkerTarget = keyof typeof entrypoints;
 const hash = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 const maxEmbeddedBytes = 16 * 1024 * 1024;
-const loaderSha256 = "6d46cb5c28e1ed40ae94c6019c90399b9b326f4d2b5bf944a802542147356bf8";
 const dependencyMarker = ".omp-prepared-dependencies.json";
-const patchFile = "patches/@oh-my-pi%2Fpi-ai@18.1.14.patch";
-// Review these together with bun.lock and the complete patch, never installed files.
-const lockSha256 = "ad91009fa29101b83f5311ad863d652e2b0c79173ebca2cbd57075ff83878b3d";
-const patchSha256 = "ef3aaf1d847e1cc2729819b695e28c96ac697561987a49f4951c566141c8c40d";
+// Independently frozen realizations. The retained baseline patch is not ported to
+// the SDK host; source, receipt, native loader and artifact identities travel together.
+const graphs = {
+  baseline: {
+    root, version: runtime.sdkVersion, nativeAlias: "pi-natives", native: runtime.tools["pi-natives"],
+    lockSha256: "ad91009fa29101b83f5311ad863d652e2b0c79173ebca2cbd57075ff83878b3d",
+    loaderSha256: "6d46cb5c28e1ed40ae94c6019c90399b9b326f4d2b5bf944a802542147356bf8",
+    patch: { file: "patches/@oh-my-pi%2Fpi-ai@18.1.14.patch", sha256: "ef3aaf1d847e1cc2729819b695e28c96ac697561987a49f4951c566141c8c40d" },
+  },
+  sdkHost: {
+    root: join(root, "sdk-host"), version: sdkRuntime.sdkVersion, nativeAlias: "sdk-pi-natives", native: sdkRuntime.tools["pi-natives"],
+    lockSha256: "65a8a3c3c73c29e18081a696bdaf924a7086b9c3cfc9f1853927b8394b4c8610",
+    loaderSha256: "de59cfd780bfb4ff4411a542396ba2f7c512add3ad2d474cd2e30220c69e3930",
+    patch: undefined,
+  },
+} as const;
+type GraphName = keyof typeof graphs;
+type DependencyGraph = (typeof graphs)[GraphName];
 
 export function containsPath(parent: string, child: string): boolean {
   const path = relative(parent, child);
@@ -84,22 +99,28 @@ export async function replaceDirectory(staged: string, destination: string): Pro
   }
 }
 
-async function dependencyInputs(directory: string) {
-  if (Bun.version !== "1.4.2" || runtime.bunVersion !== "1.4.2") throw new Error("Dependency preparation and packaging require pinned Bun 1.4.2");
-  const [lock, patch, manifest] = await Promise.all([
-    readFile(join(directory, "bun.lock")), readFile(join(directory, patchFile)),
+async function dependencyInputs(name: GraphName, directory = graphs[name].root) {
+  const graph = graphs[name];
+  if (Bun.version !== "1.4.2" || runtime.bunVersion !== "1.4.2" || sdkRuntime.bunVersion !== "1.4.2") throw new Error("Dependency preparation and packaging require pinned Bun 1.4.2");
+  const [lock, manifest] = await Promise.all([
+    readFile(join(directory, "bun.lock")),
     readFile(join(directory, "package.json"), "utf8").then(text => JSON.parse(text)),
   ]);
-  if (hash(lock) !== lockSha256) throw new Error("Unreviewed bun.lock bytes");
-  if (hash(patch) !== patchSha256) throw new Error("Unreviewed pi-ai patch bytes");
+  if (hash(lock) !== graph.lockSha256) throw new Error(`Unreviewed bun.lock bytes: ${name}`);
+  if (graph.patch) {
+    if (hash(await readFile(join(directory, graph.patch.file))) !== graph.patch.sha256) throw new Error("Unreviewed pi-ai patch bytes");
+    if (JSON.stringify(manifest.patchedDependencies) !== JSON.stringify({ "@oh-my-pi/pi-ai@18.1.14": graph.patch.file })) throw new Error("Unreviewed SDK patch declaration");
+  } else if (manifest.patchedDependencies !== undefined) throw new Error("Private SDK host patches are not supported");
   const dependencies = {
     dependencies: manifest.dependencies, devDependencies: manifest.devDependencies,
     patchedDependencies: manifest.patchedDependencies,
   };
-  if (JSON.stringify(manifest.patchedDependencies) !== JSON.stringify({ "@oh-my-pi/pi-ai@18.1.14": patchFile })) throw new Error("Unreviewed SDK patch declaration");
   return {
-    format: 1, bunVersion: Bun.version, platform: process.platform, arch: process.arch,
-    lockSha256, patchSha256, manifestSha256: hash(Buffer.from(JSON.stringify(dependencies))),
+    format: 3, graph: name, sdkVersion: graph.version, nativeAlias: graph.nativeAlias,
+    nativeSha256: Object.fromEntries(platforms.map(platform => [platform, graph.native[platform].sha256])),
+    loaderSha256: graph.loaderSha256, bunVersion: Bun.version, platform: process.platform, arch: process.arch,
+    lockSha256: graph.lockSha256, patchSha256: graph.patch?.sha256 ?? null,
+    manifestSha256: hash(Buffer.from(JSON.stringify(dependencies))),
   };
 }
 
@@ -134,9 +155,13 @@ async function dependencyTree(directory: string): Promise<string> {
   return digest.digest("hex");
 }
 
-export async function verifyPreparedDependencies(): Promise<string> {
-  const inputs = await dependencyInputs(root);
-  const directory = join(root, "node_modules");
+export async function verifyPreparedDependencies(name?: GraphName): Promise<string> {
+  if (name === undefined) {
+    const receipts = await Promise.all((Object.keys(graphs) as GraphName[]).map(graph => verifyPreparedDependencies(graph)));
+    return hash(Buffer.from(JSON.stringify(receipts)));
+  }
+  const inputs = await dependencyInputs(name);
+  const directory = join(graphs[name].root, "node_modules");
   const marker = join(directory, dependencyMarker);
   try {
     if (!(await lstat(marker)).isFile()) throw new Error("Preparation marker is not a regular file");
@@ -150,17 +175,19 @@ export async function verifyPreparedDependencies(): Promise<string> {
   }
 }
 
-/** Explicit setup only: fresh cache, frozen lock, exact patch, no lifecycle scripts.
+/** Explicit setup only: fresh cache, frozen published lock, no lifecycle scripts.
  * Normal pack/build paths only read this realization and never run an installer.
  */
-async function prepareDependencies(): Promise<void> {
-  const inputs = await dependencyInputs(root);
+async function prepareDependencies(name: GraphName): Promise<void> {
+  const graph = graphs[name];
+  const inputs = await dependencyInputs(name);
   if (process.platform !== "linux" && process.platform !== "darwin") throw new Error("Atomic dependency preparation requires Linux or macOS");
-  const stage = await mkdtemp(join(root, ".omp-deps-"));
+  const stage = await mkdtemp(join(graph.root, ".omp-deps-"));
   try {
     const installation = join(stage, "installation");
-    await mkdir(join(installation, "patches"), { recursive: true });
-    await Promise.all(["package.json", "bun.lock", patchFile].map(file => cp(join(root, file), join(installation, file))));
+    await mkdir(installation);
+    if (graph.patch) await mkdir(join(installation, "patches"));
+    await Promise.all(["package.json", "bun.lock", ...(graph.patch ? [graph.patch.file] : [])].map(file => cp(join(graph.root, file), join(installation, file))));
     const home = join(stage, "home");
     await mkdir(home);
     const installer = Bun.spawn([
@@ -178,12 +205,12 @@ async function prepareDependencies(): Promise<void> {
       installer.exited, new Response(installer.stdout).arrayBuffer(), new Response(installer.stderr).arrayBuffer(),
     ]);
     if (exit !== 0) throw new Error(`Clean frozen dependency realization failed (exit ${exit}); prior node_modules is unchanged`);
-    if (JSON.stringify(await dependencyInputs(installation)) !== JSON.stringify(inputs) ||
-        JSON.stringify(await dependencyInputs(root)) !== JSON.stringify(inputs)) throw new Error("Dependency inputs changed during preparation");
+    if (JSON.stringify(await dependencyInputs(name, installation)) !== JSON.stringify(inputs) ||
+        JSON.stringify(await dependencyInputs(name)) !== JSON.stringify(inputs)) throw new Error("Dependency inputs changed during preparation");
     const modules = join(installation, "node_modules");
     const treeSha256 = await dependencyTree(modules);
     await writeFile(join(modules, dependencyMarker), `${JSON.stringify({ ...inputs, treeSha256 }, null, 2)}\n`);
-    await replaceDirectory(modules, join(root, "node_modules"));
+    await replaceDirectory(modules, join(graph.root, "node_modules"));
   } finally {
     await rm(stage, { recursive: true, force: true });
   }
@@ -193,12 +220,12 @@ async function prepareDependencies(): Promise<void> {
  * The owner mounts the verified native artifact at this fixed private path. No package
  * resolution, CPU probing, extraction, cache fallback, source checkout or host PATH.
  */
-const pinnedLoader = `
+const pinnedLoader = (graph: DependencyGraph) => `
 let bindings;
 export function loadNative() {
   if (bindings) return bindings;
   const module = { exports: {} };
-  process.dlopen(module, "/runtime/bin/pi-natives");
+  process.dlopen(module, ${JSON.stringify(`/runtime/bin/${graph.nativeAlias}`)});
   const install = module.exports.__ompInstallTokioRuntime;
   if (typeof install === "function") install();
   bindings = module.exports;
@@ -218,15 +245,15 @@ export interface WorkerArtifacts {
   systemRequirements: typeof runtime.requiredRuntimeTools.system;
 }
 
-async function packageRoot(name: string): Promise<string> {
-  let directory = dirname(await realpath(Bun.resolveSync(name, root)));
+async function packageRoot(graph: DependencyGraph, name: string, version = graph.version): Promise<string> {
+  let directory = dirname(await realpath(Bun.resolveSync(name, graph.root)));
   for (;;) {
     const file = Bun.file(join(directory, "package.json"));
     if (await file.exists()) {
       const manifest = await file.json();
       if (manifest.name === name) {
-        if (!containsPath(await realpath(join(root, "node_modules")), directory)) throw new Error(`Pinned dependency resolves outside prepared node_modules: ${name}`);
-        if (manifest.version !== runtime.sdkVersion) throw new Error(`Pinned dependency mismatch: ${name}`);
+        if (!containsPath(await realpath(join(graph.root, "node_modules")), directory)) throw new Error(`Pinned dependency resolves outside prepared node_modules: ${name}`);
+        if (manifest.version !== version) throw new Error(`Pinned dependency mismatch: ${name}`);
         return directory;
       }
     }
@@ -235,6 +262,74 @@ async function packageRoot(name: string): Promise<string> {
     directory = parent;
   }
 }
+
+function replacePublishedSource(source: string, before: string, after: string): string {
+  if (source.split(before).length !== 2) throw new Error("Published packaging adapter no longer matches exactly once");
+  return source.replace(before, after);
+}
+
+/** Execute the complete shipped helper, changing only its monorepo path mapping.
+ * Its export expansion, exclusions, shims and lazy registry remain publisher code.
+ * The private copy is temporary; installed packages and upstream checkouts are untouched.
+ */
+async function legacyPiPlugin(graph: DependencyGraph, codingAgent: string): Promise<BunPlugin> {
+  const packages = {
+    agent: "@oh-my-pi/pi-agent-core", ai: "@oh-my-pi/pi-ai",
+    "coding-agent": "@oh-my-pi/pi-coding-agent", natives: "@oh-my-pi/pi-natives",
+    tui: "@oh-my-pi/pi-tui", utils: "@oh-my-pi/pi-utils",
+  };
+  const installed = Object.fromEntries(await Promise.all(Object.entries(packages).map(async ([key, name]) => [key, await packageRoot(graph, name)])));
+  let source = await readFile(join(codingAgent, "scripts/legacy-pi-virtual-module.ts"), "utf8");
+  source = replacePublishedSource(source, 'const packageDir = path.resolve(import.meta.dir, "..");', `const packageDir = ${JSON.stringify(codingAgent)};`);
+  source = replacePublishedSource(source, 'path.join(repoRoot, "packages", pkg.dir)', `(${JSON.stringify(installed)} as Record<string, string>)[pkg.dir]!`);
+  const stage = await mkdtemp(join(root, ".omp-sdk-helper-"));
+  try {
+    const file = join(stage, "legacy-pi-virtual-module.ts");
+    await writeFile(file, source);
+    const helper = await import(file);
+    return await helper.createLegacyPiVirtualModulePlugin();
+  } finally {
+    await rm(stage, { recursive: true, force: true });
+  }
+}
+
+// quickjs-wasi@2.2.0 publishes MIT metadata but no standalone license, including
+// at its release tag cc1fea4a6a4ac1d960e0db68d35e1459064a1a23. Do not invent a
+// publisher copyright. Preserve that provenance and the canonical MIT terms,
+// plus the exact QuickJS-NG submodule's publisher copyright/permission notice.
+// https://github.com/quickjs-ng/quickjs/blob/dec012362bd93876449f3ecff4f835b2eba89bab/LICENSE
+const quickjsNotice = `quickjs-wasi@2.2.0
+Publisher: vercel-labs/quickjs-wasi; package.json license: MIT.
+https://github.com/vercel-labs/quickjs-wasi/tree/cc1fea4a6a4ac1d960e0db68d35e1459064a1a23
+The publisher supplies no standalone LICENSE or copyright notice for this package.
+Canonical MIT permission terms follow with the bundled QuickJS-NG engine notice.
+
+QuickJS-NG submodule dec012362bd93876449f3ecff4f835b2eba89bab
+The MIT License (MIT)
+
+Copyright (c) 2017-2026 Fabrice Bellard
+Copyright (c) 2017-2024 Charlie Gordon
+Copyright (c) 2023-2026 Ben Noordhuis
+Copyright (c) 2023-2026 Saúl Ibarra Corretgé
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+`;
 
 /** Deterministic ustar: regular members only, fixed mode/uid/gid/mtime, no PAX,
  * host tar/gzip invocation, unbounded directory walks, links or extra files. */
@@ -262,7 +357,7 @@ function archive(files: ReadonlyMap<string, Buffer>): Buffer {
 }
 
 /** Collect license/notice text from packages actually read by the bundler. */
-async function notices(importedFiles: Set<string>): Promise<Buffer> {
+async function notices(importedFiles: Set<string>, codingAgent?: string): Promise<Buffer> {
   const visited = new Set<string>();
   const packages = new Map<string, string>();
   for (const imported of [...importedFiles].sort()) {
@@ -281,13 +376,24 @@ async function notices(importedFiles: Set<string>): Promise<Buffer> {
     }
   }
   const sections: string[] = [];
+  const publisherNotices = codingAgent ? await readFile(join(codingAgent, "THIRD-PARTY-NOTICES.txt"), "utf8") : "";
+  let needsPublisherNotices = false;
   for (const [name, directory] of [...packages].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
     const entries = (await readdir(directory, { withFileTypes: true }))
       .filter(entry => entry.isFile() && /^(?:licen[cs]e|copying|notice|third-party-notices)(?:[.-].*)?$/i.test(entry.name))
       .map(entry => entry.name).sort();
     for (const filename of entries) sections.push(`${name} / ${filename}\n${await readFile(join(directory, filename), "utf8")}`);
-    if (entries.length === 0 && directory.includes("node_modules")) throw new Error(`Bundled dependency has no packaged license: ${name}`);
+    if (entries.length === 0 && directory.includes("node_modules")) {
+      if (name === "quickjs-wasi@2.2.0") sections.push(quickjsNotice);
+      else if (name === "@puppeteer/browsers@3.0.6" || name === "puppeteer-core@25.3.0") {
+        if (!publisherNotices.includes(`- ${name}: canonical Apache-2.0 text`)) throw new Error(`Missing exact publisher attribution: ${name}`);
+        sections.push(`${name} / Apache-2.0\nLicense supplied by @oh-my-pi/pi-coding-agent@${sdkRuntime.sdkVersion} THIRD-PARTY-NOTICES.txt below.`);
+        needsPublisherNotices = true;
+      } else throw new Error(`Bundled dependency has no packaged license: ${name}`);
+    }
   }
+  if (needsPublisherNotices && !packages.has(`@oh-my-pi/pi-coding-agent@${sdkRuntime.sdkVersion}`))
+    sections.push(`@oh-my-pi/pi-coding-agent@${sdkRuntime.sdkVersion} / THIRD-PARTY-NOTICES.txt\n${publisherNotices}`);
   return Buffer.from(sections.join("\n\n------------------------------------------------------------\n\n") + "\n");
 }
 
@@ -298,11 +404,10 @@ async function notices(importedFiles: Set<string>): Promise<Buffer> {
  */
 export async function buildWorkerArtifacts(target: WorkerTarget): Promise<WorkerArtifacts> {
   if (Bun.version !== runtime.bunVersion) throw new Error(`Worker packaging requires pinned Bun ${runtime.bunVersion}; received ${Bun.version}`);
-  await verifyPreparedDependencies();
-  await Promise.all(["@oh-my-pi/pi-ai", "@oh-my-pi/pi-catalog", "@oh-my-pi/pi-utils"].map(packageRoot));
-  const nativePackage = await packageRoot("@oh-my-pi/pi-natives");
-  const nativeLoader = await realpath(join(nativePackage, "native/loader-state.js"));
-  if (hash(await readFile(nativeLoader)) !== loaderSha256) throw new Error("Unreviewed native SDK loader bytes");
+  const manifoldRoot = await realpath(resolve(root, "../../manifold"));
+  const entries: Readonly<Record<string, { readonly graph: GraphName; readonly source: string }>> = entrypoints[target];
+  for (const graph of new Set(Object.values(entries).map(entry => entry.graph)))
+    await verifyPreparedDependencies(graph);
   const artifacts: WorkerArtifacts["artifacts"] = {};
   const tools: WorkerArtifacts["tools"] = {};
   const members = new Map<string, Uint8Array>();
@@ -328,56 +433,128 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
       members.set(declaration.bundleFile, bytes);
     }
   }
-  for (const [name, source] of Object.entries(entrypoints[target])) {
+  if (target === "root") tools[graphs.sdkHost.nativeAlias] = Object.fromEntries(
+    platforms.map(platform => [platform, MachineArtifactSchema.parse(graphs.sdkHost.native[platform])]),
+  );
+  for (const [name, { graph: graphName, source }] of Object.entries(entries)) {
+    const graph = graphs[graphName];
+    const modules = await realpath(join(graph.root, "node_modules"));
+    await Promise.all(["@oh-my-pi/pi-ai", "@oh-my-pi/pi-catalog", "@oh-my-pi/pi-utils"].map(packageName => packageRoot(graph, packageName)));
+    const codingAgent = graphName === "sdkHost" ? await packageRoot(graph, "@oh-my-pi/pi-coding-agent") : undefined;
+    const legacyPlugin = codingAgent ? await legacyPiPlugin(graph, codingAgent) : undefined;
+    const docs = codingAgent ? await readFile(join(codingAgent, "dist/docs-index.generated.txt"), "utf8") : "";
+    const quickjs = codingAgent ? await packageRoot(graph, "quickjs-wasi", "2.2.0") : undefined;
+    const quickjsModule = quickjs ? await realpath(join(quickjs, "dist/index.js")) : undefined;
+    const nativePackage = await packageRoot(graph, "@oh-my-pi/pi-natives");
+    const nativeLoader = await realpath(join(nativePackage, "native/loader-state.js"));
+    if (hash(await readFile(nativeLoader)) !== graph.loaderSha256) throw new Error(`Unreviewed native SDK loader bytes: ${graphName}`);
     const importedFiles = new Set<string>();
     let usesNative = false;
+    const assets = new Map<string, Buffer>();
     const plugin: BunPlugin = {
       name: "omp-pinned-native-worker",
       setup(build) {
+        // OMP packages stay inside this worker's prepared realization. The pinned
+        // Manifold SDK owns its own transitive dependencies; resolving those from
+        // an OMP graph would substitute versions or reject valid SDK imports.
+        build.onResolve({ filter: /^[^./]/ }, async args => {
+          if (args.path === "bun" || args.path.startsWith("bun:") || args.path.startsWith("node:") ||
+              builtinModules.includes(args.path) || args.path.startsWith("@manifold/")) return undefined;
+          const sdkImport = args.importer && containsPath(manifoldRoot, args.importer) &&
+            !args.path.startsWith("@oh-my-pi/");
+          if (sdkImport) {
+            const path = await realpath(Bun.resolveSync(args.path, dirname(args.importer)));
+            if (!containsPath(manifoldRoot, path)) throw new Error(`Manifold dependency escapes its checkout: ${args.path}`);
+            return { path, namespace: "file" };
+          }
+          const from = args.importer && containsPath(modules, args.importer) ? dirname(args.importer) : graph.root;
+          const path = await realpath(Bun.resolveSync(args.path, from));
+          if (!containsPath(modules, path)) throw new Error(`Worker dependency escapes ${graphName}: ${args.path}`);
+          return { path, namespace: "file" };
+        });
         build.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async args => {
           const path = await realpath(args.path);
+          if (path.split(sep).includes("node_modules") && !containsPath(modules, path) && !containsPath(manifoldRoot, path))
+            throw new Error(`Worker source escapes ${graphName}: ${path}`);
           importedFiles.add(path);
-          if (path !== nativeLoader) return undefined;
-          usesNative = true;
-          return { contents: pinnedLoader, loader: "js" };
+          if (path === nativeLoader) {
+            usesNative = true;
+            return { contents: pinnedLoader(graph), loader: "js" };
+          }
+          if (quickjs && path === quickjsModule) {
+            const asset = `${name}-assets/quickjs.wasm`;
+            assets.set(asset, await readFile(join(quickjs, "quickjs.wasm")));
+            // Preserve the real PAC implementation, relocating only its default file read.
+            const contents = replacePublishedSource(await readFile(path, "utf8"),
+              "new URL('../quickjs.wasm', import.meta.url)", `new URL(${JSON.stringify(`./${asset}`)}, import.meta.url)`);
+            return { contents, loader: "js" };
+          }
+          return undefined;
         });
       },
     };
+    const outputDirectory = join(root, ".omp-worker-output");
     const result = await Bun.build({
-      entrypoints: [join(import.meta.dir, source)], naming: `${name}.js`,
+      entrypoints: [join(root, source)], outdir: outputDirectory,
+      naming: { entry: `${name}.js`, asset: `${name}-assets/[name]-[hash].[ext]` },
       target: "bun", format: "esm", splitting: false, minify: true,
-      sourcemap: "none", packages: "bundle", plugins: [plugin],
+      sourcemap: "none", packages: "bundle", plugins: [...(legacyPlugin ? [legacyPlugin] : []), plugin],
+      define: { "process.env.PI_DOCS_EMBED": JSON.stringify(docs) },
+      // The resolver binds OMP packages to the selected prepared graph and
+      // leaves the pinned Manifold SDK's transitive graph with its owner.
       tsconfig: join(root, "tsconfig.json"),
     });
     if (!result.success) throw new AggregateError(result.logs, `Worker bundling failed: ${name}`);
-    if (result.outputs.length !== 1) throw new Error(`Undeclared worker bundle outputs: ${name}`);
-    const javascript = Buffer.from(await result.outputs[0]!.arrayBuffer());
+    const entry = result.outputs.find(output => output.kind === "entry-point");
+    if (!entry) throw new Error(`Missing worker entrypoint: ${name}`);
+    for (const output of result.outputs) {
+      if (output === entry) continue;
+      const member = relative(outputDirectory, resolve(output.path)).split(sep).join("/");
+      const prefix = `${name}-assets/`;
+      if (output.kind !== "asset" || assets.has(member) || !member.startsWith(prefix) ||
+          !/^(?:template-[a-z0-9]+\.(?:css|html|js)|tool-views\.generated-[a-z0-9]+\.js|CHANGELOG-[a-z0-9]+\.md)$/.test(member.slice(prefix.length)))
+        throw new Error(`Undeclared worker bundle output: ${name}: ${member}`);
+      const bytes = Buffer.from(await output.arrayBuffer());
+      assets.set(member, bytes);
+    }
+    const javascript = Buffer.from(await entry.arrayBuffer());
     const imports = new Bun.Transpiler({ loader: "js" }).scanImports(javascript);
     for (const item of imports) {
       if (item.path === "bun" || item.path.startsWith("bun:") || item.path.startsWith("node:") || builtinModules.includes(item.path)) continue;
       throw new Error(`Unbundled worker import: ${name}: ${item.path}`);
     }
-    if (usesNative && target === "root") throw new Error(`Worker unexpectedly needs native addon: ${name}`);
-    const licenses = await notices(importedFiles);
+    if (usesNative && target === "root" && graphName === "baseline") throw new Error(`Worker unexpectedly needs native addon: ${name}`);
+    const licenses = await notices(importedFiles, codingAgent);
     let bytes: Buffer;
     let declaration: MachineArtifact;
     if (name === "inventory" || name === "benchmark") {
+      if (assets.size !== 0) throw new Error(`Raw worker has undeclared assets: ${name}`);
       // License comments cannot terminate early on third-party text.
       bytes = Buffer.concat([javascript, Buffer.from(`\n/*\n${licenses.toString("utf8").replaceAll("*/", "* /")}\n*/\n`)]);
       const filename = `omp-${name}.js`;
       declaration = { bundleFile: filename, sha256: hash(bytes), format: "raw", entry: [filename], entrySha256: hash(bytes), maxBytes: bytes.length, maxExpandedBytes: bytes.length, maxMembers: 1 };
     } else {
-      const files = new Map([[`${name}.js`, javascript], ["licenses/THIRD-PARTY-NOTICES.txt", licenses]]);
+      if (assets.has(`${name}.js`) || assets.has("licenses/THIRD-PARTY-NOTICES.txt")) throw new Error(`Duplicate worker asset: ${name}`);
+      const files = new Map([[`${name}.js`, javascript], ["licenses/THIRD-PARTY-NOTICES.txt", licenses], ...assets]);
+      const declaredFiles: NonNullable<MachineArtifact["files"]> = {
+        [`${name}-notices`]: { entry: ["licenses", "THIRD-PARTY-NOTICES.txt"], sha256: hash(licenses), relativeTarget: [`${name}-licenses`, "THIRD-PARTY-NOTICES.txt"] },
+      };
+      let index = 0;
+      // Compiler completion order must not choose the runtime's public asset aliases.
+      for (const [member, asset] of [...assets].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
+        declaredFiles[`${name}-asset-${index++}`] = { entry: member.split("/"), sha256: hash(asset), relativeTarget: member.split("/") };
+      }
       bytes = archive(files);
       declaration = {
         bundleFile: `omp-${name}.tar.gz`, sha256: hash(bytes), format: "tar.gz", entry: [`${name}.js`], entrySha256: hash(javascript),
-        maxBytes: bytes.length, maxExpandedBytes: 2048 + Math.ceil(javascript.length / 512) * 512 + Math.ceil(licenses.length / 512) * 512, maxMembers: files.size,
-        files: { [`${name}-notices`]: { entry: ["licenses", "THIRD-PARTY-NOTICES.txt"], sha256: hash(licenses), relativeTarget: [`${name}-licenses`, "THIRD-PARTY-NOTICES.txt"] } },
+        maxBytes: bytes.length, maxExpandedBytes: 1024 + [...files.values()].reduce((total, file) => total + 512 + Math.ceil(file.length / 512) * 512, 0), maxMembers: files.size,
+        files: declaredFiles,
       };
     }
     declaration = MachineArtifactSchema.parse(declaration);
     embeddedBase64Bytes += 4 * Math.ceil(bytes.length / 3);
     if (embeddedBase64Bytes > maxEmbeddedBytes) throw new Error(`Bundled worker members require ${embeddedBase64Bytes} base64 bytes; native plugin aggregate limit is ${maxEmbeddedBytes}. Publish these exact worker archives before distribution; no worker release URL is assumed.`);
+    if (members.has(declaration.bundleFile!)) throw new Error(`Duplicate worker member: ${declaration.bundleFile}`);
     members.set(declaration.bundleFile!, bytes);
     const layouts = Object.fromEntries(platforms.map(platform => [platform, declaration]));
     if (name === "inventory" || name === "broker" || name === "gateway") Object.assign(artifacts, layouts);
@@ -389,5 +566,5 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
 
 if (import.meta.main) {
   if (process.argv.length !== 3 || process.argv[2] !== "--prepare-dependencies") throw new Error("Usage: bun plugins/workers/build.ts --prepare-dependencies");
-  await prepareDependencies();
+  for (const name of Object.keys(graphs) as GraphName[]) await prepareDependencies(name);
 }

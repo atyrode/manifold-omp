@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { writeSync } from "node:fs";
+import { z } from "zod";
 import { parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import { unavailable } from "./inputs.ts";
@@ -7,6 +8,12 @@ import { resolvePublished } from "./storage.ts";
 
 const FRAME_LIMIT = 16 * 1024 * 1024;
 const encoder = new TextEncoder();
+const tokenCount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const cost = z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const reportedUsage = z.object({
+  input: tokenCount, output: tokenCount, cacheRead: tokenCount, cacheWrite: tokenCount, totalTokens: tokenCount,
+  cost: z.object({ input: cost, output: cost, cacheRead: cost, cacheWrite: cost, total: cost }),
+});
 /**
  * The caller still learns only that the gateway would not serve it. The MACHINE learns which
  * check refused and what the upstream said, because one opaque word for unauthorized, unknown
@@ -29,7 +36,6 @@ export function safeNativeStream(body: ReadableStream<Uint8Array>, model: Model<
   let buffered = "";
   const failure = { type: "error", reason: "error", error: {
     role: "assistant", content: [], api: model.api, provider: model.provider, model: model.id,
-    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
     stopReason: "error", errorMessage: "gateway_unavailable", timestamp: 0,
   } };
   return body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
@@ -54,7 +60,7 @@ export function safeNativeStream(body: ReadableStream<Uint8Array>, model: Model<
           // owner nothing to read. Same rule as `safeFailure`: a fixed label and numbers only,
           // never a body, header, URL, bearer or upstream message.
           const reported = (event.error ?? event.message ?? event.partial ?? {}) as {
-            stopReason?: unknown; errorStatus?: unknown; errorId?: unknown; status?: unknown; code?: unknown;
+            stopReason?: unknown; errorStatus?: unknown; errorId?: unknown; status?: unknown; code?: unknown; usage?: unknown;
           };
           const numeric = (...values: unknown[]): string => {
             const found = values.find(value => typeof value === "number" && Number.isFinite(value));
@@ -66,7 +72,15 @@ export function safeNativeStream(body: ReadableStream<Uint8Array>, model: Model<
           // real upstream 404, which is a log that reports its own absence of information.
           const stop = reported.stopReason;
           writeSync(2, `gateway_stream_refused ${event.type} ${typeof stop === "string" ? stop : "none"} ${numeric(reported.errorStatus, reported.status)} ${numeric(reported.errorId, reported.code)}\n`);
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(failure)}\n\ndata: [DONE]\n\n`));
+          const usage = reportedUsage.safeParse(reported.usage);
+          const status = [reported.errorStatus, reported.status].find(value =>
+            typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599);
+          // Missing usage stays missing: inventing zero would make a charged failure look free.
+          const projected = { ...failure, error: { ...failure.error,
+            ...(usage.success ? { usage: usage.data } : {}),
+            ...(status === undefined ? {} : { errorStatus: status }),
+          } };
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(projected)}\n\ndata: [DONE]\n\n`));
           controller.terminate();
           return;
         }

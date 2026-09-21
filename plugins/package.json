@@ -7,7 +7,7 @@
     "bun": "1.4.2"
   },
   "scripts": {
-    "check": "tsc -p .",
+    "check": "tsc -p . && tsc -p sdk-host",
     "test": "bun test",
     "pack": "./pack.sh",
     "verify": "bun scripts/verify.ts",

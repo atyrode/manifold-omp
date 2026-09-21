@@ -81,12 +81,14 @@ export function buildSharedBrokerPolicy(runtime: ServiceRuntime): ServicePolicy 
     } });
 }
 
-export function buildGatewayPolicy(gateway: ServiceRuntime): ServicePolicy {
+export function buildGatewayPolicy(gateway: ServiceRuntime, prices?: ServicePolicy["prices"]): ServicePolicy {
   const models = proxy("GET", "/v1/models");
   const stream = proxy("POST", "/v1/pi/stream", { kind: "json", disclosure: "full" });
   stream.response.contentTypes = ["application/json", "text/event-stream"];
   stream.timeoutMs = 300_000;
   stream.maxRequestBytes = 16 * 1024 * 1024;
   stream.maxResponseBytes = 256 * 1024 * 1024;
-  return ServicePolicySchema.parse({ serviceId: "omp", revision: "1", runtime: gateway, maxConcurrent: 16, operations: { models, stream } });
+  stream.meter = { kind: "pi-native-usage" };
+  return ServicePolicySchema.parse({ serviceId: "omp", revision: "1", runtime: gateway, maxConcurrent: 16,
+    operations: { models, stream }, ...(prices === undefined ? {} : { prices }) });
 }

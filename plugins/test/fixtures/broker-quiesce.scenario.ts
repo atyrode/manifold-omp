@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import type { AuthBrokerServerHandle } from "@oh-my-pi/pi-ai/auth-broker/server";
+import type { NativeBrokerHandle } from "../../workers/broker/server.ts";
 import { runSdkScenario, type SdkScenarioContext } from "./isolated-sdk";
 
 await runSdkScenario(async (ctx: SdkScenarioContext) => {
   // Static SDK imports would precede the child's private-state and network barrier.
-  const { AuthStorage } = await import("@oh-my-pi/pi-ai/auth-storage");
-  const { startAuthBroker } = await import("@oh-my-pi/pi-ai/auth-broker/server");
+  const { NativeBrokerStorage } = await import("../../workers/broker/storage.ts");
+  const { startNativeBroker } = await import("../../workers/broker/server.ts");
   const { registerOAuthProvider, unregisterOAuthProvider } = await import("@oh-my-pi/pi-ai/registry/oauth/index");
   const nativeBearer = "synthetic-native-control-bearer-private-only";
   const peerBearer = "synthetic-other-plaintext-bearer-no-control";
@@ -34,18 +34,16 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
       },
     });
     const database = join(ctx.root, `quiesce-${outcome}.db`);
-    const storage = await AuthStorage.create(database, {
-      usageRequestTimeoutMs: 20,
-      usageProviderResolver: id => id === provider ? {
-        id,
-        async fetchUsage(params) {
-          // This real usage path has stopped awaiting the credential refresh.
-          usageTimedOut = params.signal?.aborted === true;
-          return null;
-        },
-      } : undefined,
-    });
-    let broker: AuthBrokerServerHandle | undefined;
+    const storage = await NativeBrokerStorage.create(database, { refreshOAuthCredential: ctx.refreshOAuthCredential, usageRequestTimeoutMs: 20,
+    usageProviderResolver: id => id === provider ? {
+      id,
+      async fetchUsage(params) {
+        // This real usage path has stopped awaiting the credential refresh.
+        usageTimedOut = params.signal?.aborted === true;
+        return null;
+      },
+    } : undefined, });
+    let broker: NativeBrokerHandle | undefined;
     let usage: Promise<void> | undefined;
     let controlDrain: Promise<{ status: number; body: unknown }> | undefined;
     let handleDrain: Promise<boolean> | undefined;
@@ -60,17 +58,17 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
       ctx.check(initial, "quiesce-credential-missing");
       if (outcome === "persist") {
         for (const invalid of [null, "", oldBearer, oldHash]) {
-          let accepted: AuthBrokerServerHandle | undefined;
+          let accepted: NativeBrokerHandle | undefined;
           let rejected = false;
           try {
-            accepted = startAuthBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [nativeBearer],
+            accepted = startNativeBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [nativeBearer],
               bearerTokenHashes: [oldHash], controlBearerToken: invalid as string, disableRefresher: true });
           } catch { rejected = true; }
           finally { await accepted?.close(); }
           ctx.check(rejected, "quiesce-invalid-control-bearer-admitted");
         }
       }
-      broker = startAuthBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [nativeBearer, peerBearer],
+      broker = startNativeBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [nativeBearer, peerBearer],
         bearerTokenHashes: [oldHash], controlBearerToken: nativeBearer, disableRefresher: true });
       const origin = broker.url;
       const fetch = ctx.fetchTo(origin);
@@ -130,7 +128,7 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
       ctx.check(!refreshAborted && refreshCalls === 1, "quiesce-interrupted-or-restarted-rotation");
       if (outcome === "persist") {
         ctx.check(result.status === 200 && handleSucceeded && await controlState() === "drained", "quiesce-success-not-drained");
-        const reopened = await AuthStorage.create(database);
+        const reopened = await NativeBrokerStorage.create(database, { refreshOAuthCredential: ctx.refreshOAuthCredential });
         try {
           await reopened.reload();
           const persisted = reopened.listStoredCredentials().find(row => row.id === initial.id)?.credential;
@@ -155,5 +153,155 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
       storage.close();
       unregisterOAuthProvider(provider);
     }
+  }
+
+  // A completed revoked grant is not a shutdown failure. In contrast, a
+  // refresh whose SDK deadline elapsed while its raw provider still runs must
+  // retain that failure when shutdown begins, even if the provider later succeeds.
+  for (const prior of ["settled", "detached"] as const) {
+    const provider = `synthetic-prior-${prior}`;
+    const release = Promise.withResolvers<void>();
+    registerOAuthProvider({
+      id: provider,
+      name: "Synthetic prior refresh failure",
+      async login() { throw new Error("synthetic-login-forbidden"); },
+      async refreshToken(credential) {
+        if (prior === "settled") throw new Error("invalid_grant");
+        await release.promise;
+        return { ...credential, access: "synthetic-late-access", refresh: "synthetic-late-refresh", expires: Date.now() + 3_600_000 };
+      },
+    });
+    const storage = await NativeBrokerStorage.create(join(ctx.root, `prior-${prior}.db`), { refreshOAuthCredential: ctx.refreshOAuthCredential });
+    let broker: NativeBrokerHandle | undefined;
+    let draining: Promise<Response> | undefined;
+    try {
+      storage.upsertCredential(provider, {
+        type: "oauth", email: "prior@accounts.invalid", expires: Date.now() - 1_000,
+        access: "synthetic-prior-access", refresh: "synthetic-prior-refresh",
+      });
+      const row = storage.listStoredCredentials().find(entry => entry.provider === provider);
+      ctx.check(row, "quiesce-prior-credential-missing");
+      broker = startNativeBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [nativeBearer],
+        controlBearerToken: nativeBearer, disableRefresher: true });
+      const fetch = ctx.fetchTo(broker.url);
+      const headers = { authorization: `Bearer ${nativeBearer}` };
+      const failed = await fetch(`${broker.url}/v1/credential/${row.id}/refresh`, { method: "POST", headers });
+      ctx.check(failed.status === 500, "quiesce-prior-refresh-did-not-fail");
+      await failed.body?.cancel();
+      let completed = false;
+      draining = fetch(`${broker.url}/v1/control/quiesce`, { method: "POST", headers })
+        .then(response => { completed = true; return response; });
+      if (prior === "detached") {
+        let state = "active";
+        const deadline = Date.now() + 3_000;
+        while (state === "active" && Date.now() < deadline) {
+          const response = await fetch(`${broker.url}/v1/control/state`, { headers });
+          state = (await response.json() as { state: string }).state;
+          if (state === "active") await Bun.sleep(5);
+        }
+        ctx.check(state === "draining" && !completed, "quiesce-forgot-timed-out-provider");
+        release.resolve();
+      }
+      const response = await draining;
+      const result = await response.json() as { state: string };
+      ctx.check(prior === "settled"
+        ? response.status === 200 && result.state === "drained"
+        : response.status === 503 && result.state === "draining", "quiesce-prior-failure-accounting");
+      if (prior === "detached") {
+        const repeated = await fetch(`${broker.url}/v1/control/quiesce`, { method: "POST", headers });
+        ctx.check(repeated.status === 503, "quiesce-timeout-failure-not-sticky");
+        await repeated.body?.cancel();
+      }
+    } finally {
+      release.resolve();
+      await draining?.catch(() => {});
+      await broker?.close().catch(() => {});
+      await storage.drainRefreshes().catch(() => {});
+      storage.close();
+      unregisterOAuthProvider(provider);
+    }
+  }
+
+  // A concurrent read does not extend the lifetime of an already settled
+  // refresh failure. Only work still owned at admission closure can fail drain.
+  const failedProvider = "synthetic-overlap-failure";
+  const nestedProvider = "synthetic-overlap-handled-failure";
+  const usageProvider = "synthetic-overlap-usage";
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let nestedFailureHandled = false;
+  for (const id of [failedProvider, nestedProvider]) registerOAuthProvider({
+    id, name: "Synthetic settled failure",
+    async login() { throw new Error("synthetic-login-forbidden"); },
+    async refreshToken() { throw new Error("invalid_grant"); },
+  });
+  registerOAuthProvider({
+    id: usageProvider, name: "Synthetic pending usage",
+    async login() { throw new Error("synthetic-login-forbidden"); },
+  });
+  const storage = await NativeBrokerStorage.create(join(ctx.root, "overlapping-failure.db"), {
+    refreshOAuthCredential: ctx.refreshOAuthCredential,
+    usageProviderResolver: id => id === usageProvider ? {
+      id,
+      async fetchUsage() {
+        const row = storage.listStoredCredentials().find(entry => entry.provider === nestedProvider);
+        ctx.check(row, "quiesce-nested-credential-missing");
+        try { await storage.refreshCredentialById(row.id); }
+        catch { nestedFailureHandled = true; }
+        entered.resolve();
+        await release.promise;
+        return null;
+      },
+    } : undefined,
+  });
+  let broker: NativeBrokerHandle | undefined;
+  let usage: Promise<Response> | undefined;
+  let draining: Promise<Response> | undefined;
+  try {
+    for (const provider of [failedProvider, nestedProvider, usageProvider]) storage.upsertCredential(provider, {
+      type: "oauth", email: `${provider}@accounts.invalid`,
+      expires: provider === usageProvider ? Date.now() + 3_600_000 : 0,
+      access: "synthetic-overlap-access", refresh: "synthetic-overlap-refresh",
+    });
+    const row = storage.listStoredCredentials().find(entry => entry.provider === failedProvider);
+    ctx.check(row, "quiesce-overlap-credential-missing");
+    broker = startNativeBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [nativeBearer],
+      controlBearerToken: nativeBearer, disableRefresher: true });
+    const fetch = ctx.fetchTo(broker.url);
+    const headers = { authorization: `Bearer ${nativeBearer}` };
+    usage = fetch(`${broker.url}/v1/usage`, { headers });
+    await entered.promise;
+    ctx.check(nestedFailureHandled, "quiesce-nested-refresh-did-not-fail");
+    const failed = await fetch(`${broker.url}/v1/credential/${row.id}/refresh`, { method: "POST", headers });
+    ctx.check(failed.status === 500, "quiesce-overlap-refresh-did-not-fail");
+    await failed.body?.cancel();
+    let completed = false;
+    draining = fetch(`${broker.url}/v1/control/quiesce`, { method: "POST", headers })
+      .then(response => { completed = true; return response; });
+    let state = "active";
+    const deadline = Date.now() + 3_000;
+    while (state === "active" && Date.now() < deadline) {
+      const response = await fetch(`${broker.url}/v1/control/state`, { headers });
+      state = (await response.json() as { state: string }).state;
+      if (state === "active") await Bun.sleep(5);
+    }
+    ctx.check(state === "draining" && !completed, "quiesce-overlap-usage-not-owned");
+    release.resolve();
+    const usageResponse = await usage;
+    ctx.check(usageResponse.status === 200, "quiesce-overlap-usage-failed");
+    await usageResponse.body?.cancel();
+    const response = await draining;
+    const result = await response.json() as { state: string };
+    ctx.check(response.status === 200 && result.state === "drained", "quiesce-unrelated-settled-failure-poisoned-drain");
+  } finally {
+    release.resolve();
+    await usage?.catch(() => {});
+    await draining?.catch(() => {});
+    await broker?.close().catch(() => {});
+    await storage.drainRefreshes().catch(() => {});
+    storage.close();
+    unregisterOAuthProvider(failedProvider);
+    unregisterOAuthProvider(nestedProvider);
+    unregisterOAuthProvider(usageProvider);
   }
 });

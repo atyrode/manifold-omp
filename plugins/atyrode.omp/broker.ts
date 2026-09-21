@@ -2,7 +2,7 @@ import { InstanceServiceDescriptionSchema } from "@manifold/protocol";
 import { z } from "zod";
 import { projectAccounts } from "../api/accounts.ts";
 import { normalizeBrokerUsage } from "../api/usage.ts";
-import { BROKER_SERVICE_ID, ACCOUNTS_PLUGIN_ID, RuntimeAccountPoolSchema, type BrokerReference, type AccountReference, type RuntimeAccountPool, type ServicePin } from "../api/index.ts";
+import { BROKER_SERVICE_ID, ACCOUNTS_PLUGIN_ID, RuntimeAccountPoolSchema, type BrokerReference, type AccountReference, type RuntimeAccountPool, type ServicePin, type JobInferenceLimits } from "../api/index.ts";
 import { digestOf, OmpRefusal, type OmpContext } from "./machine-server.ts";
 
 export async function describeSharedBroker(ctx: OmpContext) {
@@ -85,10 +85,19 @@ export async function mutateCredential(ctx: OmpContext, reference: AccountRefere
   if (!z.strictObject({ ok: z.literal(true) }).safeParse(response.result).success) throw new OmpRefusal("invalid_service_result");
   return accountObservation(ctx, broker);
 }
-export async function currentGateway(ctx: OmpContext, machineId: string, expected?: ServicePin) {
+export async function currentGateway(ctx: OmpContext, machineId: string, expected?: ServicePin,
+  inference?: { limits: JobInferenceLimits; models: readonly string[] }) {
   const description = await ctx.services.describe({ machineId });
   const service = description.services.find(value => value.serviceId === "omp");
   if (!description.connected || !service || !["models", "stream"].every(operationId => service.operations.some(operation => operation.operationId === operationId && operation.ready))) throw new OmpRefusal("gateway_unavailable");
+  if (inference !== undefined) {
+    const stream = service.operations.find(operation => operation.operationId === "stream");
+    if (stream?.meter?.kind !== "pi-native-usage") throw new OmpRefusal("inference_meter_unavailable");
+    if (inference.limits.costMicros !== undefined &&
+      (!stream.prices || (!stream.prices.default &&
+        (inference.models.length === 0 || inference.models.some(model => !Object.hasOwn(stream.prices!.models, model))))))
+      throw new OmpRefusal("inference_price_unknown");
+  }
   const pin = { serviceId: service.serviceId, revision: service.revision, policySha256: service.policySha256 };
   if (expected && digestOf(pin) !== digestOf(expected)) throw new OmpRefusal("resources_changed");
   return pin;

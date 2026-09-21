@@ -21,8 +21,9 @@ beforeAll(async () => {
     recursive: true, verbatimSymlinks: true,
     filter: path => !basename(path).startsWith(".") && !["node_modules", "dist", "staging"].includes(basename(path)),
   });
-  // The prepared tree must retain every member, including its generated marker.
-  await cp(join(source, "node_modules"), join(fixture, "node_modules"), { recursive: true, verbatimSymlinks: true });
+  // Each private graph retains every member, including its generated receipt.
+  for (const graph of ["", "sdk-host"])
+    await cp(join(source, graph, "node_modules"), join(fixture, graph, "node_modules"), { recursive: true, verbatimSymlinks: true });
   const module = await import(join(fixture, "pack.ts"));
   fixturePack = module.pack;
 }, 180_000);
@@ -52,6 +53,36 @@ async function priorFamily(destination: string): Promise<Record<string, string>>
   await writeFile(join(destination, "stale-member", "retained.txt"), "prior nested bytes\n");
   for (const filename of publishedFiles) await writeFile(join(destination, filename), `prior ${filename}\n`);
   return snapshot(destination);
+}
+
+async function packWithReorderedAssets(destination: string) {
+  const script = `
+    const originalBuild = Bun.build;
+    let reordered = false;
+    Bun.build = async options => {
+      const result = await originalBuild(options);
+      if (typeof options.naming === "object" && options.naming.entry === "sdkHost.js") {
+        if (result.outputs.filter(output => output.kind === "asset").length < 2) throw new Error("Missing compiler assets");
+        result.outputs.reverse();
+        reordered = true;
+      }
+      return result;
+    };
+    const { fixture, destination } = JSON.parse(process.env.OMP_PACK_REORDER);
+    const { pack } = await import(fixture + "/pack.ts");
+    const bundles = await pack(destination);
+    if (!reordered) throw new Error("Compiler output ordering was not exercised");
+    process.stdout.write(JSON.stringify(bundles));
+  `;
+  const child = Bun.spawn([process.execPath, "--no-install", "--eval", script], {
+    cwd: fixture, stdin: "ignore", stdout: "pipe", stderr: "pipe",
+    env: { ...process.env, OMP_PACK_REORDER: JSON.stringify({ fixture, destination }) },
+  });
+  const [exit, stdout, stderr] = await Promise.all([
+    child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+  ]);
+  if (exit !== 0) throw new Error(`Reordered pack failed: ${stderr}`);
+  return JSON.parse(stdout) as readonly (PackResult & { readonly id: string })[];
 }
 
 for (const destinationKind of ["default", "caller"] as const) {
@@ -106,21 +137,19 @@ for (const destinationKind of ["default", "caller"] as const) {
         );
       }
       const firstBytes = await snapshot(destination);
-      const second = await fixturePack(destinationKind === "default" ? undefined : destination);
+      const second = await packWithReorderedAssets(destination);
       expect(second.map(({ id }) => id)).toEqual(family);
       expect(await snapshot(destination)).toEqual(firstBytes);
     }, 360_000);
   });
 }
 
-for (const dependency of ["@oh-my-pi/pi-ai", "@oh-my-pi/pi-wire"]) {
-  test(`same-version ${dependency} source tampering refuses publication`, async () => {
+for (const graph of ["", "sdk-host"]) for (const dependency of ["@oh-my-pi/pi-ai", "@oh-my-pi/pi-wire"]) {
+  test(`${graph || "baseline"} same-version ${dependency} tampering refuses publication`, async () => {
     const destination = join(scratch, "tampered-sdk");
     const previous = await priorFamily(destination);
-    const entrypoint = Bun.resolveSync(dependency, fixture);
+    const entrypoint = Bun.resolveSync(dependency, join(fixture, graph));
     const original = await readFile(entrypoint);
-    const manifest = JSON.parse(await readFile(join(fixture, "node_modules", dependency, "package.json"), "utf8"));
-    expect(manifest.version).toBe("18.1.14");
     try {
       await writeFile(entrypoint, Buffer.concat([original, Buffer.from("\n// changed installed SDK bytes\n")]));
       await expect(fixturePack(destination)).rejects.toThrow("SDK preparation");
@@ -131,15 +160,19 @@ for (const dependency of ["@oh-my-pi/pi-ai", "@oh-my-pi/pi-wire"]) {
   }, 180_000);
 }
 
-for (const [filename, refusal] of [["bun.lock", "Unreviewed bun.lock"], ["patches/@oh-my-pi%2Fpi-ai@18.1.14.patch", "Unreviewed pi-ai patch"]]) {
-  test(`${filename} drift refuses the previously prepared SDK`, async () => {
+for (const [filename, refusal] of [
+  ["bun.lock", "Unreviewed bun.lock"],
+  ["sdk-host/bun.lock", "Unreviewed bun.lock"],
+  ["patches/@oh-my-pi%2Fpi-ai@18.1.14.patch", "Unreviewed pi-ai patch"],
+] as const) {
+  test(`${filename} drift refuses the previously prepared graph`, async () => {
     const destination = join(scratch, "changed-input");
     const previous = await priorFamily(destination);
-    const file = join(fixture, filename!);
+    const file = join(fixture, filename);
     const original = await readFile(file);
     try {
       await writeFile(file, Buffer.concat([original, Buffer.from("\n")]));
-      await expect(fixturePack(destination)).rejects.toThrow(refusal!);
+      await expect(fixturePack(destination)).rejects.toThrow(refusal);
       expect(await snapshot(destination)).toEqual(previous);
     } finally {
       await writeFile(file, original);
@@ -161,10 +194,10 @@ test("a MANIFOLD_REV that does not name the sibling source refuses publication",
   }
 });
 
-test("missing preparation and a forged tree digest fail closed", async () => {
+for (const graph of ["", "sdk-host"]) test(`${graph || "baseline"} missing, forged and foreign preparation fails closed`, async () => {
   const destination = join(scratch, "missing-preparation");
   const previous = await priorFamily(destination);
-  const marker = join(fixture, "node_modules", ".omp-prepared-dependencies.json");
+  const marker = join(fixture, graph, "node_modules", ".omp-prepared-dependencies.json");
   const original = await readFile(marker);
   try {
     await rm(marker);
@@ -172,6 +205,10 @@ test("missing preparation and a forged tree digest fail closed", async () => {
     expect(await snapshot(destination)).toEqual(previous);
     const receipt = JSON.parse(original.toString("utf8"));
     await writeFile(marker, JSON.stringify({ ...receipt, treeSha256: "0".repeat(64) }));
+    await expect(fixturePack(destination)).rejects.toThrow("SDK preparation");
+    expect(await snapshot(destination)).toEqual(previous);
+    const other = join(fixture, graph === "" ? "sdk-host" : "", "node_modules", ".omp-prepared-dependencies.json");
+    await writeFile(marker, await readFile(other));
     await expect(fixturePack(destination)).rejects.toThrow("SDK preparation");
     expect(await snapshot(destination)).toEqual(previous);
   } finally {

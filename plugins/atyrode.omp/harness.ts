@@ -3,6 +3,7 @@ import type { ServerHarness, GuestCtx } from "@manifold/plugin-kit/server";
 import { PublicJobSchema } from "@manifold/protocol";
 import {
   OMP_PLUGIN_ID, OmpHarnessProfileSchema, OmpSessionRefSchema, SessionInputSchema, TargetSchema,
+  OmpHarnessTargetSchema,
 } from "../api/index.ts";
 import { prepareHarnessSession } from "./execution.ts";
 import { readDefaults } from "./state.ts";
@@ -18,7 +19,7 @@ export const harness: ServerHarness<GuestCtx> = {
   profileSchema: OmpHarnessProfileSchema,
   async launch(ctx, run, agent, rawTarget) {
     if (agent.harness !== OMP_PLUGIN_ID || run.agentId !== agent.agentId) throw new OmpRefusal("harness_binding_changed");
-    const target = TargetSchema.parse(rawTarget);
+    const target = OmpHarnessTargetSchema.parse(rawTarget);
     const profile = OmpHarnessProfileSchema.parse(agent.context.profile);
     const defaults = await readDefaults(ctx);
     const session = run.session === null ? undefined : OmpSessionRefSchema.parse(run.session);

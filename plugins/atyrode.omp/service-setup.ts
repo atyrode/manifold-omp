@@ -232,7 +232,11 @@ async function gatewayReview(
     ...candidates[0].runtime,
     input: { accountPool: { input: "accountPool" } },
   });
-  const replacement = buildGatewayPolicy(runtime);
+  if (runtime.installationRevision === undefined) throw new OmpRefusal("resources_changed");
+  const prices = args.prices === undefined
+    ? current.configuration.policies.find(policy => policy.serviceId === "omp")?.prices
+    : args.prices ?? undefined;
+  const replacement = buildGatewayPolicy(runtime, prices);
   const policies: ServicePolicy[] = current.configuration.policies.map(
     (policy) => (policy.serviceId === "omp" ? replacement : policy),
   );
@@ -260,6 +264,7 @@ async function gatewayReview(
       destination,
       expectedServiceRevision: args.expectedServiceRevision,
       runtime: pins,
+      prices: prices ?? null,
       reviewDigest: digestOf({
         actor: actor(ctx),
         destination,

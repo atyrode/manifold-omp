@@ -12,7 +12,6 @@ import {
   PROMPT_MAX_BYTES,
   SESSION_OPERATION_ID,
   SESSION_OUTPUT_NAME,
-  SESSIONS_GUEST_PATH,
   createOmpClient,
   type ActionInput,
   type ActionReply,
@@ -23,6 +22,7 @@ import {
 import { digestOf, type OmpContext } from "../atyrode.omp/machine-server.ts";
 import { handlers as rootHandlers } from "../atyrode.omp/server.ts";
 import rootManifest from "../atyrode.omp/manifest.json";
+import sdkRuntimeArtifacts from "../sdk-host/runtime-artifacts.json";
 
 type JobInput = Record<string, string | number | boolean>;
 type JobNode = { kind: "job"; machineId: string; operationId: string; jobId: string };
@@ -32,12 +32,15 @@ type PostedJob = {
   input: JobInput;
   outputs: { name: string; locationId: string; components: string[] }[];
   inputs?: JobInputBinding[];
+  limits?: PublicJob["limits"];
 };
 type JobOverrides = {
   state?: "exited" | "started" | "cancelled" | "interrupted";
   exitCode?: number | null;
   door?: string;
   inputs?: JobInputBinding[];
+  limits?: PublicJob["limits"] | null;
+  resultLimits?: PublicJob["limits"];
 };
 interface OmpClient {
   call<K extends OmpAction>(name: K, input: ActionInput<K>): Promise<ActionReply<K>>;
@@ -185,6 +188,7 @@ function publicJob(
     ...pins,
     inputDigest,
     ...(overrides.inputs === undefined ? {} : { inputs: overrides.inputs }),
+    ...(overrides.limits == null ? {} : { limits: overrides.limits }),
     state,
     nextInputSeq: null,
     result:
@@ -200,7 +204,7 @@ function publicJob(
             startedAt: 1,
             finishedAt: 2,
             usage: null,
-            limits: {
+            limits: overrides.resultLimits ?? overrides.limits ?? {
               timeoutMs: launch.limits.timeoutMs,
               memoryBytes: launch.limits.memoryBytes,
               processes: launch.limits.processes,
@@ -277,6 +281,7 @@ function fixture(): Fixture {
     const next = publicJob(jobId, job.operationId, job.inputDigest, {
       door: doors.get(jobId)!,
       ...(bound.get(jobId) === undefined ? {} : { inputs: bound.get(jobId)! }),
+      limits: job.limits,
       ...overrides,
     });
     if (next.result && job.result) next.result.outputs = job.result.outputs;
@@ -325,6 +330,7 @@ function fixture(): Fixture {
         const job = publicJob(args.jobId, args.operationId, digestOf(args.input), {
           door,
           ...(args.inputs === undefined ? {} : { inputs: args.inputs }),
+          limits: args.limits,
         });
         jobs.set(args.jobId, job);
         return job;
@@ -394,6 +400,10 @@ function fixture(): Fixture {
               invocable: true,
               ready: true,
               reason: null,
+              ...(operationId === "stream" ? {
+                meter: { kind: "pi-native-usage" as const },
+                prices: { models: { "anthropic/claude-sonnet-4-5": { inputPerMillion: 3_000_000, outputPerMillion: 15_000_000 } } },
+              } : {}),
             })),
           },
         ],
@@ -440,7 +450,7 @@ function fixture(): Fixture {
   };
 }
 
-async function reviewDigestOf(client: OmpClient, input = session): Promise<string> {
+async function reviewDigestOf(client: OmpClient, input: ActionInput<"reviewSession"> = session): Promise<string> {
   const reviewed = await client.call("reviewSession", input);
   if ("refused" in reviewed) throw new Error(reviewed.refused);
   return reviewed.reviewDigest;
@@ -454,56 +464,6 @@ async function run(f: Fixture): Promise<PublicJob> {
   return job;
 }
 
-test("the interactive launch operation is untouched by the one-shot", () => {
-  // A terminal must never declare the run location: its lease directory is provisioned
-  // out of band, and a launch that named it would refuse before the terminal opened.
-  expect(launch.outputs).toEqual([]);
-  expect(launch.stdin).toBe(true);
-  expect(launch.locations.map((location) => location.locationId)).toEqual([
-    "atyrode.omp.workspace",
-    "atyrode.omp.sessions",
-  ]);
-  expect(argvFor(launch, { hasPrompt: true, planYolo: false, prompt: "hi" })).toEqual([
-    "--session-dir",
-    SESSIONS_GUEST_PATH,
-    "--config",
-    "/home/job/.omp/agent/config.yml",
-    "--",
-    "hi",
-  ]);
-});
-
-test("the one-shot operation leases a bounded run directory and never opens stdin", () => {
-  expect(oneShot.outputs).toEqual([SESSION_OUTPUT_NAME]);
-  // A binding can only name an input the operation declares.
-  expect(oneShot.inputs).toEqual(["material"]);
-  // Babel's prepare seals a material archive of up to 512 MiB; the default would have been
-  // this operation's own outputBytes, which measures what it writes, not what it is handed.
-  expect(oneShot.limits.inputBytes).toBe(536870912);
-  expect(launch.inputs).toBeUndefined();
-  // `omp -p` reads stdin to EOF before its first turn; the owner ends the pipe at spawn
-  // only for an operation that declares no stdin.
-  expect(oneShot.stdin).toBe(false);
-  // A named output must lease a bounded tmpfs, which only the runtime anchor provides.
-  expect(machine.locations[RUNS_LOCATION_ID]?.anchor).toBe("runtime");
-  expect(oneShot.locations.map((location) => location.locationId)).toEqual([
-    "atyrode.omp.workspace",
-    RUNS_LOCATION_ID,
-  ]);
-  expect(oneShot.input).toEqual(launch.input);
-  expect(argvFor(oneShot, { hasPrompt: true, planYolo: true, prompt: "hi" })).toEqual([
-    "--session-dir",
-    SESSION_GUEST_PATH,
-    "--config",
-    "/home/job/.omp/agent/config.yml",
-    "-p",
-    "--mode",
-    "json",
-    "--plan-yolo",
-    "--",
-    "hi",
-  ]);
-});
 
 test("runSession posts the reviewed session as a one-shot job that retains its transcript", async () => {
   const f = fixture();
@@ -517,32 +477,8 @@ test("runSession posts the reviewed session as a one-shot job that retains its t
     { name: SESSION_OUTPUT_NAME, locationId: RUNS_LOCATION_ID, components: [posted.jobId] },
   ]);
   expect(job.inputDigest).toBe(digestOf(posted.input));
-  expect(argvFor(oneShot, posted.input)).toEqual([
-    "--session-dir",
-    SESSION_GUEST_PATH,
-    "--config",
-    "/home/job/.omp/agent/config.yml",
-    "-p",
-    "--mode",
-    "json",
-    "--",
-    session.prompt,
-  ]);
 });
 
-test("a reviewed session composes one input, whichever way it is placed", async () => {
-  const f = fixture();
-  const prepared = await f.client.call("prepareSession", {
-    ...session,
-    reviewDigest: await reviewDigestOf(f.client),
-  });
-  if ("refused" in prepared) throw new Error(prepared.refused);
-  const job = await run(f);
-  // The review covers the content; the door covers the placement, and nothing else moves.
-  expect(f.posted[0]!.input).toEqual(prepared.runtime.input);
-  expect(prepared.runtime.operationId).toBe(LAUNCH_OPERATION_ID);
-  expect(job.operationId).toBe(SESSION_OPERATION_ID);
-});
 
 test("runSession refuses a stale review", async () => {
   const f = fixture();
@@ -1004,4 +940,198 @@ test("the bound counts bytes, not characters", async () => {
   });
   if ("refused" in reviewed) throw new Error(reviewed.refused);
   expect(reviewed.destination).toEqual(target);
+});
+
+test("set reviews spend on the same explicit selection, but not on a changed catalog or forged optional binding", async () => {
+  const f = fixture();
+  const deployment = structuredClone(await f.ctx.jobs.describeDeployment({ machineId: target.machineId, pluginId: OMP_PLUGIN_ID }));
+  deployment.installation!.machine = MachineHalfSchema.parse({ ...deployment.installation!.machine,
+    tools: { ...deployment.installation!.machine.tools, bun: sdkRuntimeArtifacts.tools.bun, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
+  f.ctx.jobs.describeDeployment = async () => deployment;
+  f.ctx.jobs.inspectInputs = async ({ inputs }) => ({ inputs: inputs.map(input => ({
+    ...input, sha256: "a".repeat(64), bytes: 4096, files: 1,
+  })) });
+  const skill = { id: "alpha", name: "alpha", title: "Alpha", purpose: "Reviewed instructions", revision: "one",
+    source: { jobId: "reviewed-source", output: "skill", sha256: "a".repeat(64) },
+    license: { spdx: "MIT" }, review: { reviewedBy: "owner", reviewedAt: 1, reference: "review" }, conflicts: [] };
+  const catalog = await f.client.call("writeSkillCatalog", { machineId: target.machineId,
+    expectedRevision: 0, skills: [skill], sets: [{ id: "pair", title: "Set", skillIds: ["alpha"] }] });
+  if ("refused" in catalog) throw new Error(catalog.refused);
+  const reviewed = await f.client.call("reviewSession", { ...session,
+    skills: { mode: "select", expectedCatalogRevision: catalog.revision, skillIds: ["alpha"], setIds: ["pair"] } });
+  if ("refused" in reviewed) throw new Error(reviewed.refused);
+  const selected = { ...session, skills: { mode: "select" as const,
+    expectedCatalogRevision: catalog.revision, skillIds: ["alpha"], setIds: [] }, reviewDigest: reviewed.reviewDigest };
+  const prepared = await f.client.call("prepareSession", selected);
+  if ("refused" in prepared) throw new Error(prepared.refused);
+  expect(prepared.runtime.inputs).toEqual([{ name: "optionalSkill0", from: { jobId: "reviewed-source", output: "skill" } }]);
+  expect(await f.client.call("runSession", { ...selected, inputs: [{ name: "optionalSkill0", from: { jobId: "other", output: "skill" } }] }))
+    .toEqual({ refused: "omp_invalid_material_input" });
+  const job = await f.client.call("runSession", { ...selected, inputs: [material] });
+  if ("refused" in job) throw new Error(job.refused);
+  expect(job.inputs).toEqual([material, ...prepared.runtime.inputs!]);
+  const fresh = await f.client.call("reviewSession", session);
+  if ("refused" in fresh) throw new Error(fresh.refused);
+  expect(fresh.skills).toEqual({ mode: "preserve", catalogRevision: null, selected: [] });
+  await f.client.call("writeSkillCatalog", { machineId: target.machineId, expectedRevision: catalog.revision, skills: [skill], sets: [] });
+  expect(await f.client.call("prepareSession", selected)).toEqual({ refused: "omp_stale_skill_catalog" });
+});
+
+test("restricted review binds exact tools and disables ambient skills without changing ordinary launch", async () => {
+  const f = fixture();
+  const deployment = structuredClone(await f.ctx.jobs.describeDeployment({ machineId: target.machineId, pluginId: OMP_PLUGIN_ID }));
+  deployment.installation!.machine = MachineHalfSchema.parse({ ...deployment.installation!.machine,
+    tools: { ...deployment.installation!.machine.tools, bun: sdkRuntimeArtifacts.tools.bun, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
+  f.ctx.jobs.describeDeployment = async () => deployment;
+  const automation = { mode: "restricted" as const, toolNames: ["read" as const], delegation: "disabled" as const };
+  // Code composes passive task routes even when delegation is disabled.
+  const input = { ...session, overlay: { ...session.overlay,
+    task: { agentModelOverrides: { task: "anthropic/claude-sonnet-4-5" }, agentAdvisor: { task: "off" as const }, prewalk: false } } };
+  const reviewed = await f.client.call("reviewSession", { ...input, automation });
+  if ("refused" in reviewed) throw new Error(reviewed.refused);
+  expect(reviewed.automation).toEqual(automation);
+  expect(reviewed.skills).toEqual({ mode: "disabled", catalogRevision: null, selected: [] });
+  expect(await f.client.call("prepareSession", { ...input, automation: { ...automation, toolNames: [] }, reviewDigest: reviewed.reviewDigest }))
+    .toEqual({ refused: "omp_review_changed" });
+  const prepared = await f.client.call("prepareSession", { ...input, automation, reviewDigest: reviewed.reviewDigest });
+  if ("refused" in prepared) throw new Error(prepared.refused);
+  const job = await f.client.call("runSession", { ...input, automation, reviewDigest: reviewed.reviewDigest });
+  if ("refused" in job) throw new Error(job.refused);
+  const ordinary = await f.client.call("reviewSession", session);
+  if ("refused" in ordinary) throw new Error(ordinary.refused);
+  expect(ordinary.automation).toEqual({ mode: "ordinary" });
+  expect(ordinary.skills.mode).toBe("preserve");
+});
+
+for (const platform of ["linux-x64", "linux-arm64"] as const) {
+  for (const alias of ["sdk-pi-natives", "bun"] as const) {
+    for (const field of ["sha256", "entrySha256"] as const) {
+      test(`SDK admission refuses ${platform} ${alias} ${field} drift before dispatch`, async () => {
+        const f = fixture();
+        const deployment = structuredClone(await f.ctx.jobs.describeDeployment({ machineId: target.machineId, pluginId: OMP_PLUGIN_ID }));
+        const machine = MachineHalfSchema.parse({ ...deployment.installation!.machine,
+          tools: { ...deployment.installation!.machine!.tools, bun: sdkRuntimeArtifacts.tools.bun,
+            "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
+        deployment.installation!.machine = machine;
+        f.ctx.jobs.describeDeployment = async () => deployment;
+        const input = { ...session, automation: { mode: "restricted" as const, toolNames: [], delegation: "disabled" as const } };
+        const reviewDigest = await reviewDigestOf(f.client, input);
+        machine.tools![alias]![platform]![field] = "f".repeat(64);
+        expect(await f.client.call("reviewSession", input)).toEqual({ refused: "omp_sdk_runtime_unsupported" });
+        expect(await f.client.call("runSession", { ...input, reviewDigest })).toEqual({ refused: "omp_sdk_runtime_unsupported" });
+        expect(f.posted).toEqual([]);
+      });
+    }
+  }
+}
+
+test("unsupported restricted tool, duplicate tool and delegation requests refuse rather than widen", async () => {
+  const f = fixture();
+  for (const automation of [
+    { mode: "restricted", toolNames: ["task"], delegation: "disabled" },
+    { mode: "restricted", toolNames: ["read", "read"], delegation: "disabled" },
+    { mode: "restricted", toolNames: [], delegation: "enabled" },
+    { mode: "ordinary", toolNames: ["read"], delegation: "disabled" },
+  ]) {
+    expect(await rootHandlers.reviewSession!(f.ctx, { ...session, automation })).toEqual({ refused: "omp_automation_unsupported" });
+  }
+  expect(await f.client.call("reviewSession", { ...session, planYolo: true,
+    automation: { mode: "restricted", toolNames: [], delegation: "disabled" } }))
+    .toEqual({ refused: "omp_restricted_delegation_unsupported" });
+  expect(await f.client.call("reviewSession", { ...session,
+    overlay: { ...session.overlay, task: { agentAdvisor: { task: "on" } } },
+    automation: { mode: "restricted", toolNames: [], delegation: "disabled" } }))
+    .toEqual({ refused: "omp_restricted_delegation_unsupported" });
+});
+
+test("inference ceilings cannot be changed after review or raised above declared admission limits", async () => {
+  const f = fixture();
+  const deployment = structuredClone(await f.ctx.jobs.describeDeployment({ machineId: target.machineId, pluginId: OMP_PLUGIN_ID }));
+  deployment.installation!.machine!.operations[SESSION_OPERATION_ID]!.limits.inference = { calls: 3, costMicros: 50_000 };
+  f.ctx.jobs.describeDeployment = async () => deployment;
+  const input = { ...session, inferenceLimits: { calls: 2, costMicros: 20_000 } };
+  const reviewDigest = await reviewDigestOf(f.client, input);
+  expect(await f.client.call("runSession", {
+    ...input, inferenceLimits: { calls: 3, costMicros: 20_000 }, reviewDigest,
+  })).toEqual({ refused: "omp_review_changed" });
+  const raised = { ...input, inferenceLimits: { calls: 4 } };
+  expect(await f.client.call("runSession", {
+    ...raised, reviewDigest: await reviewDigestOf(f.client, raised),
+  })).toEqual({ refused: "omp_inference_limit_exceeded" });
+  expect(f.posted).toEqual([]);
+  const admitted = await f.client.call("runSession", { ...input, reviewDigest });
+  if ("refused" in admitted) throw new Error(admitted.refused);
+  expect(admitted.limits?.inference).toEqual(input.inferenceLimits);
+  f.amend(admitted.jobId, { state: "started", limits: null });
+  expect(await f.client.call("readSession", { ...target, jobId: admitted.jobId }))
+    .toEqual({ refused: "omp_provenance_changed" });
+  const stopped = await f.client.call("cancelSession", { ...target, jobId: admitted.jobId });
+  if ("refused" in stopped) throw new Error(stopped.refused);
+  expect(f.cancelled).toEqual([admitted.jobId]);
+});
+
+test("settled inference receipts require unchanged executed limits while cancellation bypasses only limits", async () => {
+  const f = fixture();
+  const input = { ...session, inferenceLimits: { calls: 2, costMicros: 20_000 } };
+  const admitted = await f.client.call("runSession", {
+    ...input, reviewDigest: await reviewDigestOf(f.client, input),
+  });
+  if ("refused" in admitted) throw new Error(admitted.refused);
+  f.seal(admitted.jobId, ustar([[transcriptName, transcript]]));
+  const valid = await f.client.call("readSession", { ...target, jobId: admitted.jobId });
+  if ("refused" in valid) throw new Error(valid.refused);
+  expect(valid.session).toEqual(receipt);
+  const limits = admitted.result!.limits;
+  for (const inference of [undefined, { ...input.inferenceLimits, calls: 3 }]) {
+    f.amend(admitted.jobId, { resultLimits: { ...limits, inference } });
+    expect(await f.client.call("readSession", { ...target, jobId: admitted.jobId }))
+      .toEqual({ refused: "omp_provenance_changed" });
+    const stopped = await f.client.call("cancelSession", { ...target, jobId: admitted.jobId });
+    if ("refused" in stopped) throw new Error(stopped.refused);
+    expect(stopped.job.jobId).toBe(admitted.jobId);
+  }
+  expect(f.cancelled).toEqual([admitted.jobId, admitted.jobId]);
+  f.amend(admitted.jobId, { resultLimits: limits });
+  const restored = await f.client.call("readSession", { ...target, jobId: admitted.jobId });
+  if ("refused" in restored) throw new Error(restored.refused);
+  expect(restored.session).toEqual(receipt);
+  f.amend(admitted.jobId, {
+    resultLimits: { ...limits, inference: undefined },
+    inputs: [{ name: "material", from: { jobId: "another-job", output: "material" } }],
+  });
+  expect(await f.client.call("cancelSession", { ...target, jobId: admitted.jobId }))
+    .toEqual({ refused: "omp_provenance_changed" });
+  expect(f.cancelled).toEqual([admitted.jobId, admitted.jobId]);
+});
+
+test("bounded review refuses missing metering or unpriced configured models before dispatch", async () => {
+  const f = fixture();
+  const description = await f.ctx.services.describe({ machineId: target.machineId });
+  const input = { ...session, inferenceLimits: { calls: 1, costMicros: 20_000 } };
+  f.ctx.services.describe = async () => ({
+    ...description, services: description.services.map(service => ({
+      ...service, operations: service.operations.map(({ meter: _meter, prices: _prices, ...operation }) => operation),
+    })),
+  });
+  expect(await f.client.call("reviewSession", input)).toEqual({ refused: "omp_inference_meter_unavailable" });
+  f.ctx.services.describe = async () => ({
+    ...description, services: description.services.map(service => ({
+      ...service, operations: service.operations.map(({ prices: _prices, ...operation }) => operation),
+    })),
+  });
+  expect(await f.client.call("reviewSession", input)).toEqual({ refused: "omp_inference_price_unknown" });
+  expect(f.posted).toEqual([]);
+});
+
+test("cost review prices the served model rather than its thinking suffix", async () => {
+  const f = fixture();
+  const input = { ...session, inferenceLimits: { costMicros: 20_000 },
+    overlay: { modelRoles: { default: "anthropic/claude-sonnet-4-5:high" } } };
+  const reviewDigest = await reviewDigestOf(f.client, input);
+  const admitted = await f.client.call("runSession", { ...input, reviewDigest });
+  if ("refused" in admitted) throw new Error(admitted.refused);
+  expect(admitted.limits?.inference?.costMicros).toBe(20_000);
+  expect(await f.client.call("reviewSession", { ...input,
+    overlay: { modelRoles: { default: "anthropic/claude-opus-4-1:high" } } }))
+    .toEqual({ refused: "omp_inference_price_unknown" });
 });

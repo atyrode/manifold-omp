@@ -1,15 +1,15 @@
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import type { AuthBrokerServerHandle } from "@oh-my-pi/pi-ai/auth-broker/server";
+import type { NativeBrokerHandle } from "../../workers/broker/server.ts";
 import type { RemoteAuthCredentialStore as RemoteStore } from "@oh-my-pi/pi-ai/auth-broker/remote-store";
 import { runSdkScenario, type SdkScenarioContext } from "./isolated-sdk.ts";
 
 await runSdkScenario(async (ctx: SdkScenarioContext) => {
   // Load the actual SDK only after private environment and network isolation.
-  const { AuthStorage } = await import("@oh-my-pi/pi-ai/auth-storage");
+  const { NativeBrokerStorage } = await import("../../workers/broker/storage.ts");
   const { AuthBrokerClient } = await import("@oh-my-pi/pi-ai/auth-broker/client");
   const { RemoteAuthCredentialStore } = await import("@oh-my-pi/pi-ai/auth-broker/remote-store");
-  const { startAuthBroker } = await import("@oh-my-pi/pi-ai/auth-broker/server");
+  const { startNativeBroker } = await import("../../workers/broker/server.ts");
   const { registerOAuthProvider, unregisterOAuthProvider } = await import("@oh-my-pi/pi-ai/registry/oauth/index");
   const provider = "synthetic-mutation-ordering";
   const bearer = "SYNTHETIC-MUTATION-BEARER";
@@ -55,14 +55,14 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
             return operation.startsWith("delete") ? park(response) : response;
           }
         }
-        const storage = await AuthStorage.create(join(ctx.root, `${operation}-${later}.db`));
-        let broker: AuthBrokerServerHandle | undefined;
+        const storage = await NativeBrokerStorage.create(join(ctx.root, `${operation}-${later}.db`), { refreshOAuthCredential: ctx.refreshOAuthCredential });
+        let broker: NativeBrokerHandle | undefined;
         let remote: RemoteStore | undefined;
         let pending: Promise<unknown> | undefined;
         const observer: { accesses?: string[] } = {};
         try {
           storage.upsertCredential(provider, credential("synthetic-initial"));
-          broker = startAuthBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [bearer], disableRefresher: true });
+          broker = startNativeBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [bearer], disableRefresher: true });
           const fixtureFetch = ctx.fetchTo(broker.url);
           const fetchImpl: typeof fetch = Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
             const url = new URL(input instanceof Request ? input.url : String(input));

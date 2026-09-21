@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   DeploymentProgressSchema,
   JobInputBindingSchema,
+  JobInferenceLimitsSchema,
   PublicJobSchema,
   TerminalRuntimeSchema,
 } from "./native.ts";
@@ -22,12 +23,19 @@ import {
 } from "./probe.ts";
 import { PermittedUsageSnapshotSchema } from "./usage.ts";
 import { SessionReceiptSchema, SessionSilenceSchema } from "./session.ts";
+import { SkillCatalogSchema, SkillCatalogContentsSchema, SkillSelectionSchema, SkillReviewSchema } from "./skills.ts";
+import { RestrictedAutomationSchema, AutomationReviewSchema } from "./automation.ts";
+export * from "./automation.ts";
+export * from "./skills.ts";
 export * from "./contracts.ts";
 export * from "./probe.ts";
 export * from "./session.ts";
 export {
   DeploymentProgressSchema,
   JobInputBindingSchema,
+  JobInferenceLimitsSchema,
+  type JobInferenceLimits,
+  JobLimitsSchema,
   PublicJobSchema,
   TerminalRuntimeSchema,
   type JobInputBinding,
@@ -51,6 +59,7 @@ export const VALIDATE_WORKSPACE_OPERATION_ID = `${OMP_PLUGIN_ID}.validate-worksp
 export const INVENTORY_OPERATION_ID = `${OMP_PLUGIN_ID}.inventory`;
 export const BENCHMARK_OPERATION_ID = `${OMP_PLUGIN_ID}.benchmark`;
 export const LAUNCH_OPERATION_ID = `${OMP_PLUGIN_ID}.launch`;
+export const RESUME_OPERATION_ID = `${OMP_PLUGIN_ID}.resume`;
 /** The one-shot sibling of `launch`: no stdin, its own bounded output lease. */
 export const SESSION_OPERATION_ID = `${OMP_PLUGIN_ID}.session`;
 /** A bound output name, never the implicit `stdout`/`stderr` streams. */
@@ -71,6 +80,7 @@ const id = z.string().min(1).max(128);
 const empty = z.strictObject({});
 export const TargetSchema = z.strictObject({ containerId: id, machineId: id });
 export type Target = z.infer<typeof TargetSchema>;
+export const OmpHarnessTargetSchema = TargetSchema.extend({ skills: SkillSelectionSchema.optional(), automation: RestrictedAutomationSchema.optional() });
 export const OmpSessionRefSchema = z.strictObject({
   harness: z.literal(OMP_PLUGIN_ID),
   sessionId: z.uuid(),
@@ -247,6 +257,9 @@ export const SessionInputSchema = executionInput.extend({
       "prompt exceeds 44 KiB",
     ),
   planYolo: z.boolean(),
+  skills: SkillSelectionSchema.optional(),
+  automation: RestrictedAutomationSchema.optional(),
+  inferenceLimits: JobInferenceLimitsSchema.refine(value => Object.keys(value).length > 0, "empty inference limits").optional(),
 });
 /** Durable dials share the exact validated launch settings; paths and credentials
  * are deliberately not part of a profile. Defaults are reviewed at each launch. */
@@ -255,12 +268,18 @@ export const OmpHarnessProfileSchema = SessionInputSchema.omit({
   machineId: true,
   expectedDefaultsRevision: true,
   prompt: true,
+  skills: true,
+  automation: true,
+  inferenceLimits: true,
 });
 export type OmpHarnessProfile = z.infer<typeof OmpHarnessProfileSchema>;
 export const SessionReviewSchema = ReviewSchema.extend({
   defaultsRevision: revision,
   effectiveOverlay: OverlaySchema,
   accountPool: RuntimeAccountPoolSchema,
+  skills: SkillReviewSchema,
+  automation: AutomationReviewSchema,
+  inferenceLimits: JobInferenceLimitsSchema.optional(),
 });
 export const PreparedSessionSchema = z
   .strictObject({
@@ -272,10 +291,14 @@ export const PreparedSessionSchema = z
     message: "runtime destination does not match review",
   });
 export const PreparedHarnessSessionSchema = PreparedSessionSchema.safeExtend({
+  runtime: TerminalRuntimeSchema.safeExtend({ session: OmpSessionRefSchema }),
   session: OmpSessionRefSchema,
 }).refine(value =>
   value.session.machineId === value.destination.machineId &&
-  value.runtime.input.sessionId === value.session.sessionId,
+  value.runtime.input.sessionId === value.session.sessionId &&
+  value.runtime.session.harness === value.session.harness &&
+  value.runtime.session.machineId === value.session.machineId &&
+  value.runtime.session.sessionId === value.session.sessionId,
   { message: "harness session does not match admitted runtime" },
 );
 export const ResumeSessionInputSchema = z.strictObject({
@@ -284,13 +307,25 @@ export const ResumeSessionInputSchema = z.strictObject({
   containerId: id.optional(),
   accountPool: RuntimeAccountPoolSchema.optional(),
   overlay: OverlaySchema.optional(),
-}).describe("Resume an existing OMP transcript in an interactive terminal without an Agent. Omitted settings use current plugin defaults and currently enabled broker credentials for the configured providers. Explicit overlay keys replace default keys; an explicit accountPool is used exactly. Preparation authorizes the machine runtime only; terminal placement independently authorizes its container and terminal.");
+  skills: SkillSelectionSchema.optional(),
+  automation: RestrictedAutomationSchema.optional(),
+  overrides: z.strictObject({
+    model: modelReference.optional(),
+    thinking: z.union([ThinkingLevelSchema, z.literal("off"), z.literal("auto")]).optional(),
+  }).refine(value => value.model !== undefined || value.thinking !== undefined, "empty resume overrides").optional(),
+}).describe("Resume an existing OMP transcript without an Agent. Omitted selectors preserve persisted exact state. A bare model override preserves thinking; a model suffix selects thinking unless an explicit thinking field takes precedence. Missing, ambiguous, unavailable or incompatible state refuses before inference. Overlay configures the sealed runtime and an explicit accountPool is used exactly. Placement independently authorizes its container and terminal.");
 export const PreparedResumeSessionSchema = z.strictObject({
   machineId: id,
   sessionId: z.uuid(),
-  runtime: TerminalRuntimeSchema,
+  runtime: TerminalRuntimeSchema.safeExtend({
+    pluginId: z.literal(OMP_PLUGIN_ID),
+    operationId: z.literal(RESUME_OPERATION_ID),
+    session: OmpSessionRefSchema,
+  }),
 }).refine(value => value.runtime.machineId === value.machineId &&
-  value.runtime.input.sessionId === value.sessionId, {
+  value.runtime.input.sessionId === value.sessionId &&
+  value.runtime.session.machineId === value.machineId &&
+  value.runtime.session.sessionId === value.sessionId, {
   message: "resume session does not match admitted runtime",
 });
 export const PreparedSignInSchema = z
@@ -332,13 +367,27 @@ export const AccountRuntimeReviewSchema = z.strictObject({
   signIn: ResourcePinsSchema,
   reviewDigest: digest,
 });
+/** Reviewed policy prices are micro-dollars per million tokens, not live account quota. */
+const gatewayModelPrice = z.strictObject({
+  inputPerMillion: z.number().int().nonnegative().max(1_000_000_000_000),
+  outputPerMillion: z.number().int().nonnegative().max(1_000_000_000_000),
+  cachedInputPerMillion: z.number().int().nonnegative().max(1_000_000_000_000).optional(),
+});
+export const GatewayPricesSchema = z.strictObject({
+  default: gatewayModelPrice.optional(),
+  models: z.record(z.string().min(1).max(256), gatewayModelPrice)
+    .refine(value => Object.keys(value).length <= 256),
+});
 const gatewayReviewInput = TargetSchema.extend({
   expectedServiceRevision: id.nullable(),
+  // Omission retains the existing schedule; null explicitly removes it.
+  prices: GatewayPricesSchema.nullable().optional(),
 });
 export const GatewayReviewSchema = z.strictObject({
   destination: TargetSchema,
   expectedServiceRevision: id.nullable(),
   runtime: ResourcePinsSchema,
+  prices: GatewayPricesSchema.nullable(),
   reviewDigest: digest,
 });
 export const GatewaySetupSchema = z.strictObject({
@@ -364,6 +413,11 @@ export const rootActionSchemas = {
       overlay: OverlaySchema,
     }),
     result: DefaultsSchema,
+  },
+  readSkillCatalog: { input: TargetSchema, result: SkillCatalogSchema },
+  writeSkillCatalog: {
+    input: SkillCatalogContentsSchema.safeExtend({ machineId: id, expectedRevision: revision }),
+    result: SkillCatalogSchema,
   },
   describeDestination: { input: TargetSchema, result: DestinationSchema },
   reviewWorkspace: { input: workspaceInput, result: ReviewSchema },
