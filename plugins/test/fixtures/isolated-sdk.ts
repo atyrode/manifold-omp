@@ -74,14 +74,30 @@ export async function runSdkScenario(run: (context: SdkScenarioContext) => Promi
   process.umask(0o077);
   let outbound = 0;
   const originalFetch = globalThis.fetch;
+  const originalServe = Bun.serve;
+  const fixtureOrigins = new Set<string>();
   const blocked = (): never => { outbound++; throw new ScenarioFailure("unexpected-network-request"); };
   let outcome: { ok: boolean; code?: string };
   try {
     const root = process.env.OMP_SDK_SCENARIO_ROOT;
     if (!root || process.cwd() !== join(root, "cwd") || process.env.HOME !== join(root, "home")
       || process.env.PI_CODING_AGENT_DIR !== join(root, "agent") || !process.send) throw new ScenarioFailure("missing-child-isolation");
+    // Production code uses ordinary fetch even for its private broker hop.
+    // Admit only loopback listeners actually created in this isolated child,
+    // never arbitrary localhost ports, host services, redirects or providers.
+    Bun.serve = new Proxy(originalServe, {
+      apply(target, receiver, args) {
+        const server = Reflect.apply(target, receiver, args) as Bun.Server<unknown>;
+        if (server.hostname === "127.0.0.1" && server.port) fixtureOrigins.add(`http://127.0.0.1:${server.port}`);
+        return server;
+      },
+    });
     Object.defineProperty(globalThis, "fetch", {
-      value: Object.assign(blocked, { preconnect: blocked }), configurable: false, writable: false,
+      value: Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        if (!fixtureOrigins.has(url.origin)) return blocked();
+        return originalFetch(input, { ...init, redirect: "error" });
+      }, { preconnect: blocked }), configurable: false, writable: false,
     });
     const { setTransports } = await import("@oh-my-pi/pi-utils/logger");
     setTransports({ console: false, file: false });
@@ -106,6 +122,9 @@ export async function runSdkScenario(run: (context: SdkScenarioContext) => Promi
     outcome = { ok: true };
   } catch (error) {
     outcome = { ok: false, code: error instanceof ScenarioFailure ? error.code : "scenario-runtime-error" };
+  } finally {
+    Bun.serve = originalServe;
+    fixtureOrigins.clear();
   }
   if (!process.send || !process.connected) process.exit(1);
   const delivered = await new Promise<boolean>(resolve => {

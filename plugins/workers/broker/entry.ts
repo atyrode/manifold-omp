@@ -1,8 +1,8 @@
 import { Console } from "node:console";
 import { writeSync } from "node:fs";
 import { openWorkerContext, type WorkerContext } from "@manifold/sdk/worker";
-import type { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
-import type { AuthBrokerServerHandle } from "@oh-my-pi/pi-ai/auth-broker/server";
+import type { NativeBrokerStorage } from "./storage.ts";
+import type { NativeBrokerHandle } from "./server.ts";
 import { isolateEnvironment, readBrokerInputs } from "./inputs.ts";
 
 // No upstream runtime imports before the broker's output/error containment.
@@ -16,8 +16,8 @@ process.stdout.write = silentWrite;
 process.stderr.write = silentWrite;
 globalThis.console = Object.assign(new Console({ stdout: process.stdout, stderr: process.stderr }), { write: () => 0 });
 let context: WorkerContext | undefined;
-let storage: AuthStorage | undefined;
-let broker: AuthBrokerServerHandle | undefined;
+let storage: NativeBrokerStorage | undefined;
+let broker: NativeBrokerHandle | undefined;
 let failed = false;
 const shutdown = new AbortController();
 const stop = (): void => { shutdown.abort(); };
@@ -42,8 +42,8 @@ try {
   process.chdir("/inputs");
   const logger = await import("@oh-my-pi/pi-utils/logger");
   logger.setTransports({ file: false, console: false });
-  const { AuthStorage } = await import("@oh-my-pi/pi-ai/auth-storage");
-  const { startAuthBroker } = await import("@oh-my-pi/pi-ai/auth-broker/server");
+  const { NativeBrokerStorage } = await import("./storage.ts");
+  const { startNativeBroker } = await import("./server.ts");
   const { getAgentDbPath, setAgentDir } = await import("@oh-my-pi/pi-utils/dirs");
   shutdown.signal.throwIfAborted();
   // Broker and OMP sign-in share only the accounts installation's managed home.
@@ -53,12 +53,13 @@ try {
   process.env.HOME = "/home/job";
   process.env.PI_CONFIG_DIR = "omp";
   setAgentDir("/home/job/omp/agent");
-  storage = await AuthStorage.create(getAgentDbPath());
+  storage = await NativeBrokerStorage.create(getAgentDbPath());
   shutdown.signal.throwIfAborted();
   await storage.reload();
   shutdown.signal.throwIfAborted();
-  // OMP owns endpoints, cross-process SQLite polling and background refresh.
-  broker = startAuthBroker({
+  // Published OMP owns data endpoints, SQLite polling and refresh algorithms;
+  // the native boundary owns ingress authority and completion-based shutdown.
+  broker = startNativeBroker({
     storage,
     bind: clientAccess?.bind ?? "127.0.0.1:0",
     bearerTokens: [serviceBearer],
