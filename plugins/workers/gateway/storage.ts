@@ -88,7 +88,6 @@ export class PoolAuthStorage extends AuthStorage {
   override async getApiKey(...args: Parameters<AuthStorage["getApiKey"]>): Promise<string | undefined> {
     this.signal.throwIfAborted();
     if (!this.#providers.has(args[0])) return undefined;
-    const revocation = this.remote.revocation;
     try {
       await this.remote.refreshSnapshot();
       await this.reload();
@@ -96,6 +95,7 @@ export class PoolAuthStorage extends AuthStorage {
       throw unavailable();
     }
     if (this.remote.listAuthCredentials(args[0]).length === 0) return undefined;
+    const revocation = this.remote.revocation;
     const key = await super.getApiKey(...args);
     this.signal.throwIfAborted();
     return this.remote.revocation === revocation ? key : undefined;

@@ -74,6 +74,11 @@ try {
         while (entry.parentId && dropped.has(entry.parentId)) entry.parentId = dropped.get(entry.parentId) ?? null;
       }
       await writeFile(saved, retained.map(entry => JSON.stringify(entry)).join("\n") + "\n", { mode: 0o600 });
+    } else if (scenario === "auto") {
+      const manager = await SessionManager.open(saved, sessions);
+      manager.appendThinkingLevelChange("high", "auto");
+      await manager.flush();
+      await manager.close();
     } else if (scenario === "incompatible") {
       const manager = await SessionManager.open(saved, sessions);
       manager.appendModelChange("fixture/openai/gpt-4.1");
@@ -94,7 +99,7 @@ try {
   for (const name of await readdir(sessions)) if (name.endsWith(".jsonl")) before.set(name, await readFile(join(sessions, name), "utf8"));
   const refused = ["missing-model", "missing-thinking", "incompatible", "changed", "missing", "rpc-restricted"].includes(scenario);
   const expectedModel = scenario === "model-only" || scenario === "model-suffix" ? "fixture/openai/o3" : scenario === "both" ? "fixture/openai/gpt-4.1" : "fixture/openai/gpt-5";
-  const expectedThinking = ["model-suffix", "thinking-only", "both", "disabled", "cancel"].includes(scenario) ? "off" : "high";
+  const expectedThinking = scenario === "auto" ? "auto" : ["model-suffix", "thinking-only", "both", "disabled", "cancel"].includes(scenario) ? "off" : "high";
   gateway = Bun.serve({ hostname: "127.0.0.1", port: 38457, idleTimeout: 0, async fetch(request) {
     try {
       check(request.headers.get("authorization") === `Bearer ${["SYNTHETIC", "LOCAL", "FIXTURE", "NOT", "A", "CREDENTIAL"].join("-")}`, "synthetic-capability");
@@ -177,11 +182,12 @@ try {
   if (resumed && !refused) {
     // The saved assistant message is a semantic stock-renderer readiness signal.
     await until(() => rendered, "resume-renderer-not-ready");
-    child.terminal!.write("SDK-PROOF-RESUMED-TURN\r");
-    await until(() => completed, "resume-did-not-infer");
-    // Observe the actual stock renderer consuming the completed response, then
-    // let host shutdown flush it before reopening through SessionManager.
-    await until(() => terminal.includes("SDK-PROOF-RESUMED-COMPLETE"), "resume-result-not-rendered");
+    if (scenario !== "auto") {
+      child.terminal!.write("SDK-PROOF-RESUMED-TURN\r");
+      await until(() => completed, "resume-did-not-infer");
+      // Observe the stock renderer before flushing and reopening the journal.
+      await until(() => terminal.includes("SDK-PROOF-RESUMED-COMPLETE"), "resume-result-not-rendered");
+    }
     child.kill("SIGTERM");
   } else if (scenario === "cancel") {
     await until(() => waitingStream, "cancel-stream-not-started");
@@ -211,14 +217,14 @@ try {
     while (!cancelled && Date.now() < deadline) await Bun.sleep(20);
     check(cancelled, "gateway-stream-not-cancelled");
   } else {
-    check(discoveries > 0 && completed && (resumed ? exit !== 0 : exit === 0), "program-completion");
+    check(discoveries > 0 && (scenario === "auto" ? requests === 0 : completed) && (resumed ? exit !== 0 : exit === 0), "program-completion");
     const path = resumed ? saved : join("/outputs/session", (await readdir("/outputs/session")).find(name => name.endsWith(".jsonl")) ?? "missing");
     const manager = await SessionManager.open(path, resumed ? sessions : "/outputs/session");
     const context = manager.buildSessionContext();
-    check(context.messages.some(message => message.role === "assistant" && JSON.stringify(message.content).includes(resumed ? "SDK-PROOF-RESUMED-COMPLETE" : "SDK-PROOF-COMPLETE")), "durable-completion");
+    check(context.messages.some(message => message.role === "assistant" && JSON.stringify(message.content).includes(resumed && scenario !== "auto" ? "SDK-PROOF-RESUMED-COMPLETE" : "SDK-PROOF-COMPLETE")), "durable-completion");
     check(context.models[manager.getLastModelChangeRole() ?? "default"] === expectedModel, "durable-model");
     check((context.configuredThinkingLevel ?? context.thinkingLevel) === expectedThinking, "durable-thinking");
-    if (resumed) check(context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-RESUMED-TURN")), "durable-resumed-turn");
+    if (resumed && scenario !== "auto") check(context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-RESUMED-TURN")), "durable-resumed-turn");
     if (scenario === "selected") {
       await manager.setSessionName("SDK proof saved session", "user");
       await manager.flush();

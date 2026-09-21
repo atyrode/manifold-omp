@@ -289,7 +289,7 @@ try {
     const origins = new Set(["https://github.com", "https://release-assets.githubusercontent.com", "https://registry.npmjs.org"]);
     check(machineArtifacts(accountMachine).every(artifact => !artifact.url || origins.has(new URL(artifact.url).origin)),
       "packed-runtime-expanded-download-authority");
-    await mkdir(join(root, "data", "skill-bundles"), { mode: 0o700 });
+    await mkdir(join(root, "runtime", "skill-bundles"), { mode: 0o700 });
     const ownerConfiguration = JobOwnerConfigSchema.parse({
       machineId: target.machineId, admissionPublicKey: initialNative.admissionPublicKey,
       stateDirectory, delegatedCgroup: ownerGroup, bubblewrap,
@@ -430,7 +430,7 @@ try {
     const producerSource = Buffer.from(`
       import { mkdirSync, writeFileSync } from "node:fs";
       for (const name of ["alpha", "beta", "private"]) {
-        const path = "/home/job/skill-bundles/" + name + "/" + name;
+        const path = "/outputs/" + name + "/" + name;
         mkdirSync(path + "/resources", { recursive: true });
         writeFileSync(path + "/SKILL.md", "---\\nname: " + name + "\\ndescription: Offline reviewed skill\\n---\\nRead resources/witness.txt.\\n");
         writeFileSync(path + "/resources/witness.txt", "SEALED_SKILL_" + name + "\\n");
@@ -443,7 +443,7 @@ try {
         entry: ["producer.js"], entrySha256: producerSha, maxBytes: producerSource.length,
         maxExpandedBytes: producerSource.length, maxMembers: 1 } },
       tools: { bun: rootMachine.tools.bun }, requiresResourceBindings: true,
-      locations: { [producerLocation]: { anchor: "data", components: ["skill-bundles"], revision: "1",
+      locations: { [producerLocation]: { anchor: "runtime", components: ["skill-bundles"], revision: "1",
         kind: "directory", guestPath: "/home/job/skill-bundles" } },
       operations: { [producerOperation]: {
         executable: { runtimeTool: "bun" }, argv: [{ literal: "/job/artifact" }], input: {},

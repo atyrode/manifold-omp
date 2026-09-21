@@ -8,8 +8,12 @@ import type { ActionInput, Overlay } from "../../api/index.ts";
 export function admitSdkSession(registry: Pick<ModelRegistry, "find" | "hasConfiguredAuth">,
   manager: SessionManager | undefined, overlay: Overlay, overrides: ActionInput<"resumeSession">["overrides"]) {
   const context = manager?.buildSessionContext();
+  const entries = manager?.getBranch();
   const lastRole = manager?.getLastModelChangeRole();
   const role = !lastRole || lastRole === EPHEMERAL_MODEL_CHANGE_ROLE ? "default" : lastRole;
+  if (context && overrides?.model === undefined &&
+    !entries!.some(entry => entry.type === "model_change" && (entry.role ?? "default") === role && entry.model === context.models[role]))
+    throw new Error("omp_resume_model_missing");
   const selector = overrides?.model ?? (context ? context.models[role] : overlay.modelRoles?.default);
   if (!selector) throw new Error("omp_resume_model_missing");
   const selected = parseModelString(selector, {
@@ -24,10 +28,10 @@ export function admitSdkSession(registry: Pick<ModelRegistry, "find" | "hasConfi
     ? context.configuredThinkingLevel ?? context.thinkingLevel
     : selected.thinkingLevel ?? overlay.defaultThinkingLevel ?? "off");
   if (context && explicitThinking === undefined &&
-    !manager!.getBranch().some(entry => entry.type === "thinking_level_change"))
+    !entries!.some(entry => entry.type === "thinking_level_change"))
     throw new Error("omp_resume_thinking_missing");
   const thinking = parseConfiguredThinkingLevel(configured);
-  if (thinking === undefined || thinking !== configured || thinking === "auto" || resolveThinkingLevelForModel(model, thinking) !== thinking)
+  if (thinking === undefined || thinking !== configured || (thinking !== "auto" && resolveThinkingLevelForModel(model, thinking) !== thinking))
     throw new Error("omp_resume_thinking_incompatible");
   return { model, thinkingLevel: thinking };
 }

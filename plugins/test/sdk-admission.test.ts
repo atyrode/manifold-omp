@@ -48,7 +48,7 @@ test("resume refuses missing, unavailable, unauthenticated and incompatible stat
     manager.appendModelChange("fixture/saved");
     expect(() => admitSdkSession(registry, manager, defaults, undefined)).toThrow("omp_resume_thinking_missing");
     manager.appendThinkingLevelChange("off", "auto");
-    expect(() => admitSdkSession(registry, manager, defaults, undefined)).toThrow("omp_resume_thinking_incompatible");
+    expect(admitSdkSession(registry, manager, defaults, undefined)).toEqual({ model, thinkingLevel: "auto" });
     manager.appendThinkingLevelChange("off", "off");
     expect(() => admitSdkSession({ ...registry, hasConfiguredAuth: () => false }, manager, defaults, undefined))
       .toThrow("omp_resume_model_unavailable");

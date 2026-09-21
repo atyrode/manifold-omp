@@ -140,7 +140,15 @@ try {
       enableMCP: false, enableLsp: false, enableIrc: false, skipPythonPreflight: true, spawns: "",
     } : {}),
   });
-  if (created.modelFallbackMessage) throw new Error("omp_resume_model_changed");
+  if (created.modelFallbackMessage || created.session.model?.provider !== admitted.model.provider ||
+    created.session.model.id !== admitted.model.id) throw new Error("omp_resume_model_changed");
+  if (created.session.configuredThinkingLevel() !== admitted.thinkingLevel) throw new Error("omp_resume_thinking_incompatible");
+  if (resume && overrides && (overrides.model !== undefined || overrides.thinking !== undefined)) {
+    // SDK construction accepts runtime overrides without recording their durable selectors.
+    if (overrides.model !== undefined) manager!.appendModelChange(`${admitted.model.provider}/${admitted.model.id}`);
+    manager!.appendThinkingLevelChange(created.session.thinkingLevel, created.session.configuredThinkingLevel());
+    await manager!.flush();
+  }
   const abort = () => { void created!.session.abort(); };
   controller.signal.addEventListener("abort", abort, { once: true });
   if (controller.signal.aborted) abort();

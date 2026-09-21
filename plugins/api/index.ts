@@ -299,9 +299,9 @@ export const ResumeSessionInputSchema = z.strictObject({
   automation: RestrictedAutomationSchema.optional(),
   overrides: z.strictObject({
     model: modelReference.optional(),
-    thinking: z.union([ThinkingLevelSchema, z.literal("off")]).optional(),
+    thinking: z.union([ThinkingLevelSchema, z.literal("off"), z.literal("auto")]).optional(),
   }).refine(value => value.model !== undefined || value.thinking !== undefined, "empty resume overrides").optional(),
-}).describe("Resume an existing OMP transcript without an Agent. Omitted model/thinking overrides preserve persisted exact state; supplied overrides replace only that field. Missing, ambiguous, unavailable or incompatible state refuses before inference. Overlay configures the sealed runtime and an explicit accountPool is used exactly. Placement independently authorizes its container and terminal.");
+}).describe("Resume an existing OMP transcript without an Agent. Omitted selectors preserve persisted exact state. A bare model override preserves thinking; a model suffix selects thinking unless an explicit thinking field takes precedence. Missing, ambiguous, unavailable or incompatible state refuses before inference. Overlay configures the sealed runtime and an explicit accountPool is used exactly. Placement independently authorizes its container and terminal.");
 export const PreparedResumeSessionSchema = z.strictObject({
   machineId: id,
   sessionId: z.uuid(),

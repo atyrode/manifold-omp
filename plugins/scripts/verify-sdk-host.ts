@@ -78,7 +78,7 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
     check(control.success && control.outputs.length === 1, "fixture-bundle");
     await writeFile(join(work, "control.js"), new Uint8Array(await control.outputs[0]!.arrayBuffer()), { mode: 0o400 });
     await mkdir(join(work, "state"), { mode: 0o700 });
-    const cases = ["selected", "disabled", "preserve", "model-only", "model-suffix", "thinking-only", "both", "missing-model", "missing-thinking", "incompatible", "changed", "missing", "rpc-restricted", "cancel"] as const;
+    const cases = ["selected", "disabled", "preserve", "auto", "model-only", "model-suffix", "thinking-only", "both", "missing-model", "missing-thinking", "incompatible", "changed", "missing", "rpc-restricted", "cancel"] as const;
     for (const scenario of cases) {
       phase = scenario;
       const directory = join(work, scenario);
@@ -91,14 +91,14 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
       const config = {
         extensions: [], disabledProviders: [], extendedContext: false, startup: { setupWizard: false },
         modelRoles: { default: scenario === "selected" || scenario === "disabled" || scenario === "cancel" ? "fixture/openai/gpt-5" : "fixture/openai/gpt-4.1" },
-        defaultThinkingLevel: scenario === "selected" ? "high" : "off",
+        ...(scenario === "selected" ? { defaultThinkingLevel: "high" } : {}),
         task: { agentModelOverrides: { scout: "fixture/openai/gpt-4.1", task: "fixture/openai/o3", reviewer: "fixture/openai/gpt-5" } },
         skills: selected ? { customDirectories: ["/inputs/optionalSkill0"] } : { enabled: false },
       };
       const sealed = async (path: string, value: unknown) => writeFile(path, typeof value === "string" ? value : JSON.stringify(value), { mode: 0o400 });
       await sealed(join(home, ".omp/agent/config.yml"), config);
       await sealed(join(home, ".omp/agent/models.yml"), { providers: { fixture: {
-        baseUrl: "http://127.0.0.1:38457/v1", apiKey: "SYNTHETIC-LOCAL-FIXTURE-NOT-A-CREDENTIAL", transport: "pi-native", discovery: { type: "proxy" },
+        baseUrl: "http://127.0.0.1:38457", apiKey: "SYNTHETIC-LOCAL-FIXTURE-NOT-A-CREDENTIAL", transport: "pi-native", discovery: { type: "proxy" },
       } } });
       await sealed(join(inputs, "automation"), { mode: "restricted", toolNames: ["read"], delegation: "disabled" });
       await sealed(join(inputs, "skillRuntime"), { mode: selected ? "selected" : "disabled", names: selected ? ["sealed-proof"] : [] });

@@ -83,6 +83,11 @@ async function delegated(): Promise<void> {
   const git = Bun.which("git");
   check(git && isAbsolute(git), "git-missing");
   const gitPath = await realpath(git);
+  const busybox = process.env.MANIFOLD_TEST_STATIC_BUSYBOX;
+  const unshare = Bun.which("unshare");
+  check(busybox && isAbsolute(busybox) && unshare && isAbsolute(unshare), "bounded-output-tools-required");
+  const busyboxPath = await realpath(busybox);
+  const unsharePath = await realpath(unshare);
   const uid = process.getuid?.(),
     gid = process.getgid?.();
   check(
@@ -140,6 +145,8 @@ async function delegated(): Promise<void> {
       `OMP_VERIFY_SYSTEM=${frozenSystem}`,
       `OMP_VERIFY_BWRAP=${bwrap}`,
       `OMP_PACK_GIT=${gitPath}`,
+      `MANIFOLD_TEST_STATIC_BUSYBOX=${busyboxPath}`,
+      `OMP_VERIFY_UNSHARE=${unsharePath}`,
       process.execPath,
       "--no-env-file",
       "--no-install",
@@ -252,6 +259,9 @@ async function isolated(): Promise<void> {
     unit && /^omp-native-verify-[a-f0-9-]{36}$/.test(unit),
     "missing-disposable-unit",
   );
+  const busybox = process.env.MANIFOLD_TEST_STATIC_BUSYBOX;
+  const unshare = process.env.OMP_VERIFY_UNSHARE;
+  check(busybox && isAbsolute(busybox) && unshare && isAbsolute(unshare), "bounded-output-tools-required");
   const membership = (await readFile("/proc/self/cgroup", "utf8"))
     .split("\n")
     .find((line) => line.startsWith("0::"))
@@ -312,11 +322,15 @@ async function isolated(): Promise<void> {
       `#!/bin/sh\nexec ${interpreter} --no-env-file --no-install "$@"\n`,
       { mode: 0o700 },
     );
+    // Match Manifold's runtime gate: namespace-local root provisions bounded
+    // tmpfs without granting the verifier host-root or mount authority.
     const child = spawn(
-      process.execPath,
+      unshare,
       [
-        "--no-env-file",
-        "--no-install",
+        "--user", "--map-root-user", "--mount", "--propagation", "private",
+        busybox, "sh", "-eu", "-c",
+        '"$1" mount -t tmpfs -o size=1048576,nr_inodes=4096,mode=0700 tmpfs "$2"; exec "$3" --no-env-file --no-install "$4"',
+        "omp-output-fixture", busybox, join(root, "runtime"), process.execPath,
         fileURLToPath(new URL("./verify-native.ts", import.meta.url)),
       ],
       {

@@ -414,6 +414,11 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
     const plugin: BunPlugin = {
       name: "omp-pinned-native-worker",
       setup(build) {
+        // Virtual legacy imports have no filesystem importer. Anchor them to the
+        // prepared tree instead of admitting a second SDK from the caller's cwd.
+        build.onResolve({ filter: /^@oh-my-pi\// }, args => args.importer === "omp-legacy-pi-modules" ? ({
+          path: Bun.resolveSync(args.path, root), namespace: "file",
+        }) : undefined);
         build.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async args => {
           const path = await realpath(args.path);
           importedFiles.add(path);
@@ -446,13 +451,10 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
       if (output === entry) continue;
       const member = relative(outputDirectory, resolve(output.path)).split(sep).join("/");
       const prefix = `${name}-assets/`;
-      if (output.kind !== "asset" || !member.startsWith(prefix) ||
+      if (output.kind !== "asset" || assets.has(member) || !member.startsWith(prefix) ||
           !/^(?:template-[a-z0-9]+\.(?:css|html|js)|tool-views\.generated-[a-z0-9]+\.js|CHANGELOG-[a-z0-9]+\.md)$/.test(member.slice(prefix.length)))
         throw new Error(`Undeclared worker bundle output: ${name}: ${member}`);
       const bytes = Buffer.from(await output.arrayBuffer());
-      const prior = assets.get(member);
-      // Bun may emit an identical file-loader asset through multiple module identities.
-      if (prior && !prior.equals(bytes)) throw new Error(`Conflicting worker bundle output: ${name}: ${member}`);
       assets.set(member, bytes);
     }
     const javascript = Buffer.from(await entry.arrayBuffer());
