@@ -80,6 +80,8 @@ Skills never enter durable overlays/defaults or Agent profiles. A harness launch
 
 The native proxy checks recorded usage before admitting another service call. An in-flight response can exceed token or cost thresholds, and service-call accounting is not a worst-case envelope for provider retries or charged failures. Cumulative spending and concurrent reservations require a separate ledger. Bounded live-provider acceptance remains tracked separately in [#71](https://github.com/atyrode/manifold-omp/issues/71); these fields do not establish a zero-overshoot spending guarantee.
 
+`followSession({ containerId, machineId, jobId })` observes only a session posted through that retained target. It returns the current native job, cumulative metered usage, the latest retained progress, and bounded inference-call metadata with sequence and unavailable-prefix information. A temporary native follow subscription is closed before the reply; settled jobs recover retained events from the durable journal. Output bytes, prompts and transcript bodies are excluded. A missing progress report or an evicted event is not invented, and the cumulative meter is not reconstructed from the bounded event list.
+
 ## Repository gate
 
 Use Bun **1.4.2** and a clean sibling `manifold` checkout at the revision in `plugins/MANIFOLD_REV`. From `plugins/`:
