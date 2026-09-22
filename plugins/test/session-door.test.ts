@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { expect, test } from "bun:test";
-import { JobDescriptionSchema, MachineHalfSchema, type Cap } from "@manifold/protocol";
+import { JobDescriptionSchema, JobFollowSnapshotSchema, MachineHalfSchema, type Cap } from "@manifold/protocol";
 import {
   BROKER_SERVICE_ID,
   ACCOUNTS_PLUGIN_ID,
@@ -778,6 +778,87 @@ test("readSession refuses a job this door never posted", async () => {
   });
 });
 
+test("following a retained session exposes native totals and bounded metadata without output bytes", async () => {
+  const f = fixture();
+  const job = await run(f);
+  f.amend(job.jobId, { state: "started" });
+  const usage = { calls: 7, inputTokens: 900, outputTokens: 80,
+    cachedInputTokens: 100, costMicros: 4200, lastModel: session.overlay.modelRoles.default };
+  const metadata = { jobId: job.jobId, requestDigest: "f".repeat(64),
+    ownerId: "fixture-owner", ownerGeneration: 1 };
+  const output = Buffer.from("PRIVATE_PROVIDER_OUTPUT").toString("base64");
+  const snapshot = JobFollowSnapshotSchema.parse({
+    jobId: job.jobId, state: "started", result: null, inferenceUsage: usage,
+    seq: 8, firstSeq: 6, unavailable: { fromSeq: 1, toSeq: 5 },
+    events: [
+      { seq: 6, event: { type: "output", jobId: job.jobId, outputId: "stdout",
+        requestId: "output-read", seq: 0, data: output, eof: false } },
+      { seq: 7, event: { type: "job_progress", ...metadata, stage: "at the model", at: 1000 } },
+      { seq: 8, event: { type: "inference_call", ...metadata, serviceId: "omp", operationId: "stream",
+        model: usage.lastModel, inputTokens: 100, outputTokens: 10, cachedInputTokens: 0,
+        costMicros: 700, elapsedMs: 200, status: 200 } },
+    ],
+  });
+  let closed = 0;
+  f.ctx.jobs.follow = async () => ({ snapshot, close: async () => { closed++; } });
+  const reply = await f.client.call("followSession", { ...target, jobId: job.jobId });
+  if ("refused" in reply) throw new Error(reply.refused);
+  expect(reply.inferenceUsage).toEqual(usage);
+  expect(reply.inferenceCalls).toEqual([{ seq: 8, model: usage.lastModel,
+    inputTokens: 100, outputTokens: 10, cachedInputTokens: 0, costMicros: 700,
+    elapsedMs: 200, status: 200 }]);
+  expect(reply.progress).toEqual({ stage: "at the model", at: 1000 });
+  expect(reply.unavailable).toEqual({ fromSeq: 1, toSeq: 5 });
+  expect(JSON.stringify(reply)).not.toContain(output);
+  expect(closed).toBe(1);
+});
+
+test("following a settled session recovers durable metering after the live replay was evicted", async () => {
+  const f = fixture();
+  const job = await run(f);
+  const usage = { calls: 3, inputTokens: 1200, outputTokens: 90,
+    cachedInputTokens: 0, costMicros: 6000, lastModel: session.overlay.modelRoles.default };
+  const snapshot = JobFollowSnapshotSchema.parse({ jobId: job.jobId, state: job.state,
+    result: job.result, inferenceUsage: usage, seq: 300, firstSeq: null,
+    events: [], unavailable: { fromSeq: 1, toSeq: 300 } });
+  let closed = 0;
+  f.ctx.jobs.follow = async () => ({ snapshot, close: async () => { closed++; } });
+  f.ctx.jobs.journal = async () => ({
+    jobId: job.jobId, inferenceUsage: usage, firstSeq: 250, nextAfter: null,
+    events: [{ seq: 250, at: 1000, event: { type: "inference_call", jobId: job.jobId,
+      requestDigest: "f".repeat(64), ownerId: "fixture-owner", ownerGeneration: 1,
+      serviceId: "omp", operationId: "stream", model: usage.lastModel,
+      inputTokens: 400, outputTokens: 30, cachedInputTokens: 0, costMicros: 2000,
+      elapsedMs: 250, status: 500 } }],
+  });
+  const reply = await f.client.call("followSession", { ...target, jobId: job.jobId });
+  if ("refused" in reply) throw new Error(reply.refused);
+  expect(reply.inferenceUsage?.calls).toBe(3);
+  expect(reply.inferenceCalls[0]).toMatchObject({ seq: 250, status: 500, costMicros: 2000 });
+  expect(reply.unavailable).toEqual({ fromSeq: 1, toSeq: 249 });
+  expect(closed).toBe(1);
+});
+
+test("following refuses unretained or substituted jobs and releases a rejected snapshot", async () => {
+  const f = fixture();
+  const job = await run(f);
+  let opened = 0;
+  let closed = 0;
+  f.ctx.jobs.follow = async () => {
+    opened++;
+    return { snapshot: JobFollowSnapshotSchema.parse({
+      jobId: "another-job", state: "started", result: null, inferenceUsage: null,
+      seq: 0, firstSeq: null, events: [], unavailable: null,
+    }), close: async () => { closed++; } };
+  };
+  expect(await f.client.call("followSession", { ...target, jobId: "job-404" }))
+    .toEqual({ refused: "omp_result_unavailable" });
+  expect(opened).toBe(0);
+  expect(await f.client.call("followSession", { ...target, jobId: job.jobId }))
+    .toEqual({ refused: "omp_provenance_changed" });
+  expect(closed).toBe(1);
+});
+
 test("cancelSession ends a running session and answers its job", async () => {
   const f = fixture();
   const job = await run(f);
@@ -1165,6 +1246,16 @@ test("material-only reviews bind content and operation, require material, and ca
   const job = await f.client.call("runSession", { ...request, inputs: [material] });
   if ("refused" in job) throw new Error(job.refused);
   expect(job.operationId).toBe(MATERIAL_SESSION_OPERATION_ID);
+  f.amend(job.jobId, { state: "started" });
+  f.ctx.jobs.follow = async () => ({
+    snapshot: JobFollowSnapshotSchema.parse({ jobId: job.jobId, state: "started", result: null,
+      inferenceUsage: null, seq: 0, firstSeq: null, events: [], unavailable: null }),
+    close: async () => {},
+  });
+  const followed = await f.client.call("followSession", { ...target, jobId: job.jobId });
+  if ("refused" in followed) throw new Error(followed.refused);
+  expect(followed.job.operationId).toBe(MATERIAL_SESSION_OPERATION_ID);
+  f.amend(job.jobId, { state: "exited" });
   f.seal(job.jobId, ustar([[transcriptName, transcript]]));
   const read = await f.client.call("readSession", { ...target, jobId: job.jobId });
   if ("refused" in read) throw new Error(read.refused);
@@ -1174,6 +1265,7 @@ test("material-only reviews bind content and operation, require material, and ca
   expect(f.cancelled).toEqual([job.jobId]);
   f.amend(job.jobId, { inputs: [{ name: "material", from: { jobId: "replacement", output: "outputs" } }] });
   expect(await f.client.call("readSession", { ...target, jobId: job.jobId })).toEqual({ refused: "omp_provenance_changed" });
+  expect(await f.client.call("followSession", { ...target, jobId: job.jobId })).toEqual({ refused: "omp_provenance_changed" });
   expect(await f.client.call("cancelSession", { ...target, jobId: job.jobId })).toEqual({ refused: "omp_provenance_changed" });
   expect(f.cancelled).toEqual([job.jobId]);
 });

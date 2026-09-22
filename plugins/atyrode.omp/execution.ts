@@ -6,6 +6,7 @@ import {
   type PublicJob,
   type MachineHalf,
 } from "@manifold/protocol";
+import type { JobFollowSnapshot, JobProgressEvent } from "@manifold/protocol";
 import {
   OMP_PLUGIN_ID,
   TargetSchema,
@@ -56,6 +57,7 @@ import {
   OmpRefusal,
   readJobResult,
   readNamedOutput,
+  jobOfDoor,
   readSealedArchive,
   type OmpContext,
 } from "./machine-server.ts";
@@ -986,6 +988,61 @@ export async function readSession(
   if (session.model !== asked && session.failure === null && retained.retry?.modelFallback !== true)
     throw new OmpRefusal("model_substituted");
   return { job: result.job, session, silence: null };
+}
+
+/** Observe the retained job through its native owner, closing the temporary follow lease. */
+export async function followSession(
+  ctx: OmpContext,
+  args: ActionInput<"followSession">,
+): Promise<ActionResult<"followSession">> {
+  const target = { containerId: args.containerId, machineId: args.machineId };
+  const provenance = await sessionProvenance(ctx, target, args.jobId);
+  const posted = await jobOfDoor(ctx, args.machineId, provenance.isolation ? "material-session" : "session", args.jobId, "runSession");
+  checkJob(posted, provenance, args.jobId);
+  const node = { kind: "job" as const, machineId: args.machineId,
+    operationId: posted.operationId, jobId: args.jobId };
+  const follow = await ctx.jobs.follow(node, () => {});
+  let snapshot: JobFollowSnapshot;
+  try {
+    snapshot = follow.snapshot;
+  } finally {
+    await follow.close();
+  }
+  if (snapshot.jobId !== args.jobId ||
+    (snapshot.result !== null &&
+      (snapshot.result.jobId !== args.jobId || snapshot.result.state !== snapshot.state)))
+    throw new OmpRefusal("provenance_changed");
+  const job = PublicJobSchema.parse({ ...posted, state: snapshot.state, result: snapshot.result });
+  checkJob(job, provenance, args.jobId);
+  // The durable journal outlives the live ring; neither projection includes output bytes.
+  const observed = job.result === null ? snapshot : await ctx.jobs.journal({ node, limit: 128 });
+  if (observed.jobId !== args.jobId) throw new OmpRefusal("provenance_changed");
+  let progress: JobProgressEvent | null = null;
+  const inferenceCalls: ActionResult<"followSession">["inferenceCalls"] = [];
+  for (const { seq, event } of observed.events) {
+    if ("jobId" in event && event.jobId !== args.jobId)
+      throw new OmpRefusal("provenance_changed");
+    if (event.type === "job_progress") progress = event;
+    if (event.type === "inference_call") {
+      const { model, inputTokens, outputTokens, cachedInputTokens, costMicros, elapsedMs, status } = event;
+      inferenceCalls.push({ seq, model, inputTokens, outputTokens, cachedInputTokens, costMicros, elapsedMs, status });
+    }
+  }
+  return {
+    job,
+    inferenceUsage: observed.inferenceUsage,
+    progress: progress === null ? null : {
+      stage: progress.stage, at: progress.at,
+      ...(progress.message === undefined ? {} : { message: progress.message }),
+      ...(progress.fraction === undefined ? {} : { fraction: progress.fraction }),
+    },
+    inferenceCalls,
+    seq: snapshot.seq,
+    firstSeq: observed.firstSeq,
+    unavailable: job.result === null ? snapshot.unavailable :
+      (observed.firstSeq === null ? snapshot.seq : observed.firstSeq - 1) > 0
+        ? { fromSeq: 1, toSeq: observed.firstSeq === null ? snapshot.seq : observed.firstSeq - 1 } : null,
+  };
 }
 /**
  * Ends a session this door posted. The hub already treats cancelling a settled job as a

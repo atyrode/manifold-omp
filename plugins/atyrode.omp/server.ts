@@ -29,6 +29,7 @@ import {
   prepareSession,
   runSession,
   readSession,
+  followSession,
   cancelSession,
 } from "./execution.ts";
 
@@ -54,6 +55,7 @@ const implementations: RootHandlers = {
   prepareSession,
   runSession,
   readSession,
+  followSession,
   cancelSession,
   listSessions,
   resumeSession,
@@ -104,6 +106,7 @@ const delegates: Record<RootAction, readonly Cap[]> = {
   // the observation `prepareSession` needs to hand a terminal its descriptor.
   runSession: [...observedRuntimeCaps, "network:host", "locations:write"],
   readSession: nativeObservationCaps,
+  followSession: ["jobs:read"],
   // Ending a run needs no observation of the machine, only the job's own two verbs.
   cancelSession: ["jobs:read", "jobs:cancel"],
   listSessions: [...nativeObservationCaps, "jobs:cancel", "locations:read"],

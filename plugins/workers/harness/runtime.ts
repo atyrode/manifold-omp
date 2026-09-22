@@ -13,6 +13,7 @@ import { ADMISSION_CONTEXT_BYTES, writeAdmissionContext, type AdmissionContextFi
 import { dispatchOmpModelRequest, OmpModelToolInputSchema } from "./model.ts";
 import { validateSkillInputs } from "./skills.ts";
 import { readAutomation } from "./sdk-inputs.ts";
+import { forwardOmpOutput, type ReportOmpProgress } from "./progress.ts";
 
 const runnerEnvironment = z.strictObject({
   origin: z.string().url(), token: z.string().regex(/^[a-f0-9]{64}$/i), runId: z.string().min(1).max(128),
@@ -95,9 +96,9 @@ export async function runOmpResume(signal: AbortSignal): Promise<boolean> {
   }
 }
 
-/** Ordinary terminal and one-shot argv remain native; the boundary only validates
- * selected immutable mounts before handing the terminal directly to OMP. */
-export async function runOmpNative(signal: AbortSignal): Promise<boolean> {
+/** Interactive paths hand over the terminal directly. One-shot paths additionally
+ * observe the published JSON stream without changing argv or output bytes. */
+export async function runOmpNative(signal: AbortSignal, reportProgress: ReportOmpProgress): Promise<boolean> {
   const skills = validateSkillInputs();
   if (signal.aborted) throw new Error("harness_cancelled");
   const separator = process.argv.indexOf("--", 3);
@@ -116,11 +117,14 @@ export async function runOmpNative(signal: AbortSignal): Promise<boolean> {
     if (options.includes("--plan-yolo")) throw new Error("omp_skills_plan_unsupported");
     const child = spawn("/runtime/bin/bun", ["--no-env-file", "--no-install", "--config=/dev/null", "/runtime/bin/sdkHost",
       materialOnly ? "material-print" : print ? "print" : "interactive", ...(sessionFile ? [sessionFile] : [])], {
-      cwd: "/inputs", env: ompEnvironment, stdio: "inherit",
+      cwd: "/inputs", env: ompEnvironment, stdio: print ? ["inherit", "pipe", "inherit"] : "inherit",
     });
     const exit = Promise.withResolvers<number | null>();
     child.once("close", exit.resolve);
     child.once("error", exit.reject);
+    const output = print
+      ? forwardOmpOutput(child.stdout!, process.stdout, reportProgress, signal).then(() => true, () => false)
+      : Promise.resolve(true);
     let timeout: NodeJS.Timeout | undefined;
     const stop = () => {
       child.kill("SIGTERM");
@@ -129,17 +133,24 @@ export async function runOmpNative(signal: AbortSignal): Promise<boolean> {
     };
     signal.addEventListener("abort", stop, { once: true });
     if (signal.aborted) stop();
-    try { return await exit.promise === 0 && !signal.aborted; }
+    try {
+      const code = await exit.promise;
+      const forwarded = await output;
+      return code === 0 && forwarded && !signal.aborted;
+    }
     finally { signal.removeEventListener("abort", stop); clearTimeout(timeout); }
   }
   const environment = { ...process.env };
   for (const name of Object.keys(environment)) if (name.startsWith("MANIFOLD_")) delete environment[name];
   const child = spawn("/runtime/bin/omp", [...(sessionFile ? ["--session", `${SESSIONS_ROOT}/${sessionFile}`] : []), ...process.argv.slice(3)], {
-    cwd: "/home/job/workspace", env: environment, stdio: "inherit",
+    cwd: "/home/job/workspace", env: environment, stdio: print ? ["inherit", "pipe", "inherit"] : "inherit",
   });
   const exit = Promise.withResolvers<number | null>();
   child.once("close", exit.resolve);
   child.once("error", exit.reject);
+  const output = print
+    ? forwardOmpOutput(child.stdout!, process.stdout, reportProgress, signal).then(() => true, () => false)
+    : Promise.resolve(true);
   let timeout: NodeJS.Timeout | undefined;
   const stop = () => {
     child.kill("SIGTERM");
@@ -148,7 +159,11 @@ export async function runOmpNative(signal: AbortSignal): Promise<boolean> {
   };
   signal.addEventListener("abort", stop, { once: true });
   if (signal.aborted) stop();
-  try { return await exit.promise === 0 && !signal.aborted; }
+  try {
+    const code = await exit.promise;
+    const forwarded = await output;
+    return code === 0 && forwarded && !signal.aborted;
+  }
   finally { signal.removeEventListener("abort", stop); clearTimeout(timeout); }
 }
 
