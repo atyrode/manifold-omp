@@ -7,6 +7,7 @@ import { unavailable } from "./inputs.ts";
 import { resolvePublished } from "./storage.ts";
 
 const FRAME_LIMIT = 16 * 1024 * 1024;
+const credentialHeader = /^(?:authorization|proxy-authorization|x-api-key|api-key|x-goog-api-key|x-amz-security-token|cookie)$/i;
 const encoder = new TextEncoder();
 const tokenCount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const cost = z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -120,6 +121,12 @@ export function startPrivateBoundary(target: { url: string; bearer: string }, be
         let model: Model<Api> | undefined;
         if (payload) {
           const parsed = parseRequest(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(payload)));
+          // Provider authentication belongs to the selected pool, never the caller.
+          const callerHeaders = parsed.options.headers;
+          if (callerHeaders !== undefined && (
+            typeof callerHeaders !== "object" || callerHeaders === null || Array.isArray(callerHeaders) ||
+            Object.keys(callerHeaders).some(name => credentialHeader.test(name))
+          )) return safeFailure(400, "provider_credential_header_refused");
           model = resolvePublished(models, parsed.modelId);
           if (!model)
             return catalogUnreadable === null

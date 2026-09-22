@@ -15,6 +15,8 @@ import {
   GATEWAY_OPERATION_ID,
   BrokerClientAccessSchema,
   type BrokerClientAccess,
+  GatewayRequestLimitsSchema,
+  type GatewayRequestLimits,
   type ActionInput,
   type ActionResult,
 } from "../api/index.ts";
@@ -228,13 +230,29 @@ async function gatewayReview(
   if (!current.connected) throw new OmpRefusal("machine_offline");
   if (candidates.length !== 1 || !candidates[0]?.ready)
     throw new OmpRefusal("gateway_resources_incomplete");
+  const installedPolicy = current.configuration.policies.find(policy => policy.serviceId === "omp");
+  const storedRequestLimits = installedPolicy?.runtime?.input.requestLimits;
+  let installedRequestLimits: GatewayRequestLimits | null = null;
+  if (storedRequestLimits !== undefined) {
+    if (!("literal" in storedRequestLimits) || typeof storedRequestLimits.literal !== "string")
+      throw new OmpRefusal("resources_changed");
+    let stored: unknown;
+    try { stored = JSON.parse(storedRequestLimits.literal); } catch { throw new OmpRefusal("resources_changed"); }
+    const parsed = GatewayRequestLimitsSchema.nullable().safeParse(stored);
+    if (!parsed.success) throw new OmpRefusal("resources_changed");
+    installedRequestLimits = parsed.data;
+  }
+  const requestLimits = args.requestLimits === undefined ? installedRequestLimits : args.requestLimits;
   const runtime = ServiceRuntimeSchema.parse({
     ...candidates[0].runtime,
-    input: { accountPool: { input: "accountPool" } },
+    input: {
+      accountPool: { input: "accountPool" },
+      requestLimits: { literal: JSON.stringify(requestLimits) },
+    },
   });
   if (runtime.installationRevision === undefined) throw new OmpRefusal("resources_changed");
   const prices = args.prices === undefined
-    ? current.configuration.policies.find(policy => policy.serviceId === "omp")?.prices
+    ? installedPolicy?.prices
     : args.prices ?? undefined;
   const replacement = buildGatewayPolicy(runtime, prices);
   const policies: ServicePolicy[] = current.configuration.policies.map(
@@ -258,6 +276,11 @@ async function gatewayReview(
   );
   if (digestOf(native.pins) !== digestOf(pins))
     throw new OmpRefusal("resources_changed");
+  const operation = native.deployment.installation?.machine.operations[GATEWAY_OPERATION_ID];
+  if (!operation ||
+      digestOf(operation.input.requestLimits ?? null) !== digestOf({ type: "string", required: true, maxLength: 256 }) ||
+      digestOf(operation.inputFiles?.requestLimits ?? null) !== digestOf({ input: "requestLimits" }))
+    throw new OmpRefusal("gateway_resources_incomplete");
   return {
     policies,
     review: {
@@ -265,10 +288,12 @@ async function gatewayReview(
       expectedServiceRevision: args.expectedServiceRevision,
       runtime: pins,
       prices: prices ?? null,
+      requestLimits,
       reviewDigest: digestOf({
         actor: actor(ctx),
         destination,
         expectedServiceRevision: args.expectedServiceRevision,
+        installedPolicy: installedPolicy ?? null,
         policies,
         candidates,
         native,

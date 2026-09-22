@@ -416,6 +416,166 @@ test("gateway observation independently offers only the authoritative destinatio
   expect(f.effects).toEqual([]);
 });
 
+test("gateway limits are exactly reviewed, installed, retained on omission and removed only by null", async () => {
+  const f = fixture(GATEWAY_PLUGIN_ID);
+  const requestLimits = { maxAttemptsPerCall: 2, maxOutputTokens: 4096 };
+  f.ctx.services.configureConfiguration = async (args) => {
+    f.configuration.configuration = {
+      revision: "d".repeat(64),
+      policies: args.policies,
+    };
+    return f.configuration.configuration;
+  };
+  const input = { ...target, expectedServiceRevision: f.configuration.configuration.revision };
+  const review = await f.client.call("reviewGateway", { ...input, requestLimits });
+  if ("refused" in review) throw new Error(review.refused);
+  expect(review).toEqual({
+    destination: target,
+    expectedServiceRevision: input.expectedServiceRevision,
+    runtime: pins,
+    prices: null,
+    requestLimits,
+    reviewDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+  });
+  expect(await f.client.call("configureGateway", {
+    ...input, requestLimits, reviewDigest: review.reviewDigest,
+  })).toEqual({ revision: "d".repeat(64) });
+  const installed = f.configuration.configuration.policies.find(policy => policy.serviceId === "omp")!;
+  expect(installed.runtime?.input.requestLimits).toEqual({ literal: JSON.stringify(requestLimits) });
+
+  const next = { ...target, expectedServiceRevision: "d".repeat(64) };
+  const retained = await f.client.call("reviewGateway", next);
+  if ("refused" in retained) throw new Error(retained.refused);
+  expect(retained.requestLimits).toEqual(requestLimits);
+  expect(await f.client.call("configureGateway", {
+    ...next, reviewDigest: retained.reviewDigest,
+  })).toEqual({ revision: "d".repeat(64) });
+  const afterOmission = await f.client.call("reviewGateway", next);
+  if ("refused" in afterOmission) throw new Error(afterOmission.refused);
+  expect(afterOmission.requestLimits).toEqual(requestLimits);
+
+  const removed = await f.client.call("reviewGateway", { ...next, requestLimits: null });
+  if ("refused" in removed) throw new Error(removed.refused);
+  expect(removed.requestLimits).toBeNull();
+  expect(await f.client.call("configureGateway", {
+    ...next, requestLimits: null, reviewDigest: removed.reviewDigest,
+  })).toEqual({ revision: "d".repeat(64) });
+  const afterRemoval = await f.client.call("reviewGateway", next);
+  if ("refused" in afterRemoval) throw new Error(afterRemoval.refused);
+  expect(afterRemoval.requestLimits).toBeNull();
+  expect(f.configuration.configuration.policies.find(policy => policy.serviceId === "omp")!
+    .runtime?.input.requestLimits).toEqual({ literal: "null" });
+});
+
+test("legacy gateway configuration reviews no limit and installs an explicit sealed null", async () => {
+  const f = fixture(GATEWAY_PLUGIN_ID);
+  const input = { ...target, expectedServiceRevision: f.configuration.configuration.revision };
+  const review = await f.client.call("reviewGateway", input);
+  if ("refused" in review) throw new Error(review.refused);
+  expect(review.requestLimits).toBeNull();
+  f.ctx.services.configureConfiguration = async (args) => {
+    f.configuration.configuration = { revision: "d".repeat(64), policies: args.policies };
+    return f.configuration.configuration;
+  };
+  expect(await f.client.call("configureGateway", {
+    ...input, reviewDigest: review.reviewDigest,
+  })).toEqual({ revision: "d".repeat(64) });
+  expect(f.configuration.configuration.policies.find(policy => policy.serviceId === "omp")!
+    .runtime?.input.requestLimits).toEqual({ literal: "null" });
+});
+
+test("a ready legacy gateway cannot install a policy its sealed-input contract does not support", async () => {
+  const f = fixture(GATEWAY_PLUGIN_ID);
+  const operation = f.machine.operations[GATEWAY_OPERATION_ID]!;
+  delete operation.input.requestLimits;
+  delete operation.inputFiles!.requestLimits;
+  const input = { ...target, expectedServiceRevision: f.configuration.configuration.revision };
+  for (const requestLimits of [null, { maxAttemptsPerCall: 1, maxOutputTokens: 8192 }]) {
+    expect(await f.client.call("reviewGateway", { ...input, requestLimits }))
+      .toEqual({ refused: "omp_gateway_resources_incomplete" });
+    expect(await f.client.call("configureGateway", {
+      ...input, requestLimits, reviewDigest: "a".repeat(64),
+    })).toEqual({ refused: "omp_gateway_resources_incomplete" });
+  }
+  expect(f.effects).toEqual([]);
+});
+
+test("changing requested gateway limits cannot reuse a prior review", async () => {
+  const f = fixture(GATEWAY_PLUGIN_ID);
+  const input = { ...target, expectedServiceRevision: f.configuration.configuration.revision };
+  const requestLimits = { maxAttemptsPerCall: 1, maxOutputTokens: 1024 };
+  const review = await f.client.call("reviewGateway", { ...input, requestLimits });
+  if ("refused" in review) throw new Error(review.refused);
+  for (const changed of [
+    { ...requestLimits, maxAttemptsPerCall: 2 },
+    { ...requestLimits, maxOutputTokens: 2048 },
+    null,
+  ]) {
+    expect(await f.client.call("configureGateway", {
+      ...input, requestLimits: changed, reviewDigest: review.reviewDigest,
+    })).toEqual({ refused: "omp_review_changed" });
+  }
+  expect(f.effects).toEqual([]);
+});
+
+test("changing installed gateway limits invalidates review even when the replacement is unchanged", async () => {
+  const f = fixture(GATEWAY_PLUGIN_ID);
+  const installed = f.configuration.configuration.policies.find(policy => policy.serviceId === "omp")!.runtime!;
+  installed.input.requestLimits = { literal: JSON.stringify({ maxAttemptsPerCall: 2, maxOutputTokens: 2048 }) };
+  const input = {
+    ...target, expectedServiceRevision: f.configuration.configuration.revision,
+    requestLimits: { maxAttemptsPerCall: 1, maxOutputTokens: 1024 },
+  };
+  const review = await f.client.call("reviewGateway", input);
+  if ("refused" in review) throw new Error(review.refused);
+  installed.input.requestLimits = { literal: JSON.stringify({ maxAttemptsPerCall: 3, maxOutputTokens: 4096 }) };
+  expect(await f.client.call("configureGateway", {
+    ...input, reviewDigest: review.reviewDigest,
+  })).toEqual({ refused: "omp_review_changed" });
+  expect(f.effects).toEqual([]);
+});
+
+test("a gateway policy change during configure cannot slip past the second review", async () => {
+  const f = fixture(GATEWAY_PLUGIN_ID);
+  const input = {
+    ...target, expectedServiceRevision: f.configuration.configuration.revision,
+    requestLimits: { maxAttemptsPerCall: 1, maxOutputTokens: 1024 },
+  };
+  const review = await f.client.call("reviewGateway", input);
+  if ("refused" in review) throw new Error(review.refused);
+  let reads = 0;
+  f.ctx.services.readConfiguration = async () => {
+    if (++reads === 2) {
+      f.configuration.configuration.policies.find(policy => policy.serviceId === "omp")!
+        .runtime!.input.requestLimits = { literal: "null" };
+    }
+    return f.configuration;
+  };
+  expect(await f.client.call("configureGateway", {
+    ...input, reviewDigest: review.reviewDigest,
+  })).toEqual({ refused: "omp_resources_changed" });
+  expect(f.effects).toEqual([]);
+});
+
+test("invalid stored gateway limits refuse review even when explicitly cleared", async () => {
+  const f = fixture(GATEWAY_PLUGIN_ID);
+  const installed = f.configuration.configuration.policies.find(policy => policy.serviceId === "omp")!.runtime!;
+  for (const invalid of [
+    { literal: "{" },
+    { literal: "{}" },
+    { literal: JSON.stringify({ maxAttemptsPerCall: 33, maxOutputTokens: 1024 }) },
+    { literal: JSON.stringify({ maxAttemptsPerCall: 1, maxOutputTokens: 0 }) },
+    { literal: JSON.stringify({ maxAttemptsPerCall: 1, maxOutputTokens: 1024, bypass: true }) },
+    { input: "callerChosenLimits" },
+  ]) {
+    installed.input.requestLimits = invalid;
+    expect(await f.client.call("reviewGateway", {
+      ...target, expectedServiceRevision: f.configuration.configuration.revision, requestLimits: null,
+    })).toEqual({ refused: "omp_resources_changed" });
+  }
+  expect(f.effects).toEqual([]);
+});
+
 test("gateway service grants are checked at their bound operation rather than inferred from runtime health", async () => {
   const f = fixture(GATEWAY_PLUGIN_ID);
   f.authority.allows = async (cap, ref) =>
