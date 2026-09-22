@@ -22,6 +22,8 @@ import {
   SESSION_ARCHIVE_LIMIT,
   SESSION_GUEST_PATH,
   SESSION_OPERATION_ID,
+  MATERIAL_SESSION_OPERATION_ID,
+  MaterialOnlyIsolationSchema,
   RESUME_OPERATION_ID,
   SESSION_OUTPUT_NAME,
   RUNS_LOCATION_ID,
@@ -54,7 +56,6 @@ import {
   OmpRefusal,
   readJobResult,
   readNamedOutput,
-  jobOfDoor,
   readSealedArchive,
   type OmpContext,
 } from "./machine-server.ts";
@@ -103,6 +104,7 @@ const provenanceSchema = z.strictObject({
   // Absent in provenance retained before bound inputs existed, which is no bindings at all.
   inputs: z.array(JobInputBindingSchema).max(16).default([]),
   limits: JobLimitsSchema.optional(),
+  isolation: MaterialOnlyIsolationSchema.optional(),
 });
 type Provenance = z.infer<typeof provenanceSchema>;
 /**
@@ -605,6 +607,16 @@ function supportsSdkRuntime(machine: MachineHalf | undefined, operationId: strin
 function requireSdkRuntime(machine: MachineHalf | undefined, operationId: string) {
   if (!supportsSdkRuntime(machine, operationId)) throw new OmpRefusal("sdk_runtime_unsupported");
 }
+function requireMaterialRuntime(machine: MachineHalf | undefined) {
+  const operation = machine?.operations[MATERIAL_SESSION_OPERATION_ID];
+  requireSdkRuntime(machine, MATERIAL_SESSION_OPERATION_ID);
+  if (!operation?.input.isolation || !operation.inputFiles?.isolation ||
+    operation.workingDirectory || operation.locations.length !== 0 ||
+    digestOf(operation.inputs ?? []) !== digestOf(["material"]) ||
+    digestOf(operation.outputs) !== digestOf([SESSION_OUTPUT_NAME]) ||
+    !operation.argv.some(arg => "literal" in arg && arg.literal === "--material-only"))
+    throw new OmpRefusal("material_runtime_unsupported");
+}
 /** Runtime preparation is machine-scoped. Container and terminal authorization
  * belongs to reviewed launch or, for operator resume, independent placement. */
 async function sessionRuntimePreparation(
@@ -615,9 +627,12 @@ async function sessionRuntimePreparation(
   resume = false,
   overrides?: ActionInput<"resumeSession">["overrides"],
 ) {
+  if (args.isolation && (sessionId || resume || operationId !== MATERIAL_SESSION_OPERATION_ID ||
+    args.skills?.mode === "select" || args.automation?.toolNames.length))
+    throw new OmpRefusal("material_isolation_unsupported");
   const defaults = await expectedDefaults(ctx, args.expectedDefaultsRevision);
   const overlay = effectiveOverlay(defaults, args.overlay);
-  if (args.automation && (args.planYolo || overlay.task?.agentAdvisor?.task === "on" || overlay.task?.prewalk === true ||
+  if ((args.automation || args.isolation) && (args.planYolo || overlay.task?.agentAdvisor?.task === "on" || overlay.task?.prewalk === true ||
     overlay.advisor?.enabled === true || overlay.prewalk?.enabled === true ||
     overlay.retry?.modelFallback === true)) throw new OmpRefusal("restricted_delegation_unsupported");
   if (args.automation && operationId === `${OMP_PLUGIN_ID}.harness`)
@@ -634,11 +649,15 @@ async function sessionRuntimePreparation(
     args.machineId,
     operationId,
   );
-  const automation = args.automation ?? { mode: "ordinary" as const };
-  if (args.automation || resume) requireSdkRuntime(current.deployment.installation?.machine, operationId);
-  const skills = await resolveSkills(ctx, args.machineId, args.skills ?? (args.automation ? { mode: "disabled" } : undefined));
+  const automation = args.isolation
+    ? { mode: "restricted" as const, toolNames: [], delegation: "disabled" as const }
+    : args.automation ?? { mode: "ordinary" as const };
+  if (args.isolation) requireMaterialRuntime(current.deployment.installation?.machine);
+  else if (args.automation || resume) requireSdkRuntime(current.deployment.installation?.machine, operationId);
+  const skills = await resolveSkills(ctx, args.machineId,
+    args.isolation ? { mode: "disabled" } : args.skills ?? (args.automation ? { mode: "disabled" } : undefined));
   if (args.planYolo && skills.mode !== "preserve") throw new OmpRefusal("skills_plan_unsupported");
-  if (skills.mode !== "preserve") requireSkillRuntime(current.deployment.installation?.machine, operationId);
+  if (!args.isolation && skills.mode !== "preserve") requireSkillRuntime(current.deployment.installation?.machine, operationId);
   const inputs = skillInputBindings(skills);
   const skillConfig = skills.mode === "disabled" ? { skills: { enabled: false } }
     : skills.mode === "selected" ? { skills: { customDirectories: inputs.map(binding => `/inputs/${binding.name}`) } }
@@ -656,6 +675,7 @@ async function sessionRuntimePreparation(
     automation: JSON.stringify(automation),
     resumeOverrides: JSON.stringify(overrides ?? {}),
     ...(sessionId ? { sessionId, resume } : {}),
+    ...(args.isolation ? { isolation: JSON.stringify(args.isolation) } : {}),
   });
   return { defaults, overlay, pool, reference, gateway, current, input, skills, inputs, automation };
 }
@@ -667,7 +687,8 @@ async function sessionPreparation(
   resume = false,
 ) {
   await authorizeTarget(ctx, args);
-  const operationId = `${OMP_PLUGIN_ID}.${sessionId ? "harness" : "launch"}`;
+  if (args.isolation && (sessionId || resume)) throw new OmpRefusal("material_isolation_unsupported");
+  const operationId = args.isolation ? MATERIAL_SESSION_OPERATION_ID : `${OMP_PLUGIN_ID}.${sessionId ? "harness" : "launch"}`;
   const { defaults, overlay, pool, reference, gateway, current, input, skills, inputs, automation } =
     await sessionRuntimePreparation(ctx, args, operationId, sessionId, resume);
   const destination = {
@@ -683,6 +704,7 @@ async function sessionPreparation(
     accountPool: pool,
     skills,
     automation,
+    ...(args.isolation ? { isolation: args.isolation } : {}),
     ...(args.inferenceLimits === undefined ? {} : { inferenceLimits: args.inferenceLimits }),
     reviewDigest: digestOf({
       actor: actor(ctx),
@@ -713,6 +735,7 @@ async function prepareReviewedSession(
   sessionId?: string,
   resume = false,
 ): Promise<ActionResult<"prepareSession">> {
+  if (args.isolation) throw new OmpRefusal("material_isolation_unsupported");
   if (args.inferenceLimits !== undefined) throw new OmpRefusal("inference_limits_unsupported");
   await authorizeTarget(ctx, args, true);
   await authorizeTerminalSpawn(ctx, args.containerId);
@@ -743,8 +766,9 @@ async function oneShotPreparation(
   args: ActionInput<"runSession">,
 ) {
   const prepared = await sessionPreparation(ctx, args);
-  const current = await currentOperation(ctx, args.machineId, SESSION_OPERATION_ID);
-  const declared = current.deployment.installation?.machine?.operations[SESSION_OPERATION_ID]?.limits;
+  const operationId = args.isolation ? MATERIAL_SESSION_OPERATION_ID : SESSION_OPERATION_ID;
+  const current = await currentOperation(ctx, args.machineId, operationId);
+  const declared = current.deployment.installation?.machine?.operations[operationId]?.limits;
   let limits: PublicJob["limits"] | undefined;
   if (args.inferenceLimits !== undefined) {
     if (!declared) throw new OmpRefusal("inference_limits_unsupported");
@@ -756,13 +780,17 @@ async function oneShotPreparation(
     }
     limits = { ...JobLimitsSchema.strip().parse(declared), inference: { ...declared.inference, ...args.inferenceLimits } };
   }
-  if (prepared.review.skills.mode !== "preserve") requireSkillRuntime(current.deployment.installation?.machine, SESSION_OPERATION_ID);
-  if (args.automation) requireSdkRuntime(current.deployment.installation?.machine, SESSION_OPERATION_ID);
+  if (args.isolation) requireMaterialRuntime(current.deployment.installation?.machine);
+  else {
+    if (prepared.review.skills.mode !== "preserve") requireSkillRuntime(current.deployment.installation?.machine, operationId);
+    if (args.automation) requireSdkRuntime(current.deployment.installation?.machine, operationId);
+  }
   return {
     prepared,
+    operationId,
     pins: current.pins,
     limits,
-    digest: digestOf({ review: prepared.review.reviewDigest, current }),
+    digest: digestOf({ review: prepared.review.reviewDigest, current, inputs: args.inputs ?? [] }),
   };
 }
 /**
@@ -784,6 +812,7 @@ export async function runSession(
   if (args.prompt.length === 0) throw new OmpRefusal("prompt_required");
   if ((args.inputs ?? []).some(binding => binding.name !== "material") || (args.inputs?.length ?? 0) > 1)
     throw new OmpRefusal("invalid_material_input");
+  if (args.isolation && args.inputs?.length !== 1) throw new OmpRefusal("invalid_material_input");
   const first = await oneShotPreparation(ctx, args);
   if (first.prepared.review.reviewDigest !== args.reviewDigest)
     throw new OmpRefusal("review_changed");
@@ -793,7 +822,7 @@ export async function runSession(
   const input = latest.prepared.input;
   const provenance = provenanceSchema.parse({
     target: latest.prepared.review.destination,
-    operationId: SESSION_OPERATION_ID,
+    operationId: latest.operationId,
     door: "runSession",
     requester: ctx.auth.principal.id,
     pins: latest.pins,
@@ -808,6 +837,7 @@ export async function runSession(
     candidates: null,
     inputs: [...(args.inputs ?? []), ...latest.prepared.inputs],
     ...(latest.limits === undefined ? {} : { limits: latest.limits }),
+    ...(args.isolation ? { isolation: args.isolation } : {}),
   });
   return execute(ctx, jobId, provenance, [
     { name: SESSION_OUTPUT_NAME, locationId: RUNS_LOCATION_ID, components: [jobId] },
@@ -817,6 +847,12 @@ export async function runSession(
 async function sessionProvenance(ctx: OmpContext, target: Target, jobId: string) {
   await authorizeTarget(ctx, target);
   const provenance = await retainedProvenance(ctx, target, jobId);
+  if (provenance.operationId !== (provenance.isolation ? MATERIAL_SESSION_OPERATION_ID : SESSION_OPERATION_ID) ||
+    (provenance.isolation && (provenance.inputs.length !== 1 || provenance.inputs[0]?.name !== "material" ||
+      provenance.input.isolation !== JSON.stringify(provenance.isolation) ||
+      provenance.inputDigest !== digestOf(provenance.input))) ||
+    (!provenance.isolation && provenance.input.isolation !== undefined))
+    throw new OmpRefusal("provenance_changed");
   if (
     provenance.door !== "runSession" ||
     provenance.modelIdentities !== null ||
@@ -864,7 +900,7 @@ async function sessionSilence(
     said = await readNamedOutput(
       ctx,
       machineId,
-      SESSION_OPERATION_ID,
+      job.operationId,
       job,
       "stderr",
       SESSION_STDERR_LIMIT,
@@ -902,7 +938,7 @@ export async function readSession(
   const result = await readSealedArchive(
     ctx,
     args.machineId,
-    "session",
+    provenance.isolation ? "material-session" : "session",
     args.jobId,
     "runSession",
     SESSION_OUTPUT_NAME,
@@ -961,21 +997,19 @@ export async function cancelSession(
 ): Promise<ActionResult<"cancelSession">> {
   const target = { containerId: args.containerId, machineId: args.machineId };
   const provenance = await sessionProvenance(ctx, target, args.jobId);
-  const posted = await jobOfDoor(
-    ctx,
-    args.machineId,
-    "session",
-    args.jobId,
-    "runSession",
-  );
-  // A changed ceiling invalidates receipt attestation, not authority to stop this exact job.
-  checkJob(posted, provenance, args.jobId, false);
   const node = {
     kind: "job" as const,
     machineId: args.machineId,
-    operationId: posted.operationId,
+    operationId: provenance.operationId,
     jobId: args.jobId,
   };
+  // Malformed non-identity result/usage/limits cannot prevent stopping the admitted job.
+  const identity = PublicJobSchema.pick({
+    jobId: true, machineId: true, pluginId: true, operationId: true,
+    inputDigest: true, installationRevision: true, artifactSha256: true,
+    resourceBindingDigest: true, inputs: true, authority: true,
+  }).strip().parse(await ctx.jobs.status(node));
+  checkJob({ ...identity, result: null } as PublicJob, provenance, args.jobId, false);
   await ctx.jobs.cancel(node);
   const job = PublicJobSchema.parse(await ctx.jobs.status(node));
   checkJob(job, provenance, args.jobId, false);

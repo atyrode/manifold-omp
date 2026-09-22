@@ -14,10 +14,11 @@ const scenario = process.argv[2]!;
 const sessions = "/home/job/omp-sessions";
 const saved = join(sessions, "saved.jsonl");
 const fresh = scenario.startsWith("fresh-");
+const material = scenario.startsWith("material-");
 const rpc = scenario === "fresh-rpc-selected";
 const selected = scenario === "selected" || scenario === "fresh-sdk-selected" || rpc;
 const filtered = scenario === "fresh-sdk-filtered";
-const resumed = !fresh && !["selected", "disabled", "cancel"].includes(scenario);
+const resumed = !fresh && !material && !["selected", "disabled", "cancel"].includes(scenario);
 let owner: Socket | undefined;
 let child: Bun.Subprocess | undefined;
 let gateway: Bun.Server<undefined> | undefined;
@@ -70,7 +71,7 @@ try {
   check(!Object.keys(process.env).some(key => /^(?:MANIFOLD_|AWS_|OPENAI_|ANTHROPIC_|CODE_)/.test(key)), "ambient-environment");
   const routes = (await readFile("/proc/net/route", "utf8")).trim().split("\n").slice(1);
   check(routes.every(line => line.split(/\s+/)[0] === "lo"), "network-namespace");
-  const launch: { argv: string[]; sessionId: string } | undefined = fresh ? JSON.parse(await readFile("/inputs/launch", "utf8")) : undefined;
+  const launch: { argv: string[]; sessionId: string } | undefined = fresh || material ? JSON.parse(await readFile("/inputs/launch", "utf8")) : undefined;
   if (fresh) {
     // An unrelated prior selected-skill conversation must neither be continued
     // nor contribute its historical optional skill choice to this fresh launch.
@@ -118,9 +119,10 @@ try {
   }
   const before = new Map<string, string>();
   for (const name of await readdir(sessions)) if (name.endsWith(".jsonl")) before.set(name, await readFile(join(sessions, name), "utf8"));
-  const refused = ["missing-model", "missing-thinking", "incompatible", "changed", "missing", "rpc-restricted"].includes(scenario);
+  const refused = ["missing-model", "missing-thinking", "incompatible", "changed", "missing", "rpc-restricted",
+    "material-extra", "material-digest", "material-utf8", "material-oversized"].includes(scenario);
   const expectedModel = scenario === "model-only" || scenario === "model-suffix" ? "fixture/openai/o3" : scenario === "both" ? "fixture/openai/gpt-4.1" : "fixture/openai/gpt-5";
-  const expectedThinking = scenario === "auto" ? "auto" : fresh ? "low" : ["model-suffix", "thinking-only", "both", "disabled", "cancel"].includes(scenario) ? "off" : "high";
+  const expectedThinking = material ? "off" : scenario === "auto" ? "auto" : fresh ? "low" : ["model-suffix", "thinking-only", "both", "disabled", "cancel"].includes(scenario) ? "off" : "high";
   gateway = Bun.serve({ hostname: "127.0.0.1", port: 38457, idleTimeout: 0, async fetch(request) {
     try {
       check(request.headers.get("authorization") === `Bearer ${["SYNTHETIC", "LOCAL", "FIXTURE", "NOT", "A", "CREDENTIAL"].join("-")}`, "synthetic-capability");
@@ -153,10 +155,17 @@ try {
       check(parsed.modelId === expectedModel, "resumed-model-selection");
       if (expectedThinking === "high" || expectedThinking === "low") check(parsed.options.reasoning === expectedThinking, "resumed-thinking-preservation");
       else check(parsed.options.reasoning === undefined && parsed.options.disableReasoning === true, "explicit-thinking-off");
-      if (!fresh) check(JSON.stringify(names) === JSON.stringify(["read"]), "restricted-registry-widened");
+      if (material) check(names.length === 0, "material-registry-not-empty");
+      else if (!fresh) check(JSON.stringify(names) === JSON.stringify(["read"]), "restricted-registry-widened");
       else check(names.includes("read"), "ordinary-read-tool-missing");
       const instructions = JSON.stringify({ system: parsed.context.systemPrompt, tools: parsed.context.tools });
       check(!instructions.includes("HOSTILE-AMBIENT-SKILL") && !instructions.includes("HOSTILE-PROJECT-CONTEXT"), "ambient-discovery");
+      if (material) {
+        const context = JSON.stringify(parsed.context);
+        check(context.includes("SDK-PROOF-PROMPT") && context.includes("MATERIAL-SOURCE-WITNESS") && context.includes("x".repeat(70000)), "material-truncated-or-missing");
+        check(!context.includes("CONFIG-SECRET-SENTINEL") &&
+          !context.includes(["SYNTHETIC", "LOCAL", "FIXTURE", "NOT", "A", "CREDENTIAL"].join("-")), "material-secret-disclosure");
+      }
       if (selected) check(instructions.includes("sealed-proof"), "selected-skill-not-advertised");
       else if (!fresh || scenario === "fresh-sdk-disabled") check(!instructions.includes("skill://"), "disabled-skill-advertised");
       else check(!instructions.includes("sealed-proof"), filtered ? "filtered-skill-advertised" : "historical-skill-restored");
@@ -173,7 +182,14 @@ try {
           cancel() { cancelled = true; },
         }), { headers: { "Content-Type": "text/event-stream" } });
       }
-      if ((selected || filtered) && requests === 1) {
+      if (scenario === "material-tools" && requests === 1) {
+        message.stopReason = "toolUse";
+        message.content = [
+          { type: "toolCall", id: "material-read", name: "read", arguments: { path: "/home/job/.omp/agent/secret-sentinel" } },
+          { type: "toolCall", id: "material-bash", name: "bash", arguments: { command: "touch /home/job/forbidden-executed" } },
+          { type: "toolCall", id: "material-task", name: "task", arguments: { task: "Read /home/job/.omp/agent/models.yml" } },
+        ];
+      } else if ((selected || filtered) && requests === 1) {
         message.stopReason = "toolUse";
         message.content = [
           { type: "toolCall", id: "proof-read", name: "read", arguments: { path: "skill://sealed-proof/resource.txt" } },
@@ -183,6 +199,11 @@ try {
           ] : []),
         ];
       } else {
+        if (scenario === "material-tools") {
+          const results = parsed.context.messages.filter((message): message is ToolResultMessage => message.role === "toolResult");
+          for (const id of ["material-read", "material-bash", "material-task"])
+            check(results.some(result => result.toolCallId === id && result.isError), "material-forbidden-tool-executed");
+        }
         if (selected || filtered) {
           const results = parsed.context.messages.filter((message): message is ToolResultMessage => message.role === "toolResult");
           const read = results.find(result => result.toolCallId === "proof-read");
@@ -199,12 +220,12 @@ try {
     }
   } });
   const kind = scenario === "rpc-restricted" ? "rpc-resume" : resumed ? "resume" : "print";
-  const argv = fresh && !rpc ? ["/runtime/bin/bun", ...launch!.argv]
+  const argv = (fresh || material) && !rpc ? ["/runtime/bin/bun", ...launch!.argv]
     : ["/runtime/bin/bun", "--no-env-file", "--no-install", "--config=/dev/null", "/runtime/bin/sdkHost", rpc ? "rpc" : kind];
   if (resumed) argv.push(scenario === "missing" ? "missing.jsonl" : "saved.jsonl");
   if (rpc) argv.push(`${launch!.sessionId}.jsonl`, "/inputs/admission");
   const env = { ...process.env };
-  if (fresh && !rpc) env.MANIFOLD_JOB_CONTEXT_FD = "3";
+  if ((fresh || material) && !rpc) env.MANIFOLD_JOB_CONTEXT_FD = "3";
   let rendered = false;
   const spawnOptions = { cwd: "/inputs", env, stderr: "pipe" as const };
   if ((resumed && !refused) || (fresh && !rpc)) {
@@ -219,15 +240,17 @@ try {
       if (text.includes("\x1b]11;?")) pty.write("\x1b]11;rgb:0000/0000/0000\x1b\\");
       if (terminal.includes("SDK-PROOF-COMPLETE")) rendered = true;
     } } });
-  } else child = Bun.spawn(argv, { ...spawnOptions, stdin: rpc ? "pipe" : "ignore", stdout: "pipe" });
-  if (fresh && !rpc) {
+  } else child = Bun.spawn(argv, { ...spawnOptions,
+    ...(material ? { stdio: ["ignore", "pipe", "pipe", "socket-fd"] as ["ignore", "pipe", "pipe", "socket-fd"] }
+      : { stdin: rpc ? "pipe" : "ignore", stdout: "pipe" }) });
+  if ((fresh || material) && !rpc) {
     // The pinned Bun exposes an owned socketpair endpoint for the native ABI.
     const fd = child.stdio[3];
     check(typeof fd === "number", "worker-context-socket");
     owner = (connect as unknown as (options: { fd: number }) => Socket)({ fd });
     owner.on("error", () => {});
   }
-  owner?.write(`${JSON.stringify({ type: "context", locations: [
+  owner?.write(`${JSON.stringify({ type: "context", locations: material ? [] : [
     { locationId: "atyrode.omp.workspace", guestPath: "/home/job/workspace", access: "write" },
     { locationId: "atyrode.omp.sessions", guestPath: sessions, access: "write" },
   ] })}\n`);
@@ -299,6 +322,8 @@ try {
       "missing-model": "omp_resume_model_missing", "missing-thinking": "omp_resume_thinking_missing",
       incompatible: "omp_resume_thinking_incompatible", changed: "omp_resume_session_changed",
       missing: "omp_resume_session_changed", "rpc-restricted": "omp_restricted_harness_unsupported",
+      "material-extra": "omp_material_entries_invalid", "material-digest": "omp_material_digest_changed",
+      "material-utf8": "omp_sdk_failed", "material-oversized": "omp_material_file_invalid",
     };
     check(exit !== 0 && stderr.includes(reasons[scenario]!), "expected-refusal");
     check(requests === 0, "refusal-inferred");
@@ -326,6 +351,8 @@ try {
     check(context.models[manager.getLastModelChangeRole() ?? "default"] === expectedModel, "durable-model");
     check((context.configuredThinkingLevel ?? context.thinkingLevel) === expectedThinking, "durable-thinking");
     if (fresh) check(context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-PROMPT")), "fresh-durable-prompt");
+    if (material) check(context.messages.some(message => message.role === "user" &&
+      JSON.stringify(message.content).includes("MATERIAL-SOURCE-WITNESS")), "material-durable-source-missing");
     if (resumed && scenario !== "auto") check(context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-RESUMED-TURN")), "durable-resumed-turn");
     if (scenario === "selected") {
       await manager.setSessionName("SDK proof saved session", "user");

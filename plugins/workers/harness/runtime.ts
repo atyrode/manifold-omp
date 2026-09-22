@@ -103,16 +103,19 @@ export async function runOmpNative(signal: AbortSignal): Promise<boolean> {
   const separator = process.argv.indexOf("--", 3);
   const options = process.argv.slice(3, separator < 0 ? undefined : separator);
   const print = options.includes("-p");
+  const materialOnly = options.includes("--material-only");
+  if (materialOnly && (!print || skills.mode !== "disabled" || options.includes("--plan-yolo")))
+    throw new Error("omp_material_policy_invalid");
   let sessionFile: string | undefined;
   if (!print) {
     const root = openSessionsRoot();
     try { sessionFile = prepareSessionFile(root, SessionIdSchema.parse(inputText("sessionId", 36)), "/home/job/workspace", false); }
     finally { closeSync(root); }
   }
-  if (readAutomation().mode === "restricted" || skills.mode !== "preserve") {
+  if (materialOnly || readAutomation().mode === "restricted" || skills.mode !== "preserve") {
     if (options.includes("--plan-yolo")) throw new Error("omp_skills_plan_unsupported");
     const child = spawn("/runtime/bin/bun", ["--no-env-file", "--no-install", "--config=/dev/null", "/runtime/bin/sdkHost",
-      print ? "print" : "interactive", ...(sessionFile ? [sessionFile] : [])], {
+      materialOnly ? "material-print" : print ? "print" : "interactive", ...(sessionFile ? [sessionFile] : [])], {
       cwd: "/inputs", env: ompEnvironment, stdio: "inherit",
     });
     const exit = Promise.withResolvers<number | null>();

@@ -81,7 +81,8 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
     await writeFile(join(work, "control.js"), new Uint8Array(await control.outputs[0]!.arrayBuffer()), { mode: 0o400 });
     await mkdir(join(work, "state"), { mode: 0o700 });
     const cases = ["selected", "disabled", "preserve", "auto", "model-only", "model-suffix", "thinking-only", "both", "missing-model", "missing-thinking", "incompatible", "changed", "missing", "rpc-restricted", "cancel",
-      "fresh-cli-preserve", "fresh-sdk-selected", "fresh-sdk-disabled", "fresh-sdk-filtered", "fresh-rpc-selected"] as const;
+      "fresh-cli-preserve", "fresh-sdk-selected", "fresh-sdk-disabled", "fresh-sdk-filtered", "fresh-rpc-selected",
+      "material-valid", "material-tools", "material-extra", "material-digest", "material-utf8", "material-oversized"] as const;
     for (const scenario of cases) {
       phase = scenario;
       const directory = join(work, scenario);
@@ -91,44 +92,56 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
       for (const path of [home, inputs, outputs, join(outputs, "session"), join(home, "workspace"), join(home, "tmp"), join(home, "omp-sessions"), join(home, ".omp/agent")])
         await mkdir(path, { recursive: true, mode: 0o700 });
       const fresh = scenario.startsWith("fresh-");
+      const material = scenario.startsWith("material-");
       const selected = scenario === "selected" || scenario === "fresh-sdk-selected" || scenario === "fresh-sdk-filtered" || scenario === "fresh-rpc-selected";
       const preserve = scenario === "fresh-cli-preserve";
       const config = {
         extensions: [], disabledProviders: [], extendedContext: false, startup: { setupWizard: false },
-        modelRoles: { default: fresh || scenario === "selected" || scenario === "disabled" || scenario === "cancel" ? "fixture/openai/gpt-5" : "fixture/openai/gpt-4.1" },
+        modelRoles: { default: material || fresh || scenario === "selected" || scenario === "disabled" || scenario === "cancel" ? "fixture/openai/gpt-5" : "fixture/openai/gpt-4.1" },
         ...(scenario === "selected" ? { defaultThinkingLevel: "high" } : fresh ? { defaultThinkingLevel: "low" } : {}),
         task: { agentModelOverrides: { scout: "fixture/openai/gpt-4.1", task: "fixture/openai/o3", reviewer: "fixture/openai/gpt-5" } },
         ...(!preserve ? { skills: selected ? { customDirectories: ["/inputs/optionalSkill0"] } : { enabled: false } } : {}),
       };
       const sealed = async (path: string, value: unknown) => writeFile(path, typeof value === "string" ? value : JSON.stringify(value), { mode: 0o400 });
-      if (!fresh) await sealed(join(home, ".omp/agent/config.yml"), config);
+      if (!fresh && !material) await sealed(join(home, ".omp/agent/config.yml"), config);
       const models = { providers: { fixture: {
         baseUrl: "http://127.0.0.1:38457", apiKey: "SYNTHETIC-LOCAL-FIXTURE-NOT-A-CREDENTIAL", transport: "pi-native", discovery: { type: "proxy" },
       } } };
-      if (!fresh) await sealed(join(home, ".omp/agent/models.yml"), models);
-      const automation = fresh ? { mode: "ordinary" } : { mode: "restricted", toolNames: ["read"], delegation: "disabled" };
+      if (!fresh && !material) await sealed(join(home, ".omp/agent/models.yml"), models);
+      const automation = material ? { mode: "restricted", toolNames: [], delegation: "disabled" }
+        : fresh ? { mode: "ordinary" } : { mode: "restricted", toolNames: ["read"], delegation: "disabled" };
       const skillRuntime = { mode: preserve ? "preserve" : selected ? "selected" : "disabled", names: selected ? ["sealed-proof"] : [] };
-      if (!fresh) {
+      if (!fresh && !material) {
         await sealed(join(inputs, "automation"), automation);
         await sealed(join(inputs, "skillRuntime"), skillRuntime);
       }
       const overrides = scenario === "model-only" ? { model: "fixture/openai/o3" } : scenario === "model-suffix" ? { model: "fixture/openai/o3:off" }
         : scenario === "thinking-only" ? { thinking: "off" }
         : scenario === "both" ? { model: "fixture/openai/gpt-4.1:high", thinking: "off" } : {};
-      if (!fresh) {
+      if (!fresh && !material) {
         await sealed(join(inputs, "resumeOverrides"), overrides);
         await sealed(join(inputs, "prompt"), "SDK-PROOF-PROMPT");
       }
-      if (fresh) {
+      if (fresh || material) {
         const sessionId = "9309cd84-61c4-4df8-a0ad-44489873a902";
         // Materialize the shipped launch contract, including homePath placement,
         // rather than hand-maintaining another set of worker arguments or mounts.
-        const operation = bundle.manifest.machine!.operations["atyrode.omp.launch"]!;
+        const operation = bundle.manifest.machine!.operations[material ? "atyrode.omp.material-session" : "atyrode.omp.launch"]!;
         const input: Record<string, string | boolean> = {
           sessionId, config: JSON.stringify(config), models: JSON.stringify(models), accountPool: "{}",
           prompt: "SDK-PROOF-PROMPT", hasPrompt: true, planYolo: false, disableSkills: !selected && !preserve,
           automation: JSON.stringify(automation), skillRuntime: JSON.stringify(skillRuntime), resumeOverrides: "{}",
         };
+        if (material) {
+          const content = scenario === "material-utf8" ? Buffer.from([0xff])
+            : Buffer.from("MATERIAL-SOURCE-WITNESS\n" + "x".repeat(scenario === "material-oversized" ? 1048576 : 70000));
+          await mkdir(join(inputs, "material"));
+          await writeFile(join(inputs, "material/transcript-map.json"), content, { mode: 0o400 });
+          if (scenario === "material-extra") await sealed(join(inputs, "material/extra"), "UNREVIEWED-SOURCE");
+          input.isolation = JSON.stringify({ mode: "material-only", file: "transcript-map.json",
+            bytes: scenario === "material-oversized" ? 1048576 : content.length,
+            sha256: scenario === "material-digest" ? "0".repeat(64) : hash(content) });
+        }
         for (const [name, file] of Object.entries(operation.inputFiles ?? {})) {
           check(file.input !== undefined && input[file.input] !== undefined, "launch-input-file-source");
           const destination = file.homePath ? join(home, ...file.homePath) : join(inputs, name);
@@ -168,6 +181,7 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
         await sealed(join(home, "workspace/bunfig.toml"), 'preload = ["./preload.ts"]\n');
         await sealed(join(home, "workspace/.env"), "MANIFOLD_SDK_PROOF=not-a-capability\nSDK_PROOF_HOSTILE_ENV=present\n");
         await sealed(join(home, "workspace/preload.ts"), 'import {writeFileSync} from "node:fs"; writeFileSync("/home/job/preload-executed", "bad");\n');
+        await sealed(join(home, ".omp/agent/secret-sentinel"), "CONFIG-SECRET-SENTINEL");
       }
       const args = ["--unshare-all", "--die-with-parent", "--new-session", "--clearenv", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
         "--ro-bind", runtime, "/runtime", "--bind", home, "/home/job", "--ro-bind", inputs, "/inputs", "--bind", outputs, "/outputs",

@@ -11,6 +11,7 @@ import {
   SESSION_GUEST_PATH,
   PROMPT_MAX_BYTES,
   SESSION_OPERATION_ID,
+  MATERIAL_SESSION_OPERATION_ID,
   SESSION_OUTPUT_NAME,
   createOmpClient,
   type ActionInput,
@@ -1134,4 +1135,69 @@ test("cost review prices the served model rather than its thinking suffix", asyn
   expect(await f.client.call("reviewSession", { ...input,
     overlay: { modelRoles: { default: "anthropic/claude-opus-4-1:high" } } }))
     .toEqual({ refused: "omp_inference_price_unknown" });
+});
+
+async function materialFixture() {
+  const f = fixture();
+  const deployment = structuredClone(await f.ctx.jobs.describeDeployment({ machineId: target.machineId, pluginId: OMP_PLUGIN_ID }));
+  deployment.installation!.machine = MachineHalfSchema.parse({ ...deployment.installation!.machine,
+    tools: { ...deployment.installation!.machine.tools, bun: sdkRuntimeArtifacts.tools.bun,
+      "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
+  f.ctx.jobs.describeDeployment = async () => deployment;
+  const isolation = { mode: "material-only" as const, file: "transcript-map.json", bytes: 123, sha256: "a".repeat(64) };
+  return { f, deployment, input: { ...session, isolation } };
+}
+
+test("material-only reviews bind content and operation, require material, and cannot become terminal sessions", async () => {
+  const { f, input } = await materialFixture();
+  const review = await f.client.call("reviewSession", input);
+  if ("refused" in review) throw new Error(review.refused);
+  expect(review.operationId).toBe(MATERIAL_SESSION_OPERATION_ID);
+  expect(review.isolation).toEqual(input.isolation);
+  expect(review.automation).toEqual({ mode: "restricted", toolNames: [], delegation: "disabled" });
+  expect(review.skills.mode).toBe("disabled");
+  const request = { ...input, reviewDigest: review.reviewDigest };
+  expect(await f.client.call("runSession", request)).toEqual({ refused: "omp_invalid_material_input" });
+  expect(await f.client.call("prepareSession", request)).toEqual({ refused: "omp_material_isolation_unsupported" });
+  expect(await f.client.call("runSession", { ...request, isolation: { ...input.isolation, bytes: 124 }, inputs: [material] }))
+    .toEqual({ refused: "omp_review_changed" });
+  expect(f.posted).toEqual([]);
+  const job = await f.client.call("runSession", { ...request, inputs: [material] });
+  if ("refused" in job) throw new Error(job.refused);
+  expect(job.operationId).toBe(MATERIAL_SESSION_OPERATION_ID);
+  f.seal(job.jobId, ustar([[transcriptName, transcript]]));
+  const read = await f.client.call("readSession", { ...target, jobId: job.jobId });
+  if ("refused" in read) throw new Error(read.refused);
+  expect(read.session).toEqual(receipt);
+  const cancelled = await f.client.call("cancelSession", { ...target, jobId: job.jobId });
+  if ("refused" in cancelled) throw new Error(cancelled.refused);
+  expect(f.cancelled).toEqual([job.jobId]);
+  f.amend(job.jobId, { inputs: [{ name: "material", from: { jobId: "replacement", output: "outputs" } }] });
+  expect(await f.client.call("readSession", { ...target, jobId: job.jobId })).toEqual({ refused: "omp_provenance_changed" });
+  expect(await f.client.call("cancelSession", { ...target, jobId: job.jobId })).toEqual({ refused: "omp_provenance_changed" });
+  expect(f.cancelled).toEqual([job.jobId]);
+});
+
+test("material-only refuses broadened tools, selected skills, fallback and shared mounts", async () => {
+  const { f, input, deployment } = await materialFixture();
+  expect(await f.client.call("reviewSession", { ...input,
+    automation: { mode: "restricted", toolNames: ["read"], delegation: "disabled" } }))
+    .toEqual({ refused: "omp_material_isolation_unsupported" });
+  expect(await f.client.call("reviewSession", { ...input, skills: { mode: "select", expectedCatalogRevision: 0, skillIds: [], setIds: [] } }))
+    .toEqual({ refused: "omp_material_isolation_unsupported" });
+  expect(await f.client.call("reviewSession", { ...input, overlay: { ...input.overlay, retry: { enabled: true, modelFallback: true } } }))
+    .toEqual({ refused: "omp_restricted_delegation_unsupported" });
+  deployment.installation!.machine.operations[MATERIAL_SESSION_OPERATION_ID]!.locations.push({ locationId: RUNS_LOCATION_ID, access: "write" });
+  expect(await f.client.call("reviewSession", input)).toEqual({ refused: "omp_material_runtime_unsupported" });
+  expect(f.posted).toEqual([]);
+});
+
+test("cancellation reaches the exact admitted material job even with malformed result fields", async () => {
+  const { f, input } = await materialFixture();
+  const job = await f.client.call("runSession", { ...input, reviewDigest: await reviewDigestOf(f.client, input), inputs: [material] });
+  if ("refused" in job) throw new Error(job.refused);
+  const status = f.ctx.jobs.status.bind(f.ctx.jobs);
+  f.ctx.jobs.status = async (...args) => ({ ...await status(...args), result: { malformed: true } }) as never;
+  await f.client.call("cancelSession", { ...target, jobId: job.jobId });
+  expect(f.cancelled).toEqual([job.jobId]);
 });

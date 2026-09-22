@@ -62,6 +62,8 @@ export const LAUNCH_OPERATION_ID = `${OMP_PLUGIN_ID}.launch`;
 export const RESUME_OPERATION_ID = `${OMP_PLUGIN_ID}.resume`;
 /** The one-shot sibling of `launch`: no stdin, its own bounded output lease. */
 export const SESSION_OPERATION_ID = `${OMP_PLUGIN_ID}.session`;
+/** Zero-tool one-shot execution over exactly one sealed material file. */
+export const MATERIAL_SESSION_OPERATION_ID = `${OMP_PLUGIN_ID}.material-session`;
 /** A bound output name, never the implicit `stdout`/`stderr` streams. */
 export const SESSION_OUTPUT_NAME = "session";
 /** Named outputs lease a bounded tmpfs, which only the runtime anchor provides. */
@@ -243,6 +245,15 @@ export const InventoryInputSchema = executionInput.extend({
  * Bytes, not characters: three-byte UTF-8 passes a character count three times over.
  */
 export const PROMPT_MAX_BYTES = 45056;
+export const MATERIAL_MAX_BYTES = 1 << 20;
+export const MaterialOnlyIsolationSchema = z.strictObject({
+  mode: z.literal("material-only"),
+  file: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/)
+    .refine(value => !["__proto__", "constructor", "prototype"].includes(value)),
+  sha256: digest,
+  bytes: z.number().int().positive().max(MATERIAL_MAX_BYTES),
+});
+export type MaterialOnlyIsolation = z.infer<typeof MaterialOnlyIsolationSchema>;
 export const SessionInputSchema = executionInput.extend({
   overlay: OverlaySchema,
   // Empty is the interactive terminal opened with no initial prompt (`hasPrompt: false`).
@@ -259,6 +270,7 @@ export const SessionInputSchema = executionInput.extend({
   planYolo: z.boolean(),
   skills: SkillSelectionSchema.optional(),
   automation: RestrictedAutomationSchema.optional(),
+  isolation: MaterialOnlyIsolationSchema.optional(),
   inferenceLimits: JobInferenceLimitsSchema.refine(value => Object.keys(value).length > 0, "empty inference limits").optional(),
 });
 /** Durable dials share the exact validated launch settings; paths and credentials
@@ -270,6 +282,7 @@ export const OmpHarnessProfileSchema = SessionInputSchema.omit({
   prompt: true,
   skills: true,
   automation: true,
+  isolation: true,
   inferenceLimits: true,
 });
 export type OmpHarnessProfile = z.infer<typeof OmpHarnessProfileSchema>;
@@ -279,6 +292,7 @@ export const SessionReviewSchema = ReviewSchema.extend({
   accountPool: RuntimeAccountPoolSchema,
   skills: SkillReviewSchema,
   automation: AutomationReviewSchema,
+  isolation: MaterialOnlyIsolationSchema.optional(),
   inferenceLimits: JobInferenceLimitsSchema.optional(),
 });
 export const PreparedSessionSchema = z
