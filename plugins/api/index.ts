@@ -15,6 +15,7 @@ import {
   AccountReferenceSchema,
   AccountsObservationSchema,
   BrokerClientAccessSchema,
+  GatewayRequestLimitsSchema,
 } from "./contracts.ts";
 import {
   ProbeIdentitiesSchema,
@@ -385,12 +386,15 @@ const gatewayReviewInput = TargetSchema.extend({
   expectedServiceRevision: id.nullable(),
   // Omission retains the existing schedule; null explicitly removes it.
   prices: GatewayPricesSchema.nullable().optional(),
+  // Omission retains the installed limits; null explicitly removes them.
+  requestLimits: GatewayRequestLimitsSchema.nullable().optional(),
 });
 export const GatewayReviewSchema = z.strictObject({
   destination: TargetSchema,
   expectedServiceRevision: id.nullable(),
   runtime: ResourcePinsSchema,
   prices: GatewayPricesSchema.nullable(),
+  requestLimits: GatewayRequestLimitsSchema.nullable(),
   reviewDigest: digest,
 });
 export const GatewaySetupSchema = z.strictObject({
