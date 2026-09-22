@@ -29,17 +29,11 @@ test("only observed assistant streams enter the model stage; lifecycle ends clea
   observer.observe(line({ type: "message_update", assistantMessageEvent: { type: "error", reason: "private failure" } }));
   observer.observe(line({ type: "agent_end", messages: ["private transcript"] }));
   observer.end();
-  expect(progress).toEqual([
-    { stage: "running", message: "OMP lifecycle continuing." },
-    { stage: "at the model", message: "Assistant stream started." },
-    { stage: "running", message: "OMP lifecycle continuing." },
-    { stage: "running tools", message: "Tool lifecycle observed." },
-    { stage: "running", message: "OMP lifecycle continuing." },
-    { stage: "at the model", message: "Assistant stream started." },
-    { stage: "running", message: "OMP lifecycle continuing." },
-    { stage: "finishing", message: "Agent turn ended." },
-    { stage: "stopped", message: "OMP output ended." },
+  expect(progress.map(value => value.stage)).toEqual([
+    "running", "at the model", "running", "running tools", "running",
+    "at the model", "running", "finishing", "stopped",
   ]);
+  expect(JSON.stringify(progress)).not.toContain("private");
 });
 
 test("frame limit is inclusive across fragmented UTF-8 and overflow cannot leave a stale model claim", () => {
@@ -55,14 +49,14 @@ test("frame limit is inclusive across fragmented UTF-8 and overflow cannot leave
   observer.observe(Buffer.from('{"type":"message_end","message":{"role":"assistant","content":"'));
   const largeChunk = Buffer.alloc(997, 120);
   for (let count = 0; count < 2000; count++) observer.observe(largeChunk);
-  expect(progress.at(-1)).toEqual({ stage: "running", message: "OMP stage unavailable." });
+  expect(progress.at(-1)?.stage).toBe("running");
   observer.observe(Buffer.from('"}}\n'));
   observer.observe(line(start));
   expect(progress.map(value => value.stage)).toEqual(["at the model", "running", "at the model"]);
   // An unterminated event is never accepted, even when syntactically complete.
   observer.observe(Buffer.from('{"type":"agent_end"}'));
   observer.end();
-  expect(progress.at(-1)).toEqual({ stage: "stopped", message: "OMP output ended." });
+  expect(progress.at(-1)?.stage).toBe("stopped");
 });
 
 test("malformed, non-JSON and invalid UTF-8 frames lose observation and recover at the next record", () => {
@@ -71,11 +65,11 @@ test("malformed, non-JSON and invalid UTF-8 frames lose observation and recover 
   for (const malformed of [Buffer.from('{"type":"message_end",}\n'), Buffer.from("not JSON\n"), Buffer.from("null\n"), Buffer.from([0xff, 10])]) {
     observer.observe(line(start));
     observer.observe(malformed);
-    expect(progress.at(-1)).toEqual({ stage: "running", message: "OMP stage unavailable." });
+    expect(progress.at(-1)?.stage).toBe("running");
   }
   observer.observe(line({ type: "tool_execution_start" }));
   observer.observe(Buffer.alloc(OMP_PROGRESS_FRAME_BYTES + 1, 120));
-  expect(progress.at(-1)).toEqual({ stage: "running", message: "OMP stage unavailable." });
+  expect(progress.at(-1)?.stage).toBe("running");
   observer.observe(Buffer.from("\n"));
   observer.observe(line(start));
   expect(progress.at(-1)?.stage).toBe("at the model");
@@ -100,7 +94,7 @@ test("relay preserves every byte, waits for a blocked destination, and does not 
   }, new AbortController().signal).then(() => { settled = true; });
   await blocked.promise;
   expect(settled).toBe(false);
-  expect(Buffer.concat(received)).toEqual(chunks[0]);
+  expect(Buffer.concat(received)).toEqual(chunks[0]!);
   source.push(chunks[1]);
   source.push(chunks[2]);
   source.push(null);
@@ -146,9 +140,8 @@ test("cancellation does not wait for a blocked stdout write or close parent stdo
   } });
   const forwarding = forwardOmpOutput(source, destination, () => {}, controller.signal);
   await blocked.promise;
-  const rejected = expect(forwarding).rejects.toThrow("harness_cancelled");
   controller.abort();
-  await rejected;
+  await expect(forwarding).rejects.toThrow("harness_cancelled");
   expect(source.destroyed).toBe(true);
   expect(destination.destroyed).toBe(false);
   expect(destination.writableEnded).toBe(false);

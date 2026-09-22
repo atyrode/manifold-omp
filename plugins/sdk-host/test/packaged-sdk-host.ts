@@ -69,21 +69,23 @@ function response(message: AssistantMessage, observeProgress = false) {
   }
   events.push({ type: "done", reason: message.stopReason === "toolUse" ? "toolUse" : "stop", message });
   if (observeProgress) {
-    // Hold the synthetic stream after its real start until the native SDK
-    // channel observes it. This uses the existing bounded event wait, not a
-    // wall-clock delay or the production owner's five-second coalescer.
+    // Published retry layers can hold bootstrap events until semantic output.
+    // Keep the response open before its terminal event until the native channel
+    // observes the stream, without a sleep or the owner's coalescing interval.
     return new Response(new ReadableStream<Uint8Array>({
-      async start(controller) {
-        try {
-          const started = ++streamStarts;
-          controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(events[0])}\n\n`));
-          await until(() => modelProgress === started, "print-model-progress-missing");
-          controller.enqueue(new TextEncoder().encode(events.slice(1).map(event => `data: ${JSON.stringify(event)}\n\n`).join("") + "data: [DONE]\n\n"));
-          controller.close();
-        } catch (error) {
-          serverError = error instanceof ProofFailure ? error.code : "print-stream-failed";
-          controller.error(error);
-        }
+      start(controller) {
+        const started = ++streamStarts;
+        controller.enqueue(new TextEncoder().encode(events.slice(0, -1).map(event => `data: ${JSON.stringify(event)}\n\n`).join("")));
+        void (async () => {
+          try {
+            await until(() => modelProgress === started, "print-model-progress-missing");
+            controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(events.at(-1))}\n\ndata: [DONE]\n\n`));
+            controller.close();
+          } catch (error) {
+            serverError = error instanceof ProofFailure ? error.code : "print-stream-failed";
+            controller.error(error);
+          }
+        })();
       },
     }), { headers: { "Content-Type": "text/event-stream" } });
   }

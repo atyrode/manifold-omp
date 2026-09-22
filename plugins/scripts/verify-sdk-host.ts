@@ -127,7 +127,7 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
         // Materialize the shipped operation contract, including homePath placement,
         // rather than hand-maintaining another set of worker arguments or mounts.
         const operation = bundle.manifest.machine!.operations[oneShot ? "atyrode.omp.session" : "atyrode.omp.launch"]!;
-        check("runtimeTool" in operation.executable && operation.executable.runtimeTool === "bun", "operation-executable");
+        check(operation.executable && "runtimeTool" in operation.executable && operation.executable.runtimeTool === "bun", "operation-executable");
         const input: Record<string, string | boolean> = {
           sessionId, config: JSON.stringify(config), models: JSON.stringify(models), accountPool: "{}",
           prompt: "SDK-PROOF-PROMPT", hasPrompt: true, planYolo: false, disableSkills: !selected && !preserve,
