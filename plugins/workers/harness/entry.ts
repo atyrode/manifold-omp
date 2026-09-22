@@ -26,7 +26,7 @@ try {
   } else if (process.argv[2] === "resume") {
     success = await runOmpResume(context.signal);
   } else if (process.argv[2] === "native") {
-    success = await runOmpNative(context.signal);
+    success = await runOmpNative(context.signal, progress => context!.reportProgress(progress));
   } else throw new Error("invalid_harness_operation");
 } catch {
   // No exception, provider diagnostic, path or environment reaches public output.
