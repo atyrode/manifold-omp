@@ -276,6 +276,11 @@ async function gatewayReview(
   );
   if (digestOf(native.pins) !== digestOf(pins))
     throw new OmpRefusal("resources_changed");
+  const operation = native.deployment.installation?.machine.operations[GATEWAY_OPERATION_ID];
+  if (!operation ||
+      digestOf(operation.input.requestLimits ?? null) !== digestOf({ type: "string", required: true, maxLength: 256 }) ||
+      digestOf(operation.inputFiles?.requestLimits ?? null) !== digestOf({ input: "requestLimits" }))
+    throw new OmpRefusal("gateway_resources_incomplete");
   return {
     policies,
     review: {
