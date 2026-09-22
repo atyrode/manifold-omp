@@ -191,6 +191,34 @@ export const PublicJobSchema = z.strictObject({
 });
 export type PublicJob = z.infer<typeof PublicJobSchema>;
 
+/** A bounded native observation, never a transcript or an output-channel replay. */
+export const SessionActivitySchema = z.strictObject({
+  job: PublicJobSchema,
+  inferenceUsage: JobInferenceUsageSchema.extend({
+    lastModel: z.string().min(1).max(256).nullable(),
+  }).nullable(),
+  progress: z.strictObject({
+    stage: z.string().regex(/^[a-z0-9](?:[a-z0-9 ._-]{0,62}[a-z0-9])?$/),
+    at: count,
+    message: z.string().max(256).regex(/^\P{Cc}*$/u).optional(),
+    fraction: z.number().min(0).max(1).optional(),
+  }).nullable(),
+  inferenceCalls: z.array(z.strictObject({
+    seq: count,
+    model: z.string().min(1).max(256),
+    inputTokens: count,
+    outputTokens: count,
+    cachedInputTokens: count,
+    costMicros: count,
+    elapsedMs: count,
+    status: z.number().int().min(100).max(599),
+  })).max(128),
+  seq: count,
+  firstSeq: count.nullable(),
+  unavailable: z.strictObject({ fromSeq: count, toSeq: count }).nullable(),
+});
+export type SessionActivity = z.infer<typeof SessionActivitySchema>;
+
 /** Destination-scoped native deployment progress exposed by OMP. */
 export const DeploymentProgressSchema = z.strictObject({
   deploymentId: id,

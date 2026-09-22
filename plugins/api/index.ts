@@ -4,6 +4,7 @@ import {
   JobInputBindingSchema,
   JobInferenceLimitsSchema,
   PublicJobSchema,
+  SessionActivitySchema,
   TerminalRuntimeSchema,
 } from "./native.ts";
 import {
@@ -37,6 +38,8 @@ export {
   type JobInferenceLimits,
   JobLimitsSchema,
   PublicJobSchema,
+  SessionActivitySchema,
+  type SessionActivity,
   TerminalRuntimeSchema,
   type JobInputBinding,
   type PublicJob,
@@ -477,6 +480,10 @@ export const rootActionSchemas = {
       session: SessionReceiptSchema.nullable(),
       silence: SessionSilenceSchema.nullable(),
     }),
+  },
+  followSession: {
+    input: TargetSchema.extend({ jobId: id }),
+    result: SessionActivitySchema,
   },
   /** Ends a session this door posted. Idempotent: a settled run is answered, not refused. */
   cancelSession: {
