@@ -380,7 +380,8 @@ try {
     phase = "packed-broker-worker-ready";
     await waitFor(async () => {
       const value = await instance();
-      check(!["unavailable", "stopped"].includes(value.state), "packed-broker-worker-refused");
+      check(!["unavailable", "stopped"].includes(value.state),
+        `packed-broker-${`${value.state}-${value.reason ?? "unstated"}`.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/-+$/, "").slice(0, 64)}`);
       return value.state === "ready" && value.configuration?.revision === promoted.revision;
     }, 60_000, 50);
     const retainedAccess = await call("reviewAccountRuntime", { expectedBrokerRevision: promoted.revision });
@@ -531,7 +532,13 @@ try {
     // Preserve this verifier's intentional module-loading boundary: no SDK or
     // native control module is imported before the private environment check.
     const { verifyNativeMaterial } = await import("./verify-native-material.ts");
-    await verifyNativeMaterial({ root, target, hub, producerJobId, materialText });
+    try {
+      await verifyNativeMaterial({ root, target, hub, producerJobId, materialText });
+    } catch (error) {
+      if (error instanceof Error && /^native-material-[a-z0-9-]{1,63}$/.test(error.message))
+        throw new VerificationFailure(error.message);
+      throw error;
+    }
     phase = "packed-broker-graceful-stop";
     await stopBroker();
     const stoppedJob = await waitFor(async () => {
@@ -573,9 +580,15 @@ try {
     check(!(await roster(hub)).some(row => row.manifest.id === "atyrode.code" || row.manifest.id.startsWith("atyrode.code.")),
       "positive-worker-introduced-code-dependency");
     phase = "packaged-sdk-host";
-    const { verifySdkHost } = await import("./verify-sdk-host.ts");
-    await verifySdkHost({ root, bubblewrap, systemBindings: system.system!,
-      bundlePath: bundles.find(bundle => bundle.id === OMP_PLUGIN_ID)!.file });
+    const { verifySdkHost, SdkHostVerificationFailure } = await import("./verify-sdk-host.ts");
+    try {
+      await verifySdkHost({ root, bubblewrap, systemBindings: system.system!,
+        bundlePath: bundles.find(bundle => bundle.id === OMP_PLUGIN_ID)!.file });
+    } catch (error) {
+      if (error instanceof SdkHostVerificationFailure)
+        throw new VerificationFailure(`sdk-${error.code}`);
+      throw error;
+    }
   } finally {
     try { await stopBroker(); } catch { cleanupFailed = true; }
     for (const id of installed.reverse()) {

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { JobDeploymentReviewSchema, JobDeploymentSchema, PublicJobSchema, ServiceConfigurationReadSchema, canonicalJobJson } from "@manifold/protocol";
+import { JobDeploymentReviewSchema, JobDeploymentSchema, JobDescriptionSchema, PublicJobSchema, ServiceConfigurationSchema, ServiceConfigurationReadSchema, canonicalJobJson } from "@manifold/protocol";
 import { ownerAction } from "../../../manifold/packages/plugin-kit/src/hub.ts";
 import { waitFor } from "../../../manifold/packages/testkit/src/index.ts";
 import { MATERIAL_SESSION_OPERATION_ID, OMP_PLUGIN_ID, RUNS_LOCATION_ID, parseSessionArchive } from "../api/index.ts";
@@ -78,9 +78,16 @@ export async function verifyNativeMaterial({ root, target, hub, producerJobId, m
     });
     const previous = ServiceConfigurationReadSchema.parse(await ownerAction(hub, "engine.services.readConfiguration", { machineId: target.machineId }));
     check(!previous.configuration.policies.some(policy => policy.serviceId === "omp"), "unexpected-existing-service");
-    await ownerAction(hub, "engine.services.configureConfiguration", { machineId: target.machineId, expectedRevision: previous.configuration.revision,
+    const configured = ServiceConfigurationSchema.parse(await ownerAction(hub, "engine.services.configureConfiguration", { machineId: target.machineId, expectedRevision: previous.configuration.revision,
       policies: [...previous.configuration.policies, { serviceId: "omp", revision: "1", origin: `http://127.0.0.1:${server.port}`, allowLoopbackHttp: true,
-        maxConcurrent: 1, operations: { models: operation("GET", "/v1/models"), stream: operation("POST", "/v1/pi/stream") } }] });
+        maxConcurrent: 1, operations: { models: operation("GET", "/v1/models"), stream: operation("POST", "/v1/pi/stream") } }] }));
+    const expectedPolicy = digest(configured.policies.find(policy => policy.serviceId === "omp")!);
+    await waitFor(async () => {
+      const described = JobDescriptionSchema.parse(await ownerAction(hub, "engine.jobs.describe", {
+        machineId: target.machineId, pluginId: OMP_PLUGIN_ID,
+      }));
+      return described.connected && described.resources?.services.omp === expectedPolicy;
+    }, 30000, 50);
     await mkdir(join(root, "runtime", "omp", "runs"), { recursive: true, mode: 0o700 });
     const request = { deploymentId: randomUUID(), pluginId: OMP_PLUGIN_ID,
       targets: [{ machineId: target.machineId, platform: "linux-x64" }], operationIds: [MATERIAL_SESSION_OPERATION_ID] };
@@ -94,7 +101,7 @@ export async function verifyNativeMaterial({ root, target, hub, producerJobId, m
     }, 480000, 100);
     const input = {
       config: JSON.stringify({ extensions: [], disabledProviders: [], extendedContext: false, startup: { setupWizard: false },
-        modelRoles: { default: "fixture/openai/gpt-5" }, defaultThinkingLevel: "off", skills: { enabled: false } }),
+        modelRoles: { default: "fixture/openai/gpt-5" }, skills: { enabled: false } }),
       models: JSON.stringify({ providers: { fixture: { baseUrl: "http://invalid.example", apiKey: "NATIVE-CONFIG-SECRET-SENTINEL",
         transport: "pi-native", discovery: { type: "proxy" } } } }),
       accountPool: "{}", hasPrompt: true, prompt: "Summarise the supplied material only.", planYolo: false,
@@ -119,7 +126,20 @@ export async function verifyNativeMaterial({ root, target, hub, producerJobId, m
         check(result.result!.exitCode !== 0 && calls === 0, "extra-material-inferred");
         continue;
       }
-      check(result.state === "exited" && result.result!.exitCode === 0 && calls === 2, "execution-failed");
+      check(result.state === "exited", "job-not-exited");
+      if (result.result!.exitCode !== 0) {
+        const stderr = result.result!.outputs.find(output => output.name === "stderr");
+        if (stderr && stderr.bytes > 0 && stderr.bytes <= 65536) {
+          const page = await ownerAction(hub, "engine.jobs.output", { node: { kind: "output",
+            machineId: target.machineId, operationId: MATERIAL_SESSION_OPERATION_ID, jobId,
+            outputId: stderr.outputId }, offset: 0, maxBytes: stderr.bytes }) as { data: string };
+          const failure = Buffer.from(page.data, "base64").toString("utf8").split("\n")
+            .find(line => /^omp_(?:resume|sdk|restricted|material)_[a-z_]+$/.test(line));
+          if (failure) check(false, failure.replaceAll("_", "-"));
+        }
+      }
+      check(result.result!.exitCode === 0, `worker-exit-${result.result!.exitCode ?? "unknown"}`);
+      check(calls === 2, `inference-count-${calls}`);
       check(result.operationId === MATERIAL_SESSION_OPERATION_ID &&
         result.installationRevision === review.targets[0]!.installationRevision &&
         digest(result.inputs) === digest([{ name: "material", from: { jobId: producerJobId, output: source } }]) &&
