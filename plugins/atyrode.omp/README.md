@@ -84,7 +84,7 @@ The SDK registry is closed with `restrictToolNames: true`, zero names, no custom
 
 The dedicated operation declares no shared workspace, sessions or runs mounts and no working directory. Its only writable persistent result is a fresh session output lease; scratch is private tmpfs. Read and cancel address the retained operation and exact input binding, never a caller-selected replacement. Cancellation still reaches the admitted job when non-identity result metadata is malformed.
 
-**Native prerequisite:** the pinned owner currently requires a named output's backing location to be an ordinary mounted operation location. Material-only execution requires native output-lease-only admission so that the backing runs directory is not mounted. The declaration deliberately does not reintroduce that shared mount to make an old owner run; such owners cannot execute this mode. Packaged SDK-host synthetic scenarios exercise the real shipped worker and empty registry, but are not evidence that this native output-lease prerequisite has landed.
+**Native prerequisite:** this operation declares its runs backing location as `{ locationId: "atyrode.omp.runs", access: "write", outputOnly: true }`. Native output-lease-only admission ([Manifold #824](https://github.com/atyrode/manifold/issues/824)) retains the backing directory privately and exposes only the fresh named output lease, never the parent mount or a broad location capability. Older owners explicitly refuse this declaration; ordinary mounted-location fallback is not permitted. The native verifier exercises real sealed producer inputs, the packaged material worker and the governed synthetic model service, separately from the packaged SDK-host proof.
 
 ## One-shot inference limits
 

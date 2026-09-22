@@ -1187,7 +1187,7 @@ test("material-only refuses broadened tools, selected skills, fallback and share
     .toEqual({ refused: "omp_material_isolation_unsupported" });
   expect(await f.client.call("reviewSession", { ...input, overlay: { ...input.overlay, retry: { enabled: true, modelFallback: true } } }))
     .toEqual({ refused: "omp_restricted_delegation_unsupported" });
-  deployment.installation!.machine.operations[MATERIAL_SESSION_OPERATION_ID]!.locations.push({ locationId: RUNS_LOCATION_ID, access: "write" });
+  deployment.installation!.machine.operations[MATERIAL_SESSION_OPERATION_ID]!.locations = [{ locationId: RUNS_LOCATION_ID, access: "write" }];
   expect(await f.client.call("reviewSession", input)).toEqual({ refused: "omp_material_runtime_unsupported" });
   expect(f.posted).toEqual([]);
 });

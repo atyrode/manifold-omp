@@ -1040,7 +1040,7 @@
           "isolation": { "input": "isolation" }
         },
         "services": [{ "serviceId": "omp", "revision": "1", "operationIds": ["models", "stream"] }],
-        "locations": [],
+        "locations": [{ "locationId": "atyrode.omp.runs", "access": "write", "outputOnly": true }],
         "outputs": ["session"],
         "inputs": ["material"],
         "network": "host",

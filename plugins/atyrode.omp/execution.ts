@@ -611,7 +611,8 @@ function requireMaterialRuntime(machine: MachineHalf | undefined) {
   const operation = machine?.operations[MATERIAL_SESSION_OPERATION_ID];
   requireSdkRuntime(machine, MATERIAL_SESSION_OPERATION_ID);
   if (!operation?.input.isolation || !operation.inputFiles?.isolation ||
-    operation.workingDirectory || operation.locations.length !== 0 ||
+    operation.workingDirectory ||
+    digestOf(operation.locations) !== digestOf([{ locationId: RUNS_LOCATION_ID, access: "write", outputOnly: true }]) ||
     digestOf(operation.inputs ?? []) !== digestOf(["material"]) ||
     digestOf(operation.outputs) !== digestOf([SESSION_OUTPUT_NAME]) ||
     !operation.argv.some(arg => "literal" in arg && arg.literal === "--material-only"))
