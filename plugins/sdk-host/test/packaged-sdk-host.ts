@@ -2,6 +2,7 @@ import { closeSync } from "node:fs";
 import { connect, type Socket } from "node:net";
 import { copyFile, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { WorkerProgressSchema, type WorkerLocation, type WorkerProgress } from "@manifold/protocol";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import type { AssistantMessage, AssistantMessageEvent, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
@@ -9,15 +10,17 @@ import { createSessionFile, openSessionsRoot } from "../../workers/harness/sessi
 
 // Fixture control, not a substitute runtime. Only shipped /runtime/bin programs
 // construct agent sessions or run tools. Public journal inspection and pi-native
-// messages verify their output; fresh terminal cases enter the governed worker.
+// messages verify their output; fresh terminal and one-shot cases enter the governed worker.
 const scenario = process.argv[2]!;
 const sessions = "/home/job/omp-sessions";
 const saved = join(sessions, "saved.jsonl");
 const fresh = scenario.startsWith("fresh-");
+const oneShot = scenario.startsWith("print-");
+const governed = fresh || oneShot;
 const rpc = scenario === "fresh-rpc-selected";
-const selected = scenario === "selected" || scenario === "fresh-sdk-selected" || rpc;
+const selected = scenario === "selected" || scenario === "fresh-sdk-selected" || scenario === "print-sdk-selected" || rpc;
 const filtered = scenario === "fresh-sdk-filtered";
-const resumed = !fresh && !["selected", "disabled", "cancel"].includes(scenario);
+const resumed = !governed && !["selected", "disabled", "cancel"].includes(scenario);
 let owner: Socket | undefined;
 let child: Bun.Subprocess | undefined;
 let gateway: Bun.Server<undefined> | undefined;
@@ -30,6 +33,11 @@ let stderr = "";
 let serverError: string | undefined;
 let completed = false;
 let waitingStream = false;
+const progress: WorkerProgress[] = [];
+let streamStarts = 0;
+let modelProgress = 0;
+let ownerRead: Promise<void> = Promise.resolve();
+let ownerPending = "";
 
 class ProofFailure extends Error {
   constructor(readonly code: string) { super(code); }
@@ -46,7 +54,7 @@ async function until(predicate: () => boolean, code: string, milliseconds = 30_0
     await Bun.sleep(20);
   }
 }
-function response(message: AssistantMessage) {
+function response(message: AssistantMessage, observeProgress = false) {
   const events: AssistantMessageEvent[] = [{ type: "start", partial: message }];
   for (let index = 0; index < message.content.length; index++) {
     const content = message.content[index]!;
@@ -60,6 +68,27 @@ function response(message: AssistantMessage) {
     }
   }
   events.push({ type: "done", reason: message.stopReason === "toolUse" ? "toolUse" : "stop", message });
+  if (observeProgress) {
+    // Published retry layers can hold bootstrap events until semantic output.
+    // Keep the response open before its terminal event until the native channel
+    // observes the stream, without a sleep or the owner's coalescing interval.
+    return new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        const started = ++streamStarts;
+        controller.enqueue(new TextEncoder().encode(events.slice(0, -1).map(event => `data: ${JSON.stringify(event)}\n\n`).join("")));
+        void (async () => {
+          try {
+            await until(() => modelProgress === started, "print-model-progress-missing");
+            controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(events.at(-1))}\n\ndata: [DONE]\n\n`));
+            controller.close();
+          } catch (error) {
+            serverError = error instanceof ProofFailure ? error.code : "print-stream-failed";
+            controller.error(error);
+          }
+        })();
+      },
+    }), { headers: { "Content-Type": "text/event-stream" } });
+  }
   return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join("") + "data: [DONE]\n\n", {
     headers: { "Content-Type": "text/event-stream" },
   });
@@ -70,7 +99,8 @@ try {
   check(!Object.keys(process.env).some(key => /^(?:MANIFOLD_|AWS_|OPENAI_|ANTHROPIC_|CODE_)/.test(key)), "ambient-environment");
   const routes = (await readFile("/proc/net/route", "utf8")).trim().split("\n").slice(1);
   check(routes.every(line => line.split(/\s+/)[0] === "lo"), "network-namespace");
-  const launch: { argv: string[]; sessionId: string } | undefined = fresh ? JSON.parse(await readFile("/inputs/launch", "utf8")) : undefined;
+  const launch: { argv: string[]; sessionId: string; environment?: Record<string, string>; locations?: WorkerLocation[] } | undefined =
+    governed ? JSON.parse(await readFile("/inputs/launch", "utf8")) : undefined;
   if (fresh) {
     // An unrelated prior selected-skill conversation must neither be continued
     // nor contribute its historical optional skill choice to this fresh launch.
@@ -120,7 +150,7 @@ try {
   for (const name of await readdir(sessions)) if (name.endsWith(".jsonl")) before.set(name, await readFile(join(sessions, name), "utf8"));
   const refused = ["missing-model", "missing-thinking", "incompatible", "changed", "missing", "rpc-restricted"].includes(scenario);
   const expectedModel = scenario === "model-only" || scenario === "model-suffix" ? "fixture/openai/o3" : scenario === "both" ? "fixture/openai/gpt-4.1" : "fixture/openai/gpt-5";
-  const expectedThinking = scenario === "auto" ? "auto" : fresh ? "low" : ["model-suffix", "thinking-only", "both", "disabled", "cancel"].includes(scenario) ? "off" : "high";
+  const expectedThinking = scenario === "auto" ? "auto" : governed ? "low" : ["model-suffix", "thinking-only", "both", "disabled", "cancel"].includes(scenario) ? "off" : "high";
   gateway = Bun.serve({ hostname: "127.0.0.1", port: 38457, idleTimeout: 0, async fetch(request) {
     try {
       check(request.headers.get("authorization") === `Bearer ${["SYNTHETIC", "LOCAL", "FIXTURE", "NOT", "A", "CREDENTIAL"].join("-")}`, "synthetic-capability");
@@ -143,7 +173,7 @@ try {
       };
       // The CLI may title a new session separately. This reply cannot satisfy
       // the primary-turn completion or ordinary tool-registry proof.
-      if (fresh && names.length === 0) {
+      if (governed && names.length === 0) {
         message.content = [{ type: "text", text: "Fixture session title" }];
         return response(message);
       }
@@ -153,14 +183,14 @@ try {
       check(parsed.modelId === expectedModel, "resumed-model-selection");
       if (expectedThinking === "high" || expectedThinking === "low") check(parsed.options.reasoning === expectedThinking, "resumed-thinking-preservation");
       else check(parsed.options.reasoning === undefined && parsed.options.disableReasoning === true, "explicit-thinking-off");
-      if (!fresh) check(JSON.stringify(names) === JSON.stringify(["read"]), "restricted-registry-widened");
+      if (!governed) check(JSON.stringify(names) === JSON.stringify(["read"]), "restricted-registry-widened");
       else check(names.includes("read"), "ordinary-read-tool-missing");
       const instructions = JSON.stringify({ system: parsed.context.systemPrompt, tools: parsed.context.tools });
       check(!instructions.includes("HOSTILE-AMBIENT-SKILL") && !instructions.includes("HOSTILE-PROJECT-CONTEXT"), "ambient-discovery");
       if (selected) check(instructions.includes("sealed-proof"), "selected-skill-not-advertised");
-      else if (!fresh || scenario === "fresh-sdk-disabled") check(!instructions.includes("skill://"), "disabled-skill-advertised");
+      else if (!governed || scenario === "fresh-sdk-disabled") check(!instructions.includes("skill://"), "disabled-skill-advertised");
       else check(!instructions.includes("sealed-proof"), filtered ? "filtered-skill-advertised" : "historical-skill-restored");
-      if (fresh) {
+      if (governed) {
         check(parsed.context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-PROMPT")), "fresh-prompt-missing");
         check(!JSON.stringify(parsed.context.messages).includes("SDK-PROOF-COMPLETE"), "historical-conversation-restored");
       }
@@ -192,19 +222,19 @@ try {
         }
         completed = true;
       }
-      return response(message);
+      return response(message, oneShot);
     } catch (error) {
       serverError = error instanceof ProofFailure ? error.code : "gateway-wire-failed";
       return Response.json({ error: { type: "fixture_failure", message: "Synthetic fixture refused request" } }, { status: 400 });
     }
   } });
   const kind = scenario === "rpc-restricted" ? "rpc-resume" : resumed ? "resume" : "print";
-  const argv = fresh && !rpc ? ["/runtime/bin/bun", ...launch!.argv]
+  const argv = governed && !rpc ? ["/runtime/bin/bun", ...launch!.argv]
     : ["/runtime/bin/bun", "--no-env-file", "--no-install", "--config=/dev/null", "/runtime/bin/sdkHost", rpc ? "rpc" : kind];
   if (resumed) argv.push(scenario === "missing" ? "missing.jsonl" : "saved.jsonl");
   if (rpc) argv.push(`${launch!.sessionId}.jsonl`, "/inputs/admission");
-  const env = { ...process.env };
-  if (fresh && !rpc) env.MANIFOLD_JOB_CONTEXT_FD = "3";
+  const env = { ...process.env, ...launch?.environment };
+  if (governed && !rpc) env.MANIFOLD_JOB_CONTEXT_FD = "3";
   let rendered = false;
   const spawnOptions = { cwd: "/inputs", env, stderr: "pipe" as const };
   if ((resumed && !refused) || (fresh && !rpc)) {
@@ -219,15 +249,44 @@ try {
       if (text.includes("\x1b]11;?")) pty.write("\x1b]11;rgb:0000/0000/0000\x1b\\");
       if (terminal.includes("SDK-PROOF-COMPLETE")) rendered = true;
     } } });
-  } else child = Bun.spawn(argv, { ...spawnOptions, stdin: rpc ? "pipe" : "ignore", stdout: "pipe" });
-  if (fresh && !rpc) {
+  } else if (oneShot) child = Bun.spawn(argv, { ...spawnOptions, stdio: ["ignore", "pipe", "pipe", "socket-fd"] });
+  else child = Bun.spawn(argv, { ...spawnOptions, stdin: rpc ? "pipe" : "ignore", stdout: "pipe" });
+  if (governed && !rpc) {
     // The pinned Bun exposes an owned socketpair endpoint for the native ABI.
     const fd = child.stdio[3];
     check(typeof fd === "number", "worker-context-socket");
     owner = (connect as unknown as (options: { fd: number }) => Socket)({ fd });
     owner.on("error", () => {});
+    if (oneShot) {
+      const closed = Promise.withResolvers<void>();
+      ownerRead = closed.promise;
+      owner.once("close", () => closed.resolve());
+      owner.setEncoding("utf8");
+      owner.on("data", (chunk: string) => {
+        try {
+          ownerPending += chunk;
+          check(ownerPending.length <= 64 * 1024, "print-progress-frame-limit");
+          let end: number;
+          while ((end = ownerPending.indexOf("\n")) >= 0) {
+            const line = ownerPending.slice(0, end);
+            ownerPending = ownerPending.slice(end + 1);
+            const frame = WorkerProgressSchema.parse(JSON.parse(line));
+            check(progress.length < 256, "print-progress-count-limit");
+            check(!/SDK-|SYNTHETIC-|fixture|openai|gpt-|sealed-proof|skill:|proof-read|\bread\b|resource\.txt|\/home\/|\/inputs\/|127\.0\.0\.1/i.test(line), "print-progress-leaked-content");
+            check(["at the model", "running tools", "running", "finishing", "stopped"].includes(frame.stage), "print-progress-stage");
+            if (frame.stage === "at the model") {
+              check(modelProgress < streamStarts, "print-progress-before-stream");
+              modelProgress++;
+            }
+            progress.push(frame);
+          }
+        } catch (error) {
+          serverError = error instanceof ProofFailure ? error.code : "print-progress-protocol";
+        }
+      });
+    }
   }
-  owner?.write(`${JSON.stringify({ type: "context", locations: [
+  owner?.write(`${JSON.stringify({ type: "context", locations: launch?.locations ?? [
     { locationId: "atyrode.omp.workspace", guestPath: "/home/job/workspace", access: "write" },
     { locationId: "atyrode.omp.sessions", guestPath: sessions, access: "write" },
   ] })}\n`);
@@ -290,7 +349,7 @@ try {
   const timer = setTimeout(() => child?.kill("SIGKILL"), 30_000);
   let exit: number;
   try { exit = await child.exited; } finally { clearTimeout(timer); }
-  await Promise.all([stderrRead, stdoutRead]);
+  const [, stdout] = await Promise.all([stderrRead, stdoutRead, ownerRead]);
   check(child.signalCode !== "SIGKILL", "host-cleanup-timeout");
   child.terminal?.close();
   check(!serverError, serverError ?? "gateway-failed");
@@ -312,9 +371,31 @@ try {
     check(cancelled, "gateway-stream-not-cancelled");
   } else {
     check(discoveries > 0 && (scenario === "auto" ? requests === 0 : completed) && (resumed || fresh ? exit !== 0 : exit === 0), "program-completion");
+    if (oneShot) {
+      const firstModel = progress.findIndex(frame => frame.stage === "at the model");
+      check(firstModel >= 0 && progress.slice(firstModel + 1).some(frame => frame.stage !== "at the model") &&
+        progress.at(-1)?.stage !== "at the model", "print-progress-stayed-at-model");
+      check(ownerPending === "" && modelProgress === streamStarts && streamStarts === requests, "print-progress-incomplete");
+      if (selected) check(progress.some(frame => frame.stage === "running tools"), "print-tool-progress-missing");
+    }
     const path = fresh ? join(sessions, `${launch!.sessionId}.jsonl`) : resumed ? saved
       : join("/outputs/session", (await readdir("/outputs/session")).find(name => name.endsWith(".jsonl")) ?? "missing");
     const manager = await SessionManager.open(path, resumed || fresh ? sessions : "/outputs/session", undefined, { throwIfMissing: true });
+    if (oneShot) {
+      check(stdout.endsWith("\n"), "print-stdout-truncated");
+      const frames = stdout.trimEnd().split("\n").map(line => JSON.parse(line));
+      check(frames[0]?.type === "session" && frames[0].id === manager.getSessionId() &&
+        frames[0].cwd === "/home/job/workspace", "print-stdout-session-receipt");
+      check(frames.every(frame => typeof frame.type === "string" && frame.type !== "progress"), "print-progress-polluted-stdout");
+      const final = frames.findLast(frame => frame.type === "message_end" && frame.message?.role === "assistant")?.message;
+      check(final?.stopReason === "stop" && JSON.stringify(final.content) === JSON.stringify([{ type: "text", text: "SDK-PROOF-COMPLETE" }]), "print-stdout-completion");
+      check(frames.some(frame => frame.type === "agent_end" && frame.messages?.some((message: AssistantMessage) =>
+        message.role === "assistant" && JSON.stringify(message.content) === JSON.stringify(final.content))), "print-stdout-agent-receipt");
+      check(frames.some(frame => frame.type === "message_end" && frame.message?.role === "user" &&
+        JSON.stringify(frame.message.content).includes("SDK-PROOF-PROMPT")), "print-stdout-prompt");
+      if (selected) check(frames.some(frame => frame.type === "tool_execution_end" &&
+        JSON.stringify(frame).includes("SDK-SEALED-RESOURCE-ONLY")), "print-stdout-tool-result");
+    }
     if (fresh) {
       check(manager.getSessionId() === launch!.sessionId && manager.getSessionFile() === path && manager.getCwd() === "/home/job/workspace", "fresh-durable-identity");
       check(await readFile(saved, "utf8") === before.get("saved.jsonl"), "fresh-mutated-history");
@@ -325,7 +406,7 @@ try {
     check(context.messages.some(message => message.role === "assistant" && JSON.stringify(message.content).includes(resumed && scenario !== "auto" ? "SDK-PROOF-RESUMED-COMPLETE" : "SDK-PROOF-COMPLETE")), "durable-completion");
     check(context.models[manager.getLastModelChangeRole() ?? "default"] === expectedModel, "durable-model");
     check((context.configuredThinkingLevel ?? context.thinkingLevel) === expectedThinking, "durable-thinking");
-    if (fresh) check(context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-PROMPT")), "fresh-durable-prompt");
+    if (governed) check(context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-PROMPT")), "fresh-durable-prompt");
     if (resumed && scenario !== "auto") check(context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-RESUMED-TURN")), "durable-resumed-turn");
     if (scenario === "selected") {
       await manager.setSessionName("SDK proof saved session", "user");
