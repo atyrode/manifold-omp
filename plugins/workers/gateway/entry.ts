@@ -36,7 +36,7 @@ try {
   requirePrivateInputRoot();
   const logger = await import("@oh-my-pi/pi-utils/logger");
   logger.setTransports({ file: false, console: false });
-  const inputs = parseInputs(readSealedJSON("/inputs/broker"), readSealedJSON("/inputs/accountPool"), readSealedJSON("/inputs/serviceBearer"));
+  const inputs = parseInputs(readSealedJSON("/inputs/broker"), readSealedJSON("/inputs/accountPool"), readSealedJSON("/inputs/serviceBearer"), readSealedJSON("/inputs/requestLimits"));
   const { startPoolGateway } = await import("./runtime.ts");
   service = await startPoolGateway(inputs, context.signal);
   await context.announceServiceReady(service.port);
