@@ -460,6 +460,8 @@ export const rootActionSchemas = {
     result: PreparedSessionSchema,
   },
   /** The same reviewed session, placed as a governed one-shot job instead of a terminal.
+   * The job registers, and its gateway holds credentials for, only the pool providers its
+   * configuration names a model of; terminals keep the whole reviewed pool.
    * `inputs` binds sealed outputs of earlier jobs on the same machine to this run's
    * declared inputs; the door passes them to the hub verbatim and reads none of them, so
    * what the material is and how the prompt refers to it are the caller's business. */

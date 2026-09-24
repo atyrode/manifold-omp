@@ -180,6 +180,26 @@ function configuredModels(overlay: Overlay): string[] {
   ];
 }
 /**
+ * WHAT A ONE-SHOT DISCOVERS, AND WHAT ITS GATEWAY CAN SERVE IT (#49).
+ *
+ * Every provider a session registers makes its own `models` call through the service proxy, and
+ * the gateway answers each with every model its credential pool reaches. So a pool of four
+ * providers cost a one-shot four authorized calls per discovery pass, and it put every pool
+ * provider's models under each registered one, where a qualified id reaches the gateway and is
+ * served with its own provider's credential. A one-shot runs only the models its configuration
+ * names, so it registers only their providers and hands its gateway only their credentials: for a
+ * configuration that names just a default, the default's provider alone. The selections OMP makes
+ * outside the model roles (a task agent whose own definition names a model, an image question the
+ * configured model cannot take, compaction's largest-context candidate) then resolve within those
+ * providers or not at all. Terminals and harnesses keep the whole reviewed pool and its providers.
+ */
+export function oneShotModelConfiguration(pool: RuntimeAccountPool, overlay: Overlay) {
+  const named = configuredModels(overlay).map(reference => reference.slice(0, reference.indexOf("/")));
+  const accountPool: RuntimeAccountPool = Object.fromEntries(
+    Object.entries(pool).filter(([provider]) => named.includes(provider)));
+  return { accountPool, ...nativeModelConfiguration(accountPool, overlay) };
+}
+/**
  * THE THINKING A CONFIGURED LIVE-LISTED MODEL WAS ASKED FOR, AS METADATA THE SESSION CAN APPLY.
  *
  * A session learns a live-listed model from the gateway's listing, which names it and says
@@ -813,14 +833,22 @@ async function oneShotPreparation(
   // compaction resolve a role later, against the whole catalog, where an unset role reaches OMP's
   // own priority lists and a workspace's `.omp/config.yml` may name any model; so every chat role
   // the configuration leaves unset names the configured model as well.
+  //
+  // Pinned roles do not reach the selections OMP makes outside them, and every provider a session
+  // registers lists the gateway's whole pool, so the one-shot also registers, and hands its
+  // gateway, only the providers its configuration names (`oneShotModelConfiguration`).
   const configured = prepared.config.modelRoles?.default;
   if (!configured) throw new OmpRefusal("model_configuration_missing");
   const modelRoles = pinnedModelRoles({ ...prepared.config.modelRoles, default: configured });
+  const scoped = oneShotModelConfiguration(prepared.review.accountPool, prepared.review.effectiveOverlay);
   return {
     prepared,
+    accountPool: scoped.accountPool,
     input: boundedInput({
       ...prepared.input,
-      config: JSON.stringify({ ...prepared.config, modelRoles, enabledModels: [exactModelScope(configured)] }),
+      models: JSON.stringify(scoped.models),
+      accountPool: JSON.stringify(scoped.accountPool),
+      config: JSON.stringify({ ...prepared.config, ...scoped.config, modelRoles, enabledModels: [exactModelScope(configured)] }),
     }),
     pins: current.pins,
     limits,
@@ -830,7 +858,8 @@ async function oneShotPreparation(
 /**
  * The reviewed session, placed as a governed job instead of a terminal. It runs on
  * `atyrode.omp.session`, the one-shot sibling of `atyrode.omp.launch`: the same reviewed
- * input, with startup and every unset model role held to the configured model, and the same
+ * input, with startup and every unset model role held to the configured model and only the
+ * providers its configuration names registered and credentialed, and the same
  * executable, but no stdin — so `omp -p` reads its prompt from argv and never waits on a pipe —
  * and a bounded `session` output lease, which the owner mounts at `SESSION_GUEST_PATH`, that omp
  * writes its transcript straight into.
@@ -863,7 +892,7 @@ export async function runSession(
     input,
     inputDigest: digestOf(input),
     defaultsRevision: latest.prepared.review.defaultsRevision,
-    accountPool: latest.prepared.review.accountPool,
+    accountPool: latest.accountPool,
     broker: latest.prepared.broker,
     gateway: latest.prepared.gateway,
     modelIdentities: null,
