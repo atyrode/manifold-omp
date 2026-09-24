@@ -74,6 +74,12 @@ Each output must have exactly one top-level directory matching the reviewed nati
 
 Skills never enter durable overlays/defaults or Agent profiles. A harness launch may supply the same choice in its `OmpHarnessTargetSchema` target; fresh independent launches start with no optional selection. Resume may supply a new explicit selection; no historical selection is guessed from transcript text. Restricted tools, broker ceilings and native OS/network authority are unchanged. Selection/disable requests require the exact hash-pinned published OMP 18.2.7 runtime and skill-aware immutable-input operation; older/incompatible owners refuse.
 
+## One-shot model selection
+
+A `runSession` job binds its model once, at startup, with nobody watching. Its posted configuration therefore scopes OMP's startup selection to exactly the configured `modelRoles.default`, as an exact-match `enabledModels` glob. A configured model the session's catalog lacks at that moment — a withdrawn id, a gateway that never answered discovery — ends the run before any model call; OMP no longer resolves a model whose id merely resembles it or falls back to the machine default. Every pool provider waits up to 60 s for the gateway's model listing instead of OMP's 10 s default, so a slow gateway start still serves the configured model. A live-listed model configured with an explicit thinking level carries its provider's pinned thinking ladder, the one the gateway serves it with, so the level applies instead of silently becoming off.
+
+The scope is added when the one-shot is posted, not in the reviewed content: terminals and Agent harnesses prepared from the same review keep their ordinary `/model` selection. It governs the session's startup model only. Roles resolved later — task agents, fallback chains — use OMP's ordinary resolution, and `readSession` still refuses a receipt whose final model differs from the configured one when `modelFallback` is not `true`.
+
 ## One-shot inference limits
 
 `reviewSession` and `runSession` accept ephemeral `inferenceLimits`: a nonempty combination of `calls`, `inputTokens`, `outputTokens` and `costMicros`. Requested values cannot exceed the current operation's declared ceilings. Cost review requires compatible native metering and reviewed prices for every served model. Limits are bound into review, admission and retained receipt checks; cancellation still targets the same proven job if its reported limits change. Terminal preparation and Agent harnesses refuse unsupported limits, and limits are not saved in defaults or profiles.

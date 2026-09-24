@@ -7,12 +7,11 @@ import {
 import type { SettingsOptions } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import { runRpcMode } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
-import { OverlaySchema } from "../api/index.ts";
-import { ProbeConfigSchema, ProbeModelsConfigSchema, PROBE_AGENT, readProbeInput } from "../workers/probe/inputs.ts";
+import { ProbeModelsConfigSchema, PROBE_AGENT, readProbeInput } from "../workers/probe/inputs.ts";
 import { openSessionsRoot, resolveSessionFile, SESSIONS_ROOT, SessionIdSchema } from "../workers/harness/sessions.ts";
 import { validateSkillInputs } from "../workers/harness/skills.ts";
 import { readAutomation, readResumeOverrides, readSessionInput } from "../workers/harness/sdk-inputs.ts";
-import { admitSdkSession } from "./sdk-admission.ts";
+import { admitSdkSession, SdkSessionConfigSchema } from "./sdk-admission.ts";
 
 // This entry is always a new, sanitized child, never imported by CLI passthrough.
 const cwd = "/home/job/workspace";
@@ -40,12 +39,7 @@ try {
   if (!resume && overrides) throw new Error("omp_sdk_input_invalid");
   const skillsRuntime = validateSkillInputs();
   if (restricted && skillsRuntime.mode === "preserve") throw new Error("omp_restricted_skills_unsupported");
-  const config = ProbeConfigSchema.extend(OverlaySchema.shape).extend({
-    skills: z.union([
-      z.strictObject({ enabled: z.literal(false) }),
-      z.strictObject({ customDirectories: z.array(z.string()).max(15) }),
-    ]).optional(),
-  }).parse(readProbeInput("config"));
+  const config = SdkSessionConfigSchema.parse(readProbeInput("config"));
   const expectedSkills = skillsRuntime.mode === "disabled" ? { enabled: false }
     : skillsRuntime.mode === "selected" ? { customDirectories: skillsRuntime.names.map((_, index) => `/inputs/optionalSkill${index}`) }
     : undefined;

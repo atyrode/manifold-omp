@@ -1,8 +1,21 @@
+import { z } from "zod";
 import type { ModelRegistry, SessionManager } from "@oh-my-pi/pi-coding-agent";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { parseConfiguredThinkingLevel, resolveThinkingLevelForModel } from "@oh-my-pi/pi-tui/thinking";
-import type { ActionInput, Overlay } from "../api/index.ts";
+import { exactModelScope, OverlaySchema, type ActionInput, type Overlay } from "../api/index.ts";
+import { ProbeConfigSchema } from "../workers/probe/inputs.ts";
+
+/** The sealed session settings: native runtime settings, the reviewed overlay, the reviewed skill
+ * choice and, for a one-shot, a startup scope that names exactly the configured model. */
+export const SdkSessionConfigSchema = ProbeConfigSchema.extend(OverlaySchema.shape).extend({
+  skills: z.union([
+    z.strictObject({ enabled: z.literal(false) }),
+    z.strictObject({ customDirectories: z.array(z.string()).max(15) }),
+  ]).optional(),
+  enabledModels: z.tuple([z.string()]).optional(),
+}).refine(config => config.enabledModels === undefined ||
+  config.enabledModels[0] === exactModelScope(config.modelRoles?.default ?? ""));
 
 /** No SDK default/fuzzy/fallback model selection is allowed across explicit resume. */
 export function admitSdkSession(registry: Pick<ModelRegistry, "find" | "hasConfiguredAuth">,
