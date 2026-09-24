@@ -796,6 +796,35 @@ test("a one-shot pins its configured live-listed model, so discovery timing cann
   expect(terminal.runtime.input.models).toBe(posted.models);
 });
 
+/**
+ * Startup is not the one-shot's last selection. A task agent, the advisor, the plan hand-off and
+ * compaction resolve a model role later, against the session's whole catalog, where an unset role
+ * is not the default model (an enabled advisor with no model of its own fell to OMP's reasoning
+ * list) and a workspace's `.omp/config.yml` may name any model for any role (#49). The job's own
+ * configuration outranks the workspace's, so it names a model for every chat role.
+ */
+test("a one-shot holds every model role its configuration leaves unset to the configured model", async () => {
+  const f = fixture();
+  const configured = "anthropic/claude-sonnet-4-5:medium";
+  const smol = "anthropic/claude-haiku-4-5";
+  const advised = { ...session, overlay: { modelRoles: { default: configured, smol }, advisor: { enabled: true },
+    retry: { enabled: true, modelFallback: false } } };
+  const reviewDigest = await reviewDigestOf(f.client, advised);
+  const job = await f.client.call("runSession", { ...advised, reviewDigest });
+  if ("refused" in job) throw new Error(job.refused);
+  const roles: Record<string, string> = JSON.parse(String(f.posted[0]!.input.config)).modelRoles;
+  // The chat roles of OMP 18.1.14 and of the SDK host's 18.2.7, which adds `memory`.
+  for (const role of ["default", "slow", "vision", "plan", "commit", "tiny", "memory", "task", "advisor"])
+    expect(roles[role]).toBe(configured);
+  // A role the operator configured keeps its model.
+  expect(roles.smol).toBe(smol);
+
+  // An operator's terminal from the same review resolves its roles as OMP ordinarily does.
+  const terminal = await f.client.call("prepareSession", { ...advised, reviewDigest });
+  if ("refused" in terminal) throw new Error(terminal.refused);
+  expect(JSON.parse(String(terminal.runtime.input.config)).modelRoles).toEqual({ default: configured, smol });
+});
+
 test("readSession refuses a transcript that does not name the session it reports", async () => {
   const f = fixture();
   const job = await run(f);

@@ -25,6 +25,22 @@ export const GATEWAY_DISCOVERY_TIMEOUT_MS = 60_000;
 export function exactModelScope(reference: string): string {
   return `[${reference.slice(0, 1)}]${reference.slice(1)}`;
 }
+/**
+ * THE MODEL ROLES A ONE-SHOT HOLDS TO ITS CONFIGURED MODEL, unless its configuration names another.
+ *
+ * `enabledModels` scopes startup only. Every later selection resolves a role against the
+ * session's whole catalog: a task agent's `@task` or `@smol`, the advisor, the `--plan-yolo`
+ * hand-off, eval's `completion()`, compaction's role candidates. A role left unset is not the
+ * default model there (`advisor` falls to OMP's reasoning priority list, `tiny` and `memory` to its
+ * fast one), and a workspace's own `.omp/config.yml` may name any model for any role. These are
+ * the chat roles of both runtimes a one-shot starts, OMP 18.1.14 and the SDK host's 18.2.7; the
+ * model-kind roles select image, search, speech and judgment models, which a chat model is not.
+ */
+export const ONE_SHOT_PINNED_ROLES = ["smol", "slow", "vision", "plan", "commit", "tiny", "memory", "task", "advisor"] as const;
+/** A one-shot's model roles: its configured ones as written, every other chat role on its default. */
+export function pinnedModelRoles(roles: Readonly<Record<string, string>> & { readonly default: string }): Record<string, string> {
+  return { ...Object.fromEntries(ONE_SHOT_PINNED_ROLES.map(role => [role, roles.default])), ...roles };
+}
 const number = z.number().finite().nonnegative();
 const limit = z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable();
 export const ProbeIdentitySchema = z.strictObject({ provider: identifier, id: modelId, api: identifier });

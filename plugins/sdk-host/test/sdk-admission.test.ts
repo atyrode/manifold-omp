@@ -1,9 +1,18 @@
 import { expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { resolveModelRoleValue, resolveModelScope } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import {
+  expandRoleAlias, resolveAdvisorRoleSelection, resolveAgentModelSelection, resolveModelFromString, resolveModelOverride,
+  resolveModelRoleValue, resolveModelScope,
+} from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { CHAT_MODEL_ROLE_IDS } from "@oh-my-pi/pi-coding-agent/config/model-roles";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resolveRoleModelFull } from "@oh-my-pi/pi-coding-agent/session/role-models";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { exactModelScope } from "../../api/index.ts";
+import { exactModelScope, pinnedModelRoles } from "../../api/index.ts";
 import { admitSdkSession, SdkSessionConfigSchema } from "../sdk-admission.ts";
 
 const listed = (provider: string, id: string): Model => buildModel({
@@ -79,6 +88,56 @@ test("a one-shot's startup scope admits its configured model and never one OMP w
   expect(await scope("openrouter/openai/gpt-5.5:high")).toEqual(["openrouter/openai/gpt-5.5"]);
   expect(await scope("openrouter/stealth/space-bunny-alpha:medium"))
     .toEqual(["openrouter/openrouter/stealth/space-bunny-alpha", "anthropic/openrouter/stealth/space-bunny-alpha"]);
+});
+
+/**
+ * Startup is not a one-shot's last selection. A task agent, the advisor, the plan hand-off and
+ * compaction resolve a model role later, against the session's whole catalog, where an unset role
+ * is not the default model and a workspace's `.omp/config.yml` may name any model for any role.
+ * Settings load as OMP loads a one-shot's: the workspace's project layer beneath the job's file.
+ */
+test("a one-shot's pinned roles leave OMP's later selections nothing but its configured model", async () => {
+  const configured = "openrouter/openrouter/stealth/space-bunny-alpha:medium";
+  const served = "openrouter/openrouter/stealth/space-bunny-alpha";
+  const other = "anthropic/claude-opus-4-8";
+  const available = [listed("openrouter", "openrouter/stealth/space-bunny-alpha"),
+    listed("anthropic", "claude-opus-4-8"), listed("anthropic", "claude-haiku-4-5")];
+  const name = (selected: Model | undefined) => selected ? `${selected.provider}/${selected.id}` : "none";
+  const root = mkdtempSync(join(tmpdir(), "one-shot-roles-"));
+  const selections = async (modelRoles: Record<string, string>) => {
+    const agentDir = join(root, crypto.randomUUID());
+    const workspace = join(agentDir, "workspace");
+    mkdirSync(join(workspace, ".omp"), { recursive: true });
+    writeFileSync(join(agentDir, "config.yml"), JSON.stringify({ modelRoles }));
+    writeFileSync(join(workspace, ".omp", "config.yml"), JSON.stringify({ modelRoles: { smol: other, task: other } }));
+    const settings = await Settings.loadReadOnly({ cwd: workspace, agentDir, configFiles: [join(agentDir, "config.yml")] });
+    const agent = (agentModel: string) => name(resolveModelOverride(
+      resolveAgentModelSelection({ agentModel, settings, activeModelPattern: configured }).patterns,
+      { getAvailable: () => available }, settings).model);
+    return {
+      advisor: name(resolveAdvisorRoleSelection(settings, available)?.model),
+      taskAgent: agent("@task"),
+      fastAgent: agent("@smol"),
+      planHandoff: name(resolveModelFromString(expandRoleAlias("@smol", settings), available)),
+      compaction: [...new Set(CHAT_MODEL_ROLE_IDS.map(role =>
+        name(resolveRoleModelFull(settings, role, available, available[0]).model)))].filter(model => model !== "none"),
+    };
+  };
+  try {
+    // Unpinned, the advisor falls to OMP's reasoning list and the workspace picks the agents' model.
+    expect(await selections({ default: configured })).toEqual({
+      advisor: other, taskAgent: other, fastAgent: other, planHandoff: other, compaction: [served, other],
+    });
+    expect(await selections(pinnedModelRoles({ default: configured }))).toEqual({
+      advisor: served, taskAgent: served, fastAgent: served, planHandoff: served, compaction: [served],
+    });
+    // A role the operator configured keeps its model.
+    expect((await selections(pinnedModelRoles({ default: configured, smol: "anthropic/claude-haiku-4-5" }))).fastAgent)
+      .toBe("anthropic/claude-haiku-4-5");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+  // Every chat role this SDK knows is held, so a role a later OMP adds fails here instead of leaking.
+  const pinned = pinnedModelRoles({ default: configured });
+  for (const role of CHAT_MODEL_ROLE_IDS) expect(pinned[role]).toBe(configured);
 });
 
 test("the SDK host admits a startup scope only when it names exactly the configured model", () => {
