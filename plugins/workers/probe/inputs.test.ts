@@ -2,15 +2,22 @@ import { expect, test } from "bun:test";
 import { ProbeConfigSchema, ProbeModelsConfigSchema, isolateProbeEnvironment } from "./inputs.ts";
 
 const provider = { baseUrl: "http://127.0.0.1:42123", apiKey: "scoped-native-service-bearer-00000001", transport: "pi-native", discovery: { type: "proxy" } };
+const thinking = { mode: "effort", efforts: ["low", "medium", "high"] };
 test("native target config rejects execution and external credential endpoints", () => {
   for (const change of [
     { baseUrl: "https://api.example.test" }, { baseUrl: "http://localhost:42123" }, { baseUrl: "http://127.0.0.1:65536" },
     { apiKey: "!cat /host/secret" }, { apiKey: "ENV_KEY" }, { headers: { authorization: "secret" } },
     { transport: "openai-responses" }, { discovery: { type: "ollama" } }, { models: [{ id: "arbitrary" }] },
+    { discovery: { type: "proxy", timeoutMs: 1 } },
+    // A model override may only let a listed model reason; it never re-routes or re-prices one.
+    { modelOverrides: { "openrouter/x": { reasoning: true, thinking, headers: { authorization: "secret" } } } },
+    { modelOverrides: { "openrouter/x": { reasoning: true, thinking, cost: { input: 0 } } } },
   ]) {
     expect(ProbeModelsConfigSchema.safeParse({ providers: { anthropic: { ...provider, ...change } } }).success).toBe(false);
   }
   expect(ProbeModelsConfigSchema.safeParse({ providers: { anthropic: provider } }).success).toBe(true);
+  expect(ProbeModelsConfigSchema.safeParse({ providers: { anthropic: { ...provider,
+    modelOverrides: { "openrouter/x": { reasoning: true, thinking } } } } }).success).toBe(true);
 });
 test("source settings cannot load extensions, broker credentials or retry/fallback policy", () => {
   const config = {

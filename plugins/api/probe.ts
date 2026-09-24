@@ -3,6 +3,28 @@ import { modelId, ThinkingLevelSchema, epochMilliseconds, identifier } from "./c
 
 export const OMP_VERSION = "18.1.14" as const;
 export const PROBE_MODEL_LIMIT = 256;
+/**
+ * HOW LONG A SESSION WAITS FOR THE GATEWAY TO LIST ITS MODELS, per discovery attempt.
+ *
+ * OMP's proxy discovery gives up after 10 s by default, and a model the gateway lists only
+ * live (an OpenRouter id the pinned catalog does not carry) is then absent from the session:
+ * a slow gateway start was enough for the session to resolve some other model and run it
+ * (#49). The gateway answers once its broker snapshot and its bounded OpenRouter read have
+ * both returned, so this rides out a cold start and still bounds a gateway that never answers.
+ */
+export const GATEWAY_DISCOVERY_TIMEOUT_MS = 60_000;
+/**
+ * An OMP `enabledModels` entry that admits exactly one configured model reference.
+ *
+ * OMP matches a plain pattern with fuzzy and substring fallbacks once the exact id is absent,
+ * so a missing `openrouter/x-ai/grok-5` is answered by `openrouter/x-ai/grok-4.5`. A pattern
+ * holding a glob character is matched as a glob instead, which admits only what it spells; a
+ * one-character class around the first character is such a glob. OMP splits a trailing thinking
+ * level off it exactly as it does off the role, so the reference is used as written.
+ */
+export function exactModelScope(reference: string): string {
+  return `[${reference.slice(0, 1)}]${reference.slice(1)}`;
+}
 const number = z.number().finite().nonnegative();
 const limit = z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable();
 export const ProbeIdentitySchema = z.strictObject({ provider: identifier, id: modelId, api: identifier });

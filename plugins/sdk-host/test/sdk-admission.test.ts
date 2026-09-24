@@ -1,14 +1,17 @@
 import { expect, test } from "bun:test";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { resolveModelRoleValue, resolveModelScope } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { admitSdkSession } from "../sdk-admission.ts";
+import { exactModelScope } from "../../api/index.ts";
+import { admitSdkSession, SdkSessionConfigSchema } from "../sdk-admission.ts";
 
-const model: Model = buildModel({
-  provider: "fixture", id: "saved", name: "Fixture", api: "openai-completions", baseUrl: "http://127.0.0.1:1",
+const listed = (provider: string, id: string): Model => buildModel({
+  provider, id, name: id, api: "openai-completions", baseUrl: "http://127.0.0.1:1",
   reasoning: false, input: ["text"], contextWindow: 32000, maxTokens: 1000,
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 });
+const model = listed("fixture", "saved");
 const replacement = { ...model, id: "replacement" };
 const registry = {
   find: (provider: string, id: string) => provider !== "fixture" ? undefined :
@@ -56,4 +59,35 @@ test("resume refuses missing, unavailable, unauthenticated and incompatible stat
     manager.appendModelChange("fixture/missing", "smol");
     expect(() => admitSdkSession(registry, manager, defaults, undefined)).toThrow("omp_resume_model_unavailable");
   } finally { await manager.close(); }
+});
+
+test("a one-shot's startup scope admits its configured model and never one OMP would resolve instead", async () => {
+  const available = [
+    listed("openrouter", "x-ai/grok-4.5"),
+    listed("openrouter", "openai/gpt-5.5"),
+    // A live-listed model as a session discovers it: under every pool provider, keyed as the
+    // gateway lists it.
+    listed("openrouter", "openrouter/stealth/space-bunny-alpha"),
+    listed("anthropic", "openrouter/stealth/space-bunny-alpha"),
+  ];
+  const scope = async (reference: string) => (await resolveModelScope([exactModelScope(reference)], { getAvailable: () => available }))
+    .map(({ model }) => `${model.provider}/${model.id}`);
+  // Unscoped, an id the catalog lacks resolves to a neighbour by spelling: the substitution.
+  expect(resolveModelRoleValue("openrouter/x-ai/grok-5", available).model?.id).toBe("x-ai/grok-4.5");
+  expect(await scope("openrouter/x-ai/grok-5")).toEqual([]);
+  expect(await scope("openrouter/stealth/space-bunny")).toEqual([]);
+  expect(await scope("openrouter/openai/gpt-5.5:high")).toEqual(["openrouter/openai/gpt-5.5"]);
+  expect(await scope("openrouter/stealth/space-bunny-alpha:medium"))
+    .toEqual(["openrouter/openrouter/stealth/space-bunny-alpha", "anthropic/openrouter/stealth/space-bunny-alpha"]);
+});
+
+test("the SDK host admits a startup scope only when it names exactly the configured model", () => {
+  const configured = "openrouter/stealth/space-bunny-alpha:medium";
+  const config = { extensions: [], disabledProviders: [], extendedContext: true, startup: { setupWizard: false },
+    modelRoles: { default: configured } };
+  expect(SdkSessionConfigSchema.safeParse(config).success).toBe(true);
+  expect(SdkSessionConfigSchema.safeParse({ ...config, enabledModels: [exactModelScope(configured)] }).success).toBe(true);
+  for (const enabledModels of [[configured], [exactModelScope("openrouter/openai/gpt-5.5")],
+    [exactModelScope(configured), "openrouter/*"]])
+    expect(SdkSessionConfigSchema.safeParse({ ...config, enabledModels }).success).toBe(false);
 });

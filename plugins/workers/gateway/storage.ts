@@ -8,6 +8,7 @@ import { getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/mode
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import type { RuntimeAccountPool } from "../../api/contracts.ts";
 import { unavailable } from "./inputs.ts";
+import { OPENROUTER_LISTING_TEMPLATE } from "./template.ts";
 
 /** The SDK's identity-only pool leaves API keys and missing providers unrestricted.
  * Enforce the native launch's concrete provider/id/identity tuples at every ingress
@@ -222,7 +223,7 @@ export async function publishedModels(
   // No OpenRouter credential means no listing this pool would be served from: publishing
   // exactly what the credentials reach is the whole answer, not a degradation of one.
   if (!pool.openrouter?.length) return { models, unreadable: null };
-  const template = getBundledModels("openrouter").find((model) => model.api === "openrouter");
+  const template = OPENROUTER_LISTING_TEMPLATE;
   if (!template) return { models, unreadable: null };
   // One transient failure must not unpublish a model: a session that drew a 429 or a timeout
   // here got a named 404 for a model its credential serves, while the next session ran fine.

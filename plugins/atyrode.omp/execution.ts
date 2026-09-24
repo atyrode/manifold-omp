@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { ThinkingConfig } from "@oh-my-pi/pi-catalog";
 import { z } from "zod";
 import {
   PublicJobSchema,
@@ -31,6 +32,8 @@ import {
   type SessionSilence,
   ProbeIdentitiesSchema,
   ThinkingLevelSchema,
+  GATEWAY_DISCOVERY_TIMEOUT_MS,
+  exactModelScope,
   modelId,
   PreparedHarnessSessionSchema,
   PreparedResumeSessionSchema,
@@ -43,6 +46,7 @@ import {
   type RuntimeAccountPool,
   type ProbeIdentity,
   type Target,
+  type ThinkingLevel,
 } from "../api/index.ts";
 import { parseBenchmarkInput, probeAddress } from "../api/probe.ts";
 import { checkedAccountPool, currentGateway, enabledAccountPool } from "./broker.ts";
@@ -61,11 +65,12 @@ import {
 } from "./machine-server.ts";
 import { effectiveOverlay, expectedDefaults, readDefaults } from "./state.ts";
 import { resolveSkills } from "./skills.ts";
-import { bundledProbeModels } from "./sdk-metadata.macro.ts" with { type: "macro" };
+import { bundledProbeModels, liveListingThinking } from "./sdk-metadata.macro.ts" with { type: "macro" };
 import sdkRuntimeArtifacts from "../sdk-host/runtime-artifacts.json";
 
 const registry = bundledProbeModels();
 const providers = Object.keys(registry);
+const listingThinking = liveListingThinking();
 
 export function defaultInventoryIdentities(
   catalog: Readonly<Record<string, readonly ProbeIdentity[]>>,
@@ -119,7 +124,18 @@ const RetainedSessionConfigSchema = z.object({
   retry: z.object({ modelFallback: z.boolean().optional() }).catchall(z.unknown()).optional(),
 }).catchall(z.unknown());
 
-export function nativeModelConfiguration(pool: RuntimeAccountPool) {
+/**
+ * A reference's model id and its thinking level. A colon is ambiguous: it ends an OpenRouter
+ * model id (`deepseek/x:free`) and it also introduces a thinking level (`anthropic/y:high`). So
+ * only a suffix that is actually a level is split off; anything else stays part of the id.
+ */
+function splitThinking(reference: string): { bare: string; level: ThinkingLevel | undefined } {
+  const colon = reference.lastIndexOf(":");
+  const level = ThinkingLevelSchema.safeParse(colon > 0 ? reference.slice(colon + 1) : undefined);
+  return level.success ? { bare: reference.slice(0, colon), level: level.data } : { bare: reference, level: undefined };
+}
+
+export function nativeModelConfiguration(pool: RuntimeAccountPool, overlay?: Overlay) {
   const selected = Object.keys(pool).filter(
     (provider) => pool[provider]!.length > 0,
   );
@@ -128,6 +144,7 @@ export function nativeModelConfiguration(pool: RuntimeAccountPool) {
     selected.some((provider) => !providers.includes(provider))
   )
     throw new OmpRefusal("account_unavailable");
+  const modelOverrides = overlay ? pinnedThinking(overlay) : {};
   return {
     models: {
       providers: Object.fromEntries(
@@ -137,7 +154,8 @@ export function nativeModelConfiguration(pool: RuntimeAccountPool) {
             baseUrl: "",
             apiKey: "",
             transport: "pi-native",
-            discovery: { type: "proxy" },
+            discovery: { type: "proxy", timeoutMs: GATEWAY_DISCOVERY_TIMEOUT_MS },
+            ...(Object.keys(modelOverrides).length > 0 ? { modelOverrides } : {}),
           },
         ]),
       ),
@@ -159,6 +177,33 @@ function configuredModels(overlay: Overlay): string[] {
     ...Object.values(overlay.retry?.fallbackChains ?? {}).flat(),
     ...Object.values(overlay.task?.agentModelOverrides ?? {}).map(ref => ref.startsWith("@") ? roles[ref.slice(1)] ?? "" : ref),
   ];
+}
+/**
+ * THE THINKING A CONFIGURED LIVE-LISTED MODEL WAS ASKED FOR, AS METADATA THE SESSION CAN APPLY.
+ *
+ * A session learns a live-listed model from the gateway's listing, which names it and says
+ * nothing of how it reasons, so OMP builds it as a model that does not and quietly runs a
+ * configured `:medium` with thinking off. The gateway serves that model with its provider's
+ * pinned thinking ladder when it reasons; this hands the session the same ladder, for exactly
+ * the configured models that name a level. It patches a model the listing supplies and never
+ * creates one, so it cannot make an unpublished id resolve.
+ *
+ * The gateway lists every model it publishes under each provider a session discovers through it,
+ * as `<provider>/<id>`, so every provider in the pool carries the same entries.
+ */
+function pinnedThinking(overlay: Overlay): Record<string, { reasoning: true; thinking: ThinkingConfig }> {
+  const overrides: Record<string, { reasoning: true; thinking: ThinkingConfig }> = {};
+  for (const reference of configuredModels(overlay)) {
+    const separator = reference.indexOf("/");
+    const provider = reference.slice(0, separator);
+    const written = reference.slice(separator + 1);
+    const { bare, level } = splitThinking(written);
+    const thinking = listingThinking[provider];
+    if (LIVE_CATALOG_PROVIDERS[provider] !== true || !thinking || level === undefined ||
+      registry[provider]?.some(identity => identity.id === written || identity.id === bare)) continue;
+    overrides[`${provider}/${bare}`] = { reasoning: true, thinking };
+  }
+  return overrides;
 }
 
 /**
@@ -187,20 +232,15 @@ function checkOverlay(overlay: Overlay, pool: RuntimeAccountPool) {
     if (!concrete || separator <= 0) throw new OmpRefusal("model_configuration_missing");
     const provider = concrete.slice(0, separator);
     if (!pool[provider]?.length) throw new OmpRefusal("account_unavailable");
-    // A colon is ambiguous: it ends an OpenRouter model id (`deepseek/x:free`) and it also
-    // introduces a thinking level (`anthropic/y:high`). So take the id as written first, and
-    // only strip a suffix that is actually a level.
     const written = concrete.slice(separator + 1);
-    const level = written.lastIndexOf(":");
-    const bare =
-      level > 0 && ThinkingLevelSchema.safeParse(written.slice(level + 1)).success
-        ? written.slice(0, level)
-        : written;
+    const { bare } = splitThinking(written);
     // The bundled registry is a snapshot of the pinned SDK, so it is authoritative only for a
     // provider whose catalog the gateway does NOT resolve live. For one it does, the machine
     // holds the real catalog and refuses an id it cannot serve by name
     // (`model_not_published`); refusing here on a stale snapshot would reject every model the
-    // provider added since the SDK release, which is the same wrongness inverted.
+    // provider added since the SDK release, which is the same wrongness inverted. A one-shot
+    // cannot run a substitute for such an id either: `oneShotPreparation` scopes its startup to
+    // exactly the configured model, so an id the listing lacks stops the run before any call.
     if (LIVE_CATALOG_PROVIDERS[provider] === true) continue;
     const serveable = registry[provider] ?? [];
     const resolved = serveable.find(identity => identity.id === written) ??
@@ -644,10 +684,11 @@ async function sessionRuntimePreparation(
   const skillConfig = skills.mode === "disabled" ? { skills: { enabled: false } }
     : skills.mode === "selected" ? { skills: { customDirectories: inputs.map(binding => `/inputs/${binding.name}`) } }
     : {};
-  const native = nativeModelConfiguration(pool);
+  const native = nativeModelConfiguration(pool, overlay);
+  const config = { ...overlay, ...native.config, ...skillConfig };
   const input = boundedInput({
     models: JSON.stringify(native.models),
-    config: JSON.stringify({ ...overlay, ...native.config, ...skillConfig }),
+    config: JSON.stringify(config),
     accountPool: JSON.stringify(pool),
     prompt: args.prompt,
     hasPrompt: args.prompt.length > 0,
@@ -658,7 +699,7 @@ async function sessionRuntimePreparation(
     resumeOverrides: JSON.stringify(overrides ?? {}),
     ...(sessionId ? { sessionId, resume } : {}),
   });
-  return { defaults, overlay, pool, reference, gateway, current, input, skills, inputs, automation };
+  return { defaults, overlay, pool, reference, gateway, current, input, config, skills, inputs, automation };
 }
 
 async function sessionPreparation(
@@ -669,7 +710,7 @@ async function sessionPreparation(
 ) {
   await authorizeTarget(ctx, args);
   const operationId = `${OMP_PLUGIN_ID}.${sessionId ? "harness" : "launch"}`;
-  const { defaults, overlay, pool, reference, gateway, current, input, skills, inputs, automation } =
+  const { defaults, overlay, pool, reference, gateway, current, input, config, skills, inputs, automation } =
     await sessionRuntimePreparation(ctx, args, operationId, sessionId, resume);
   const destination = {
     containerId: args.containerId,
@@ -700,7 +741,7 @@ async function sessionPreparation(
       inferenceLimits: args.inferenceLimits ?? null,
     }),
   };
-  return { review, input, inputs, broker: reference, gateway };
+  return { review, input, config, inputs, broker: reference, gateway };
 }
 export async function reviewSession(
   ctx: OmpContext,
@@ -738,7 +779,7 @@ async function prepareReviewedSession(
     }),
   };
 }
-/** The reviewed session's content, plus the pins of the operation that will run it. */
+/** The reviewed session's content as a one-shot runs it, plus the pins of the operation that will run it. */
 async function oneShotPreparation(
   ctx: OmpContext,
   args: ActionInput<"runSession">,
@@ -759,8 +800,21 @@ async function oneShotPreparation(
   }
   if (prepared.review.skills.mode !== "preserve") requireSkillRuntime(current.deployment.installation?.machine, SESSION_OPERATION_ID);
   if (args.automation) requireSdkRuntime(current.deployment.installation?.machine, SESSION_OPERATION_ID);
+  // OMP BINDS A ONE-SHOT'S MODEL ONCE, AT STARTUP, WITH NOBODY THERE TO SEE WHICH (#49). When the
+  // configured model was not in the session's catalog at that moment — the gateway listed it too
+  // slowly, or the provider withdrew it — OMP took a model whose id merely resembled it, or the
+  // machine's default, and ran it: `modelFallback` governs retries, not startup. Scoped to
+  // exactly the configured model, startup has nothing else to choose, and a print session that
+  // resolves no model exits before its first call. An operator's terminal keeps its full `/model`
+  // picker, so the scope is placed here, not in the reviewed content.
+  const configured = prepared.config.modelRoles?.default;
+  if (!configured) throw new OmpRefusal("model_configuration_missing");
   return {
     prepared,
+    input: boundedInput({
+      ...prepared.input,
+      config: JSON.stringify({ ...prepared.config, enabledModels: [exactModelScope(configured)] }),
+    }),
     pins: current.pins,
     limits,
     digest: digestOf({ review: prepared.review.reviewDigest, current }),
@@ -769,9 +823,10 @@ async function oneShotPreparation(
 /**
  * The reviewed session, placed as a governed job instead of a terminal. It runs on
  * `atyrode.omp.session`, the one-shot sibling of `atyrode.omp.launch`: the same reviewed
- * input and the same executable, but no stdin — so `omp -p` reads its prompt from argv
- * and never waits on a pipe — and a bounded `session` output lease, which the owner
- * mounts at `SESSION_GUEST_PATH`, that omp writes its transcript straight into.
+ * input, with startup held to the configured model, and the same executable, but no stdin —
+ * so `omp -p` reads its prompt from argv and never waits on a pipe — and a bounded `session`
+ * output lease, which the owner mounts at `SESSION_GUEST_PATH`, that omp writes its
+ * transcript straight into.
  *
  * The caller's `reviewDigest` covers the session's content, which is placement-agnostic;
  * the door covers the placement, by pinning the operation it posts across both
@@ -791,7 +846,7 @@ export async function runSession(
   const jobId = await ctx.newId();
   const latest = await oneShotPreparation(ctx, args);
   if (latest.digest !== first.digest) throw new OmpRefusal("resources_changed");
-  const input = latest.prepared.input;
+  const input = latest.input;
   const provenance = provenanceSchema.parse({
     target: latest.prepared.review.destination,
     operationId: SESSION_OPERATION_ID,
@@ -929,14 +984,9 @@ export async function readSession(
     result.job.result?.exitCode ?? 0,
     configuredModel,
   );
-  // Same ambiguity as `checkOverlay`: a trailing thinking level is not part of the id, and the
-  // transcript never carries one, so comparing the written form would report every levelled
-  // model as substituted.
-  const level = configuredModel.lastIndexOf(":");
-  const asked =
-    level > 0 && ThinkingLevelSchema.safeParse(configuredModel.slice(level + 1)).success
-      ? configuredModel.slice(0, level)
-      : configuredModel;
+  // A trailing thinking level is not part of the id, and the transcript never carries one, so
+  // comparing the written form would report every levelled model as substituted.
+  const asked = splitThinking(configuredModel).bare;
   // `modelFallback: false` means no path may resolve to another model, so a receipt naming one
   // is refused rather than recorded. With fallback permitted the receipt keeps both names and
   // the caller decides; it is never reduced to the substitute alone.
