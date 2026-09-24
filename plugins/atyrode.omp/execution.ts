@@ -34,6 +34,7 @@ import {
   ThinkingLevelSchema,
   GATEWAY_DISCOVERY_TIMEOUT_MS,
   exactModelScope,
+  pinnedModelRoles,
   modelId,
   PreparedHarnessSessionSchema,
   PreparedResumeSessionSchema,
@@ -807,13 +808,19 @@ async function oneShotPreparation(
   // exactly the configured model, startup has nothing else to choose, and a print session that
   // resolves no model exits before its first call. An operator's terminal keeps its full `/model`
   // picker, so the scope is placed here, not in the reviewed content.
+  //
+  // Startup is not the one-shot's last selection. Task agents, the advisor, the plan hand-off and
+  // compaction resolve a role later, against the whole catalog, where an unset role reaches OMP's
+  // own priority lists and a workspace's `.omp/config.yml` may name any model; so every chat role
+  // the configuration leaves unset names the configured model as well.
   const configured = prepared.config.modelRoles?.default;
   if (!configured) throw new OmpRefusal("model_configuration_missing");
+  const modelRoles = pinnedModelRoles({ ...prepared.config.modelRoles, default: configured });
   return {
     prepared,
     input: boundedInput({
       ...prepared.input,
-      config: JSON.stringify({ ...prepared.config, enabledModels: [exactModelScope(configured)] }),
+      config: JSON.stringify({ ...prepared.config, modelRoles, enabledModels: [exactModelScope(configured)] }),
     }),
     pins: current.pins,
     limits,
@@ -823,10 +830,10 @@ async function oneShotPreparation(
 /**
  * The reviewed session, placed as a governed job instead of a terminal. It runs on
  * `atyrode.omp.session`, the one-shot sibling of `atyrode.omp.launch`: the same reviewed
- * input, with startup held to the configured model, and the same executable, but no stdin —
- * so `omp -p` reads its prompt from argv and never waits on a pipe — and a bounded `session`
- * output lease, which the owner mounts at `SESSION_GUEST_PATH`, that omp writes its
- * transcript straight into.
+ * input, with startup and every unset model role held to the configured model, and the same
+ * executable, but no stdin — so `omp -p` reads its prompt from argv and never waits on a pipe —
+ * and a bounded `session` output lease, which the owner mounts at `SESSION_GUEST_PATH`, that omp
+ * writes its transcript straight into.
  *
  * The caller's `reviewDigest` covers the session's content, which is placement-agnostic;
  * the door covers the placement, by pinning the operation it posts across both
