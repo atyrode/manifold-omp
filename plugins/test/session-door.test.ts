@@ -776,10 +776,9 @@ test("a one-shot pins its configured live-listed model, so discovery timing cann
   expect(config.enabledModels).toEqual([exactModelScope(configured)]);
   // A slow gateway is waited for past OMP's 10 s default instead of being given up on.
   const pooled = Object.values(models.providers);
-  expect(pooled).toHaveLength(2);
   for (const provider of pooled) expect(provider.discovery.timeoutMs).toBeGreaterThan(10_000);
   // The listing names the model but not how it reasons, so its `:medium` is pinned from the same
-  // template the gateway serves it with, under every provider the listing reaches it through.
+  // template the gateway serves it with, under the provider the listing reaches it through.
   const template = OPENROUTER_LISTING_TEMPLATE?.thinking;
   expect(template?.efforts.map(String)).toContain("medium");
   for (const provider of pooled)
@@ -793,7 +792,48 @@ test("a one-shot pins its configured live-listed model, so discovery timing cann
   const terminal = await f.client.call("prepareSession", { ...live, reviewDigest });
   if ("refused" in terminal) throw new Error(terminal.refused);
   expect(JSON.parse(String(terminal.runtime.input.config)).enabledModels).toBeUndefined();
-  expect(terminal.runtime.input.models).toBe(posted.models);
+});
+
+/**
+ * Every provider a session registers makes its own `models` call through the service proxy, each
+ * one an authorization the owner has to decide (atyrode/manifold#841), and the gateway lists every
+ * model its pool reaches under each of them. So a one-shot registers, and hands its gateway, only
+ * the providers its configuration names; a terminal from the same review keeps the whole pool.
+ */
+test("a one-shot registers and hands its gateway only the providers its configuration names", async () => {
+  const f = fixture();
+  f.ctx.services.readInstance = async () => ({ type: "service_result", requestId: "fixture-request", ok: true, result: { credentials: [
+    { id: 7, provider: "anthropic", identityKey: "fixture-identity", credential: { type: "oauth", email: "fixture@example.invalid" } },
+    { id: 8, provider: "openrouter", identityKey: null, credential: { type: "api_key" } },
+  ] } });
+  const pool = { ...session.accountPool, openrouter: [{ scope, credentialId: 8, identityKey: null }] };
+  const posted = async (modelRoles: Record<string, string>) => {
+    const reviewed = await f.client.call("reviewSession", { ...session, accountPool: pool, overlay: { modelRoles } });
+    if ("refused" in reviewed) throw new Error(reviewed.refused);
+    // The review covers the pool the caller chose; the one-shot is placed with part of it.
+    expect(reviewed.accountPool).toEqual(pool);
+    const input = { ...session, accountPool: pool, overlay: { modelRoles }, reviewDigest: reviewed.reviewDigest };
+    const job = await f.client.call("runSession", input);
+    if ("refused" in job) throw new Error(job.refused);
+    const terminal = await f.client.call("prepareSession", input);
+    if ("refused" in terminal) throw new Error(terminal.refused);
+    const placed = (runtime: JobInput) => ({
+      providers: Object.keys(JSON.parse(String(runtime.models)).providers).sort(),
+      disabled: ["anthropic", "openrouter"].filter(provider =>
+        JSON.parse(String(runtime.config)).disabledProviders.includes(provider)),
+      accountPool: JSON.parse(String(runtime.accountPool)),
+    });
+    return { oneShot: placed(f.posted.at(-1)!.input), terminal: placed(terminal.runtime.input) };
+  };
+
+  expect(await posted({ default: "openrouter/openai/gpt-5.5" })).toEqual({
+    // The gateway still holds every credential of the provider that serves the configured model.
+    oneShot: { providers: ["openrouter"], disabled: ["anthropic"], accountPool: { openrouter: pool.openrouter } },
+    terminal: { providers: ["anthropic", "openrouter"], disabled: [], accountPool: pool },
+  });
+  // A role the operator configured for another provider keeps that provider.
+  expect((await posted({ default: "openrouter/openai/gpt-5.5", smol: "anthropic/claude-haiku-4-5" })).oneShot)
+    .toEqual({ providers: ["anthropic", "openrouter"], disabled: [], accountPool: pool });
 });
 
 /**
