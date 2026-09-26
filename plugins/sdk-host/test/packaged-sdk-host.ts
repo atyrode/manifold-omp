@@ -15,8 +15,9 @@ const scenario = process.argv[2]!;
 const sessions = "/home/job/omp-sessions";
 const saved = join(sessions, "saved.jsonl");
 const fresh = scenario.startsWith("fresh-");
+const material = scenario.startsWith("material-");
 const oneShot = scenario.startsWith("print-");
-const governed = fresh || oneShot;
+const governed = fresh || oneShot || material;
 const rpc = scenario === "fresh-rpc-selected";
 const selected = scenario === "selected" || scenario === "fresh-sdk-selected" || scenario === "print-sdk-selected" || rpc;
 const filtered = scenario === "fresh-sdk-filtered";
@@ -148,7 +149,8 @@ try {
   }
   const before = new Map<string, string>();
   for (const name of await readdir(sessions)) if (name.endsWith(".jsonl")) before.set(name, await readFile(join(sessions, name), "utf8"));
-  const refused = ["missing-model", "missing-thinking", "incompatible", "changed", "missing", "rpc-restricted"].includes(scenario);
+  const refused = ["missing-model", "missing-thinking", "incompatible", "changed", "missing", "rpc-restricted",
+    "material-extra", "material-digest", "material-utf8", "material-oversized"].includes(scenario);
   const expectedModel = scenario === "model-only" || scenario === "model-suffix" ? "fixture/openai/o3" : scenario === "both" ? "fixture/openai/gpt-4.1" : "fixture/openai/gpt-5";
   const expectedThinking = scenario === "auto" ? "auto" : governed ? "low" : ["model-suffix", "thinking-only", "both", "disabled", "cancel"].includes(scenario) ? "off" : "high";
   gateway = Bun.serve({ hostname: "127.0.0.1", port: 38457, idleTimeout: 0, async fetch(request) {
@@ -173,7 +175,7 @@ try {
       };
       // The CLI may title a new session separately. This reply cannot satisfy
       // the primary-turn completion or ordinary tool-registry proof.
-      if (governed && names.length === 0) {
+      if (governed && !material && names.length === 0) {
         message.content = [{ type: "text", text: "Fixture session title" }];
         return response(message);
       }
@@ -183,12 +185,19 @@ try {
       check(parsed.modelId === expectedModel, "resumed-model-selection");
       if (expectedThinking === "high" || expectedThinking === "low") check(parsed.options.reasoning === expectedThinking, "resumed-thinking-preservation");
       else check(parsed.options.reasoning === undefined && parsed.options.disableReasoning === true, "explicit-thinking-off");
-      if (!governed) check(JSON.stringify(names) === JSON.stringify(["read"]), "restricted-registry-widened");
+      if (material) check(names.length === 0, "material-registry-not-empty");
+      else if (!governed) check(JSON.stringify(names) === JSON.stringify(["read"]), "restricted-registry-widened");
       else check(names.includes("read"), "ordinary-read-tool-missing");
       const instructions = JSON.stringify({ system: parsed.context.systemPrompt, tools: parsed.context.tools });
       check(!instructions.includes("HOSTILE-AMBIENT-SKILL") && !instructions.includes("HOSTILE-PROJECT-CONTEXT"), "ambient-discovery");
+      if (material) {
+        const context = JSON.stringify(parsed.context);
+        check(context.includes("SDK-PROOF-PROMPT") && context.includes("MATERIAL-SOURCE-WITNESS") && context.includes("x".repeat(70000)), "material-truncated-or-missing");
+        check(!context.includes("CONFIG-SECRET-SENTINEL") &&
+          !context.includes(["SYNTHETIC", "LOCAL", "FIXTURE", "NOT", "A", "CREDENTIAL"].join("-")), "material-secret-disclosure");
+      }
       if (selected) check(instructions.includes("sealed-proof"), "selected-skill-not-advertised");
-      else if (!governed || scenario === "fresh-sdk-disabled") check(!instructions.includes("skill://"), "disabled-skill-advertised");
+      else if (material || !governed || scenario === "fresh-sdk-disabled") check(!instructions.includes("skill://"), "disabled-skill-advertised");
       else check(!instructions.includes("sealed-proof"), filtered ? "filtered-skill-advertised" : "historical-skill-restored");
       if (governed) {
         check(parsed.context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-PROMPT")), "fresh-prompt-missing");
@@ -203,7 +212,14 @@ try {
           cancel() { cancelled = true; },
         }), { headers: { "Content-Type": "text/event-stream" } });
       }
-      if ((selected || filtered) && requests === 1) {
+      if (scenario === "material-tools" && requests === 1) {
+        message.stopReason = "toolUse";
+        message.content = [
+          { type: "toolCall", id: "material-read", name: "read", arguments: { path: "/home/job/.omp/agent/secret-sentinel" } },
+          { type: "toolCall", id: "material-bash", name: "bash", arguments: { command: "touch /home/job/forbidden-executed" } },
+          { type: "toolCall", id: "material-task", name: "task", arguments: { task: "Read /home/job/.omp/agent/models.yml" } },
+        ];
+      } else if ((selected || filtered) && requests === 1) {
         message.stopReason = "toolUse";
         message.content = [
           { type: "toolCall", id: "proof-read", name: "read", arguments: { path: "skill://sealed-proof/resource.txt" } },
@@ -213,6 +229,11 @@ try {
           ] : []),
         ];
       } else {
+        if (scenario === "material-tools") {
+          const results = parsed.context.messages.filter((message): message is ToolResultMessage => message.role === "toolResult");
+          for (const id of ["material-read", "material-bash", "material-task"])
+            check(results.some(result => result.toolCallId === id && result.isError), "material-forbidden-tool-executed");
+        }
         if (selected || filtered) {
           const results = parsed.context.messages.filter((message): message is ToolResultMessage => message.role === "toolResult");
           const read = results.find(result => result.toolCallId === "proof-read");
@@ -222,7 +243,7 @@ try {
         }
         completed = true;
       }
-      return response(message, oneShot);
+      return response(message, oneShot || material);
     } catch (error) {
       serverError = error instanceof ProofFailure ? error.code : "gateway-wire-failed";
       return Response.json({ error: { type: "fixture_failure", message: "Synthetic fixture refused request" } }, { status: 400 });
@@ -249,7 +270,7 @@ try {
       if (text.includes("\x1b]11;?")) pty.write("\x1b]11;rgb:0000/0000/0000\x1b\\");
       if (terminal.includes("SDK-PROOF-COMPLETE")) rendered = true;
     } } });
-  } else if (oneShot) child = Bun.spawn(argv, { ...spawnOptions, stdio: ["ignore", "pipe", "pipe", "socket-fd"] });
+  } else if (oneShot || material) child = Bun.spawn(argv, { ...spawnOptions, stdio: ["ignore", "pipe", "pipe", "socket-fd"] });
   else child = Bun.spawn(argv, { ...spawnOptions, stdin: rpc ? "pipe" : "ignore", stdout: "pipe" });
   if (governed && !rpc) {
     // The pinned Bun exposes an owned socketpair endpoint for the native ABI.
@@ -257,7 +278,7 @@ try {
     check(typeof fd === "number", "worker-context-socket");
     owner = (connect as unknown as (options: { fd: number }) => Socket)({ fd });
     owner.on("error", () => {});
-    if (oneShot) {
+    if (oneShot || material) {
       const closed = Promise.withResolvers<void>();
       ownerRead = closed.promise;
       owner.once("close", () => closed.resolve());
@@ -272,7 +293,7 @@ try {
             ownerPending = ownerPending.slice(end + 1);
             const frame = WorkerProgressSchema.parse(JSON.parse(line));
             check(progress.length < 256, "print-progress-count-limit");
-            check(!/SDK-|SYNTHETIC-|fixture|openai|gpt-|sealed-proof|skill:|proof-read|\bread\b|resource\.txt|\/home\/|\/inputs\/|127\.0\.0\.1/i.test(line), "print-progress-leaked-content");
+            check(!/SDK-|SYNTHETIC-|MATERIAL-|CONFIG-SECRET|fixture|openai|gpt-|sealed-proof|skill:|proof-read|\bread\b|resource\.txt|\/home\/|\/inputs\/|127\.0\.0\.1/i.test(line), "print-progress-leaked-content");
             check(["at the model", "running tools", "running", "finishing", "stopped"].includes(frame.stage), "print-progress-stage");
             if (frame.stage === "at the model") {
               check(modelProgress < streamStarts, "print-progress-before-stream");
@@ -358,6 +379,8 @@ try {
       "missing-model": "omp_resume_model_missing", "missing-thinking": "omp_resume_thinking_missing",
       incompatible: "omp_resume_thinking_incompatible", changed: "omp_resume_session_changed",
       missing: "omp_resume_session_changed", "rpc-restricted": "omp_restricted_harness_unsupported",
+      "material-extra": "omp_material_entries_invalid", "material-digest": "omp_material_digest_changed",
+      "material-utf8": "omp_sdk_failed", "material-oversized": "omp_material_file_invalid",
     };
     check(exit !== 0 && stderr.includes(reasons[scenario]!), "expected-refusal");
     check(requests === 0, "refusal-inferred");
@@ -371,7 +394,7 @@ try {
     check(cancelled, "gateway-stream-not-cancelled");
   } else {
     check(discoveries > 0 && (scenario === "auto" ? requests === 0 : completed) && (resumed || fresh ? exit !== 0 : exit === 0), "program-completion");
-    if (oneShot) {
+    if (oneShot || material) {
       const firstModel = progress.findIndex(frame => frame.stage === "at the model");
       check(firstModel >= 0 && progress.slice(firstModel + 1).some(frame => frame.stage !== "at the model") &&
         progress.at(-1)?.stage !== "at the model", "print-progress-stayed-at-model");
@@ -381,11 +404,11 @@ try {
     const path = fresh ? join(sessions, `${launch!.sessionId}.jsonl`) : resumed ? saved
       : join("/outputs/session", (await readdir("/outputs/session")).find(name => name.endsWith(".jsonl")) ?? "missing");
     const manager = await SessionManager.open(path, resumed || fresh ? sessions : "/outputs/session", undefined, { throwIfMissing: true });
-    if (oneShot) {
+    if (oneShot || material) {
       check(stdout.endsWith("\n"), "print-stdout-truncated");
       const frames = stdout.trimEnd().split("\n").map(line => JSON.parse(line));
       check(frames[0]?.type === "session" && frames[0].id === manager.getSessionId() &&
-        frames[0].cwd === "/home/job/workspace", "print-stdout-session-receipt");
+        frames[0].cwd === (material ? "/home/job/tmp" : "/home/job/workspace"), "print-stdout-session-receipt");
       check(frames.every(frame => typeof frame.type === "string" && frame.type !== "progress"), "print-progress-polluted-stdout");
       const final = frames.findLast(frame => frame.type === "message_end" && frame.message?.role === "assistant")?.message;
       check(final?.stopReason === "stop" && JSON.stringify(final.content) === JSON.stringify([{ type: "text", text: "SDK-PROOF-COMPLETE" }]), "print-stdout-completion");
@@ -407,6 +430,8 @@ try {
     check(context.models[manager.getLastModelChangeRole() ?? "default"] === expectedModel, "durable-model");
     check((context.configuredThinkingLevel ?? context.thinkingLevel) === expectedThinking, "durable-thinking");
     if (governed) check(context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-PROMPT")), "fresh-durable-prompt");
+    if (material) check(context.messages.some(message => message.role === "user" &&
+      JSON.stringify(message.content).includes("MATERIAL-SOURCE-WITNESS")), "material-durable-source-missing");
     if (resumed && scenario !== "auto") check(context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-RESUMED-TURN")), "durable-resumed-turn");
     if (scenario === "selected") {
       await manager.setSessionName("SDK proof saved session", "user");

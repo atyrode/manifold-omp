@@ -380,7 +380,8 @@ try {
     phase = "packed-broker-worker-ready";
     await waitFor(async () => {
       const value = await instance();
-      check(!["unavailable", "stopped"].includes(value.state), "packed-broker-worker-refused");
+      check(!["unavailable", "stopped"].includes(value.state),
+        `packed-broker-${`${value.state}-${value.reason ?? "unstated"}`.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/-+$/, "").slice(0, 64)}`);
       return value.state === "ready" && value.configuration?.revision === promoted.revision;
     }, 60_000, 50);
     const retainedAccess = await call("reviewAccountRuntime", { expectedBrokerRevision: promoted.revision });
@@ -428,6 +429,7 @@ try {
     const fixtureId = "fixture.omp-skills";
     const producerOperation = `${fixtureId}.produce`;
     const producerLocation = `${fixtureId}.bundles`;
+    const materialText = "NATIVE-MATERIAL-WITNESS\n" + "m".repeat(70000);
     const producerSource = Buffer.from(`
       import { mkdirSync, writeFileSync } from "node:fs";
       for (const name of ["alpha", "beta", "private"]) {
@@ -435,6 +437,10 @@ try {
         mkdirSync(path + "/resources", { recursive: true });
         writeFileSync(path + "/SKILL.md", "---\\nname: " + name + "\\ndescription: Offline reviewed skill\\n---\\nRead resources/witness.txt.\\n");
         writeFileSync(path + "/resources/witness.txt", "SEALED_SKILL_" + name + "\\n");
+      }
+      for (const name of ["material", "material-extra"]) {
+        writeFileSync("/outputs/" + name + "/transcript-map.json", ${JSON.stringify(materialText)});
+        if (name === "material-extra") writeFileSync("/outputs/" + name + "/extra", "UNREVIEWED-SENTINEL");
       }
     `);
     const producerSha = createHash("sha256").update(producerSource).digest("hex");
@@ -449,7 +455,8 @@ try {
       operations: { [producerOperation]: {
         executable: { runtimeTool: "bun" }, argv: [{ literal: "/job/artifact" }], input: {},
         runtimeTools: ["bun", "system"], locations: [{ locationId: producerLocation, access: "write" }],
-        outputs: ["alpha", "beta", "private"], exports: ["alpha", "beta"], network: "none", stdin: false,
+        outputs: ["alpha", "beta", "private", "material", "material-extra"],
+        exports: ["alpha", "beta", "material", "material-extra"], network: "none", stdin: false,
         limits: { timeoutMs: 30_000, memoryBytes: 256 * 1024 * 1024, processes: 32, outputBytes: 1024 * 1024 },
       } },
     });
@@ -479,7 +486,7 @@ try {
     const producerJobId = randomUUID();
     await ownerAction(hub, "engine.jobs.execute", { machineId: target.machineId, pluginId: fixtureId,
       operationId: producerOperation, jobId: producerJobId, input: {},
-      outputs: ["alpha", "beta", "private"].map(name => ({ name, locationId: producerLocation, components: [name] })) });
+      outputs: ["alpha", "beta", "private", "material", "material-extra"].map(name => ({ name, locationId: producerLocation, components: [name] })) });
     const producedSkills = await waitFor(async () => {
       const value = PublicJobSchema.parse(await ownerAction(hub, "engine.jobs.status", {
         node: { kind: "job", machineId: target.machineId, operationId: producerOperation, jobId: producerJobId } }));
@@ -521,6 +528,17 @@ try {
       node: formatManifoldUri({ kind: "operation", machineId: target.machineId, operationId: producerOperation }),
       cap: "jobs:read", enabled: true });
     check(digest(await call("readSkillCatalog", target)) === digest(populatedCatalog), "refused-skill-update-mutated-catalog");
+    phase = "native-material-session";
+    // Preserve this verifier's intentional module-loading boundary: no SDK or
+    // native control module is imported before the private environment check.
+    const { verifyNativeMaterial } = await import("./verify-native-material.ts");
+    try {
+      await verifyNativeMaterial({ root, target, hub, producerJobId, materialText });
+    } catch (error) {
+      if (error instanceof Error && /^native-material-[a-z0-9-]{1,63}$/.test(error.message))
+        throw new VerificationFailure(error.message);
+      throw error;
+    }
     phase = "packed-broker-graceful-stop";
     await stopBroker();
     const stoppedJob = await waitFor(async () => {
@@ -562,9 +580,15 @@ try {
     check(!(await roster(hub)).some(row => row.manifest.id === "atyrode.code" || row.manifest.id.startsWith("atyrode.code.")),
       "positive-worker-introduced-code-dependency");
     phase = "packaged-sdk-host";
-    const { verifySdkHost } = await import("./verify-sdk-host.ts");
-    await verifySdkHost({ root, bubblewrap, systemBindings: system.system!,
-      bundlePath: bundles.find(bundle => bundle.id === OMP_PLUGIN_ID)!.file });
+    const { verifySdkHost, SdkHostVerificationFailure } = await import("./verify-sdk-host.ts");
+    try {
+      await verifySdkHost({ root, bubblewrap, systemBindings: system.system!,
+        bundlePath: bundles.find(bundle => bundle.id === OMP_PLUGIN_ID)!.file });
+    } catch (error) {
+      if (error instanceof SdkHostVerificationFailure)
+        throw new VerificationFailure(`sdk-${error.code}`);
+      throw error;
+    }
   } finally {
     try { await stopBroker(); } catch { cleanupFailed = true; }
     for (const id of installed.reverse()) {

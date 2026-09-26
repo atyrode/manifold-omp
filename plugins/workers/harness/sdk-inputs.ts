@@ -2,7 +2,7 @@ import { constants, closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { z } from "zod";
 import { AutomationReviewSchema, ResumeSessionInputSchema } from "../../api/index.ts";
 
-export function readSessionInput(name: "automation" | "resumeOverrides" | "prompt" | "sessionId", limit = 65536): string {
+export function readSessionInput(name: "automation" | "resumeOverrides" | "prompt" | "sessionId" | "isolation", limit = 65536): string {
   const fd = openSync(`/inputs/${name}`, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const stat = fstatSync(fd);

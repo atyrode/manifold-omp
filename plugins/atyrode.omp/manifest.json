@@ -994,6 +994,65 @@
         },
         "stdin": false
       },
+      "atyrode.omp.material-session": {
+        "argv": [
+          { "literal": "--no-env-file" },
+          { "literal": "--no-install" },
+          { "literal": "--config=/dev/null" },
+          { "literal": "/runtime/bin/harness" },
+          { "literal": "native" },
+          { "literal": "-p" },
+          { "literal": "--material-only" }
+        ],
+        "input": {
+          "models": { "type": "string", "required": true, "maxLength": 65536 },
+          "config": { "type": "string", "required": true, "maxLength": 65536 },
+          "accountPool": { "type": "string", "required": true, "maxLength": 65536 },
+          "hasPrompt": { "type": "boolean", "required": true },
+          "prompt": { "type": "string", "required": true, "maxLength": 45056 },
+          "planYolo": { "type": "boolean", "required": true },
+          "skillRuntime": { "type": "string", "required": true, "maxLength": 4096 },
+          "disableSkills": { "type": "boolean", "required": true },
+          "automation": { "type": "string", "required": true, "maxLength": 4096 },
+          "resumeOverrides": { "type": "string", "required": true, "maxLength": 4096 },
+          "isolation": { "type": "string", "required": true, "maxLength": 4096 }
+        },
+        "environment": {
+          "SSL_CERT_FILE": "/runtime/bin/ca-certificates",
+          "GIT_SSL_CAINFO": "/runtime/bin/ca-certificates"
+        },
+        "runtimeTools": ["bun", "ca-certificates", "system", "harness", "sdkHost", "sdk-pi-natives"],
+        "executable": { "runtimeTool": "bun" },
+        "inputFiles": {
+          "models": {
+            "input": "models",
+            "homePath": [".omp", "agent", "models.yml"],
+            "jsonValues": [
+              { "path": ["providers", "*", "baseUrl"], "serviceId": "omp", "value": "url" },
+              { "path": ["providers", "*", "apiKey"], "serviceId": "omp", "value": "bearer" }
+            ]
+          },
+          "config": { "input": "config", "homePath": [".omp", "agent", "config.yml"] },
+          "skillRuntime": { "input": "skillRuntime" },
+          "automation": { "input": "automation" },
+          "resumeOverrides": { "input": "resumeOverrides" },
+          "prompt": { "input": "prompt" },
+          "isolation": { "input": "isolation" }
+        },
+        "services": [{ "serviceId": "omp", "revision": "1", "operationIds": ["models", "stream"] }],
+        "locations": [{ "locationId": "atyrode.omp.runs", "access": "write", "outputOnly": true }],
+        "outputs": ["session"],
+        "inputs": ["material"],
+        "network": "host",
+        "limits": {
+          "timeoutMs": 86400000,
+          "memoryBytes": 8589934592,
+          "processes": 512,
+          "outputBytes": 1073741824,
+          "inputBytes": 1050624
+        },
+        "stdin": false
+      },
       "atyrode.omp.harness": {
         "argv": [
           { "literal": "--no-env-file" },
