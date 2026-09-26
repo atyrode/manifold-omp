@@ -1,6 +1,7 @@
 import { closeSync } from "node:fs";
 import { connect, type Socket } from "node:net";
-import { copyFile, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { copyFile, readFile, readdir, readlink, stat, writeFile } from "node:fs/promises";
+import { isDeepStrictEqual } from "node:util";
 import { join } from "node:path";
 import { WorkerProgressSchema, type WorkerLocation, type WorkerProgress } from "@manifold/protocol";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -16,11 +17,15 @@ const sessions = "/home/job/omp-sessions";
 const saved = join(sessions, "saved.jsonl");
 const fresh = scenario.startsWith("fresh-");
 const oneShot = scenario.startsWith("print-");
-const governed = fresh || oneShot;
+const toolProof = scenario.startsWith("tools-");
+const agentTools = toolProof && scenario !== "tools-omitted";
+const native = fresh || oneShot || toolProof;
+const lateCollision = scenario === "tools-late-extension-collision";
+const rejectedTools = agentTools && scenario !== "tools-selected" && !lateCollision;
 const rpc = scenario === "fresh-rpc-selected";
 const selected = scenario === "selected" || scenario === "fresh-sdk-selected" || scenario === "print-sdk-selected" || rpc;
 const filtered = scenario === "fresh-sdk-filtered";
-const resumed = !governed && !["selected", "disabled", "cancel"].includes(scenario);
+const resumed = !native && !["selected", "disabled", "cancel"].includes(scenario);
 let owner: Socket | undefined;
 let child: Bun.Subprocess | undefined;
 let gateway: Bun.Server<undefined> | undefined;
@@ -94,13 +99,133 @@ function response(message: AssistantMessage, observeProgress = false) {
   });
 }
 
+// This socket supplies deterministic host replies, not server authorization.
+// The shipped worker, relay, SDK child, model calls and journal are all real.
+const runId = "sdk-proof-run";
+const door = "fixture.proof.record";
+const toolName = "manifold_fixture_proof_record";
+const digest = "a".repeat(64);
+const parameters = {
+  type: "object", properties: {
+    operation: { type: "string", enum: ["result", "refused", "unknown"] },
+    payload: { $ref: "#/$defs/payload" },
+    timeout: { type: "number", default: 500 },
+  }, required: ["operation", "payload"], additionalProperties: false,
+  $defs: { payload: { type: "object", properties: { count: { type: "integer", minimum: 1 } }, required: ["count"], additionalProperties: false } },
+};
+const policy = { runId, revision: "b".repeat(64),
+  required: [{ id: "fixture-policy", source: "operator", digest, body: "Read this policy and explicitly acknowledge its exact digest before invoking the fixture door." }],
+  issuedAt: 1 };
+const acknowledgement = { revision: policy.revision, acknowledgements: [{ id: policy.required[0]!.id, digest }] };
+const ackReply = { type: "result", door: "core.access.acknowledgeAgentPolicy", traceId: 70, outcome: { ok: true } };
+const canonicalReplies = {
+  result: { type: "result", door, traceId: 71, outcome: { ok: true },
+    projection: { ok: true, contractDigest: digest, trust: "untrusted", data: { receipt: "DURABLE-PROJECTED-RECEIPT", count: 7 } } },
+  refused: { type: "refused", code: "tool_ungranted", traceId: null },
+  unknown: { type: "unknown", reason: "missing_trace", traceId: 73 },
+};
+const invalidReply = { type: "result", door, traceId: 74,
+  outcome: { ok: false, denial: { rule: "invalid_args" } } };
+const toolTurns = [
+  { id: "policy-read", name: "manifold_policy", arguments: {} },
+  { id: "policy-ack", name: "manifold_ack_policy", arguments: acknowledgement },
+  { id: "invalid-arguments", name: toolName, arguments: { operation: "result", payload: { count: "not-an-integer" } } },
+  { id: "coercible-arguments", name: toolName, arguments: { operation: "result", payload: { count: "7" } } },
+  { id: "extra-arguments", name: toolName, arguments: { operation: "result", payload: { count: 7 }, door: "ungranted" } },
+  ...(["result", "refused", "unknown"] as const).map(operation => ({
+    id: `invoke-${operation}`, name: toolName,
+    arguments: { operation, payload: { count: 7 }, ...(operation === "result" ? { timeout: 1_000_000_000 } : {}) },
+  })),
+];
+const wireCalls: unknown[] = [];
+const wireIds = new Set<string>();
+let modelTurn = -1;
+let childEnvironmentChecked = false;
+
+async function inspectSdkChild() {
+  const pids = (await readFile(`/proc/${child!.pid}/task/${child!.pid}/children`, "utf8")).trim().split(/\s+/).filter(Boolean);
+  const sdk = [];
+  for (const pid of pids) {
+    if ((await readFile(`/proc/${pid}/cmdline`, "utf8")).split("\0").includes("/runtime/bin/sdkHost")) sdk.push(pid);
+  }
+  check(sdk.length === 1, "packaged-sdk-child-missing");
+  const pid = sdk[0]!;
+  const environment = (await readFile(`/proc/${pid}/environ`, "utf8")).split("\0");
+  check(!environment.some(entry => /^(?:MANIFOLD_|SDK_PROOF_GENERAL_BEARER=)/.test(entry)), "sdk-child-authority-environment");
+  const workerSocket = await readlink(`/proc/${child!.pid}/fd/3`);
+  const descriptors = await readdir(`/proc/${pid}/fd`);
+  for (const fd of descriptors) {
+    const target = await readlink(`/proc/${pid}/fd/${fd}`).catch(() => undefined);
+    check(target !== workerSocket, "sdk-child-worker-fd");
+  }
+  childEnvironmentChecked = true;
+}
+
+function hostReply(request: unknown): unknown {
+  check(agentTools, "omitted-selection-called-host");
+  const index = wireCalls.length;
+  wireCalls.push(request);
+  if (index === 0) {
+    check(isDeepStrictEqual(request, { type: "describe" }), "startup-not-description-only");
+    const name = scenario === "tools-reserved-collision" ? "manifold_policy" : scenario === "tools-builtin-collision" ? "read" : toolName;
+    return { type: "description", runId: scenario === "tools-description" ? "another-run" : runId,
+      agentId: "fixture-agent", target: "manifold://machine/sdk-proof", unavailable: [], tools: [{
+        name, door, title: "Fixture projected action", contractDigest: digest,
+        parameters: scenario === "tools-schema" ? { type: "array", items: { type: "string" } } : parameters,
+      }] };
+  }
+  check(!rejectedTools && !lateCollision, "rejected-description-called-host");
+  if (index === 1) {
+    check(modelTurn === 0 && isDeepStrictEqual(request, { type: "policy" }), "policy-not-model-selected");
+    return { type: "policy", policy };
+  }
+  if (index === 2) {
+    check(modelTurn === 1 && isDeepStrictEqual(request, { type: "ack", policy: acknowledgement }), "policy-auto-or-inexact-ack");
+    return ackReply;
+  }
+  check(modelTurn === index && isDeepStrictEqual(request,
+    { type: "invoke", door, args: toolTurns[modelTurn]?.arguments }), "fixed-door-or-retry");
+  if (index === 3 || index === 4) return invalidReply;
+  const operation = (["result", "refused", "unknown"] as const)[index - 5];
+  check(operation, "unexpected-host-call");
+  return canonicalReplies[operation];
+}
+
+function checkToolResults(messages: readonly { role: string }[], count: number, durable = false) {
+  const results = messages.filter((message): message is ToolResultMessage => message.role === "toolResult");
+  check(results.length === count, "tool-result-count");
+  for (let index = 0; index < count; index++) {
+    const turn = toolTurns[index]!;
+    const result = results.find(value => value.toolCallId === turn.id);
+    check(result && result.toolName === turn.name, "tool-result-identity");
+    if (turn.id === "invalid-arguments") {
+      check(result.isError, "invalid-arguments-accepted");
+      continue;
+    }
+    const expected = index === 0 ? { type: "policy", policy }
+      : index === 1 ? ackReply
+      : index === 3 || index === 4 ? invalidReply
+      : canonicalReplies[(["result", "refused", "unknown"] as const)[index - 5]!];
+    check(!result.isError, "canonical-tool-error");
+    if (durable) check(isDeepStrictEqual(result.details, expected), "canonical-tool-details");
+    check(result.content.length === 1 && result.content[0]!.type === "text" &&
+      isDeepStrictEqual(JSON.parse(result.content[0]!.text), expected), "canonical-tool-content");
+  }
+}
+
+function checkBlockedCollision(messages: readonly { role: string }[]) {
+  const results = messages.filter((message): message is ToolResultMessage => message.role === "toolResult");
+  check(results.length === 1 && results[0]!.toolCallId === "late-collision" &&
+    results[0]!.toolName === toolName && results[0]!.isError, "late-collision-not-blocked");
+}
+
 try {
   check(process.cwd() === "/inputs" && process.env.HOME === "/home/job" && Bun.version === "1.4.2", "private-environment");
   check(!Object.keys(process.env).some(key => /^(?:MANIFOLD_|AWS_|OPENAI_|ANTHROPIC_|CODE_)/.test(key)), "ambient-environment");
   const routes = (await readFile("/proc/net/route", "utf8")).trim().split("\n").slice(1);
   check(routes.every(line => line.split(/\s+/)[0] === "lo"), "network-namespace");
   const launch: { argv: string[]; sessionId: string; environment?: Record<string, string>; locations?: WorkerLocation[] } | undefined =
-    governed ? JSON.parse(await readFile("/inputs/launch", "utf8")) : undefined;
+    native ? JSON.parse(await readFile("/inputs/launch", "utf8")) : undefined;
   if (fresh) {
     // An unrelated prior selected-skill conversation must neither be continued
     // nor contribute its historical optional skill choice to this fresh launch.
@@ -150,7 +275,7 @@ try {
   for (const name of await readdir(sessions)) if (name.endsWith(".jsonl")) before.set(name, await readFile(join(sessions, name), "utf8"));
   const refused = ["missing-model", "missing-thinking", "incompatible", "changed", "missing", "rpc-restricted"].includes(scenario);
   const expectedModel = scenario === "model-only" || scenario === "model-suffix" ? "fixture/openai/o3" : scenario === "both" ? "fixture/openai/gpt-4.1" : "fixture/openai/gpt-5";
-  const expectedThinking = scenario === "auto" ? "auto" : governed ? "low" : ["model-suffix", "thinking-only", "both", "disabled", "cancel"].includes(scenario) ? "off" : "high";
+  const expectedThinking = scenario === "auto" ? "auto" : native ? "low" : ["model-suffix", "thinking-only", "both", "disabled", "cancel"].includes(scenario) ? "off" : "high";
   gateway = Bun.serve({ hostname: "127.0.0.1", port: 38457, idleTimeout: 0, async fetch(request) {
     try {
       check(request.headers.get("authorization") === `Bearer ${["SYNTHETIC", "LOCAL", "FIXTURE", "NOT", "A", "CREDENTIAL"].join("-")}`, "synthetic-capability");
@@ -173,24 +298,62 @@ try {
       };
       // The CLI may title a new session separately. This reply cannot satisfy
       // the primary-turn completion or ordinary tool-registry proof.
-      if (governed && names.length === 0) {
+      if (native && names.length === 0) {
         message.content = [{ type: "text", text: "Fixture session title" }];
         return response(message);
       }
       requests++;
+      if (toolProof) {
+        check(!rejectedTools, "rejected-tools-reached-model");
+        check(parsed.modelId === expectedModel, "tool-model-selection");
+        if (!childEnvironmentChecked) await inspectSdkChild();
+        if (!agentTools) {
+          check(!names.some(name => name.startsWith("manifold")), "omitted-selection-tool-leak");
+          check(wireCalls.length === 0, "omitted-selection-host-leak");
+          completed = true;
+          return response(message);
+        }
+        if (lateCollision) {
+          check(names.includes(toolName) && requests <= 2, "late-collision-model-turn");
+          if (requests === 1) {
+            message.stopReason = "toolUse";
+            message.content = [{ type: "toolCall", id: "late-collision", name: toolName,
+              arguments: { operation: "result", payload: { count: 7 } } }];
+          } else {
+            checkBlockedCollision(parsed.context.messages);
+            completed = true;
+          }
+          return response(message);
+        }
+        check(names.includes(toolName) && names.includes("manifold_policy") && names.includes("manifold_ack_policy") &&
+          !names.includes("manifold"), "selected-tools-not-advertised");
+        check(isDeepStrictEqual(parsed.context.tools!.find(tool => tool.name === toolName)!.parameters, parameters), "flat-schema-rewritten");
+        checkToolResults(parsed.context.messages, requests - 1);
+        check(requests <= toolTurns.length + 1, "tools-extra-inference");
+        modelTurn = requests - 1;
+        if (modelTurn < toolTurns.length) {
+          check(wireCalls.length === (modelTurn < 3 ? modelTurn + 1 : modelTurn), "unexpected-host-call-before-turn");
+          message.stopReason = "toolUse";
+          message.content = [{ type: "toolCall", ...toolTurns[modelTurn]! }];
+        } else {
+          check(wireCalls.length === toolTurns.length, "host-replayed-or-skipped-call");
+          completed = true;
+        }
+        return response(message);
+      }
       check(!refused, "refused-state-reached-inference");
       check(requests <= 2, "unexpected-extra-inference");
       check(parsed.modelId === expectedModel, "resumed-model-selection");
       if (expectedThinking === "high" || expectedThinking === "low") check(parsed.options.reasoning === expectedThinking, "resumed-thinking-preservation");
       else check(parsed.options.reasoning === undefined && parsed.options.disableReasoning === true, "explicit-thinking-off");
-      if (!governed) check(JSON.stringify(names) === JSON.stringify(["read"]), "restricted-registry-widened");
+      if (!native) check(JSON.stringify(names) === JSON.stringify(["read"]), "restricted-registry-widened");
       else check(names.includes("read"), "ordinary-read-tool-missing");
       const instructions = JSON.stringify({ system: parsed.context.systemPrompt, tools: parsed.context.tools });
       check(!instructions.includes("HOSTILE-AMBIENT-SKILL") && !instructions.includes("HOSTILE-PROJECT-CONTEXT"), "ambient-discovery");
       if (selected) check(instructions.includes("sealed-proof"), "selected-skill-not-advertised");
-      else if (!governed || scenario === "fresh-sdk-disabled") check(!instructions.includes("skill://"), "disabled-skill-advertised");
+      else if (!native || scenario === "fresh-sdk-disabled") check(!instructions.includes("skill://"), "disabled-skill-advertised");
       else check(!instructions.includes("sealed-proof"), filtered ? "filtered-skill-advertised" : "historical-skill-restored");
-      if (governed) {
+      if (native) {
         check(parsed.context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-PROMPT")), "fresh-prompt-missing");
         check(!JSON.stringify(parsed.context.messages).includes("SDK-PROOF-COMPLETE"), "historical-conversation-restored");
       }
@@ -229,12 +392,16 @@ try {
     }
   } });
   const kind = scenario === "rpc-restricted" ? "rpc-resume" : resumed ? "resume" : "print";
-  const argv = governed && !rpc ? ["/runtime/bin/bun", ...launch!.argv]
+  const argv = native && !rpc ? ["/runtime/bin/bun", ...launch!.argv]
     : ["/runtime/bin/bun", "--no-env-file", "--no-install", "--config=/dev/null", "/runtime/bin/sdkHost", rpc ? "rpc" : kind];
   if (resumed) argv.push(scenario === "missing" ? "missing.jsonl" : "saved.jsonl");
   if (rpc) argv.push(`${launch!.sessionId}.jsonl`, "/inputs/admission");
   const env = { ...process.env, ...launch?.environment };
-  if (governed && !rpc) env.MANIFOLD_JOB_CONTEXT_FD = "3";
+  if (native && !rpc) env.MANIFOLD_JOB_CONTEXT_FD = "3";
+  if (toolProof) {
+    env.MANIFOLD_SDK_PROOF = "disposable-parent-only";
+    env.SDK_PROOF_GENERAL_BEARER = "disposable-not-a-credential";
+  }
   let rendered = false;
   const spawnOptions = { cwd: "/inputs", env, stderr: "pipe" as const };
   if ((resumed && !refused) || (fresh && !rpc)) {
@@ -249,9 +416,9 @@ try {
       if (text.includes("\x1b]11;?")) pty.write("\x1b]11;rgb:0000/0000/0000\x1b\\");
       if (terminal.includes("SDK-PROOF-COMPLETE")) rendered = true;
     } } });
-  } else if (oneShot) child = Bun.spawn(argv, { ...spawnOptions, stdio: ["ignore", "pipe", "pipe", "socket-fd"] });
-  else child = Bun.spawn(argv, { ...spawnOptions, stdin: rpc ? "pipe" : "ignore", stdout: "pipe" });
-  if (governed && !rpc) {
+  } else child = Bun.spawn(argv, { ...spawnOptions, stdin: rpc ? "pipe" : "ignore", stdout: "pipe",
+    ...(oneShot || toolProof ? { stdio: ["ignore", "pipe", "pipe", "socket-fd"] as ["ignore", "pipe", "pipe", "socket-fd"] } : {}) });
+  if (native && !rpc) {
     // The pinned Bun exposes an owned socketpair endpoint for the native ABI.
     const fd = child.stdio[3];
     check(typeof fd === "number", "worker-context-socket");
@@ -282,6 +449,31 @@ try {
           }
         } catch (error) {
           serverError = error instanceof ProofFailure ? error.code : "print-progress-protocol";
+        }
+      });
+    }
+    if (toolProof) {
+      let pending = "";
+      owner.on("data", chunk => {
+        try {
+          pending += chunk.toString("utf8");
+          check(pending.length <= 65_536, "host-wire-unbounded");
+          let end: number;
+          while ((end = pending.indexOf("\n")) >= 0) {
+            const frame = JSON.parse(pending.slice(0, end));
+            pending = pending.slice(end + 1);
+            if (frame.type === "progress") {
+              WorkerProgressSchema.parse(frame);
+              continue;
+            }
+            check(frame.type === "agent_run" && typeof frame.requestId === "string" && !wireIds.has(frame.requestId), "host-wire-invalid-or-replayed");
+            wireIds.add(frame.requestId);
+            const reply = hostReply(frame.payload);
+            owner!.write(`${JSON.stringify({ type: "agent_run_result", requestId: frame.requestId, seq: 0, end: true, data: JSON.stringify(reply) })}\n`);
+          }
+        } catch (error) {
+          serverError = error instanceof ProofFailure ? error.code : "host-wire-failed";
+          child?.kill("SIGTERM");
         }
       });
     }
@@ -353,7 +545,10 @@ try {
   check(child.signalCode !== "SIGKILL", "host-cleanup-timeout");
   child.terminal?.close();
   check(!serverError, serverError ?? "gateway-failed");
-  if (refused) {
+  if (rejectedTools) {
+    check(exit !== 0 && /omp_agent_tools_[a-z_]+/.test(stderr), "tools-expected-startup-refusal");
+    check(requests === 0 && wireCalls.length === 1, "tools-refusal-side-effect");
+  } else if (refused) {
     const reasons: Record<string, string> = {
       "missing-model": "omp_resume_model_missing", "missing-thinking": "omp_resume_thinking_missing",
       incompatible: "omp_resume_thinking_incompatible", changed: "omp_resume_session_changed",
@@ -403,10 +598,20 @@ try {
       check(JSON.stringify(files) === JSON.stringify(["saved.jsonl", `${launch!.sessionId}.jsonl`].sort()), "fresh-extra-journal");
     }
     const context = manager.buildSessionContext();
+    if (toolProof) {
+      check(childEnvironmentChecked, "sdk-child-not-inspected");
+      check(wireCalls.length === (lateCollision ? 1 : agentTools ? toolTurns.length : 0), "tool-host-call-count");
+      if (lateCollision) checkBlockedCollision(context.messages);
+      else checkToolResults(context.messages, agentTools ? toolTurns.length : 0, true);
+      if (agentTools) {
+        check(manager.getSessionId() === launch!.sessionId && manager.getSessionFile() === join("/outputs/session", `${launch!.sessionId}.jsonl`), "tool-fixed-journal-identity");
+        check(isDeepStrictEqual(await readdir("/outputs/session"), [`${launch!.sessionId}.jsonl`]), "tool-extra-journal");
+      }
+    }
     check(context.messages.some(message => message.role === "assistant" && JSON.stringify(message.content).includes(resumed && scenario !== "auto" ? "SDK-PROOF-RESUMED-COMPLETE" : "SDK-PROOF-COMPLETE")), "durable-completion");
     check(context.models[manager.getLastModelChangeRole() ?? "default"] === expectedModel, "durable-model");
     check((context.configuredThinkingLevel ?? context.thinkingLevel) === expectedThinking, "durable-thinking");
-    if (governed) check(context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-PROMPT")), "fresh-durable-prompt");
+    if (native) check(context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-PROMPT")), "fresh-durable-prompt");
     if (resumed && scenario !== "auto") check(context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-RESUMED-TURN")), "durable-resumed-turn");
     if (scenario === "selected") {
       await manager.setSessionName("SDK proof saved session", "user");

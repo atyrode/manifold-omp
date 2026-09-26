@@ -6,6 +6,7 @@ import {
   TerminalRuntimeSchema,
   type PublicJob,
   type MachineHalf,
+  type NativeAgentRunBinding,
 } from "@manifold/protocol";
 import type { JobFollowSnapshot, JobProgressEvent } from "@manifold/protocol";
 import {
@@ -439,6 +440,7 @@ async function execute(
   jobId: string,
   provenance: Provenance,
   outputs: OutputBinding[] = [],
+  agentRun?: NativeAgentRunBinding,
 ) {
   // Retain the exact intended request before dispatch. A failed native dispatch cannot grant receipt access.
   if (
@@ -459,6 +461,7 @@ async function execute(
       outputs,
       ...(provenance.inputs.length === 0 ? {} : { inputs: provenance.inputs }),
       ...(provenance.limits === undefined ? {} : { limits: provenance.limits }),
+      ...(agentRun === undefined ? {} : { agentRun }),
     }),
   );
   checkJob(job, provenance, jobId);
@@ -667,6 +670,15 @@ function supportsSdkRuntime(machine: MachineHalf | undefined, operationId: strin
 function requireSdkRuntime(machine: MachineHalf | undefined, operationId: string) {
   if (!supportsSdkRuntime(machine, operationId)) throw new OmpRefusal("sdk_runtime_unsupported");
 }
+function requireAgentToolsRuntime(machine: MachineHalf | undefined, operationId: string) {
+  const operation = machine?.operations[operationId];
+  if (!supportsSdkRuntime(machine, operationId) ||
+    operation?.input.agentTools?.type !== "boolean" ||
+    !operation.runtimeTools?.includes("harness") ||
+    !operation.argv.some(argument => "literal" in argument && argument.literal === "--agent-tools" &&
+      argument.when?.input === "agentTools" && argument.when.equals === true))
+    throw new OmpRefusal("agent_tools_runtime_unsupported");
+}
 /** Runtime preparation is machine-scoped. Container and terminal authorization
  * belongs to reviewed launch or, for operator resume, independent placement. */
 async function sessionRuntimePreparation(
@@ -679,6 +691,8 @@ async function sessionRuntimePreparation(
 ) {
   const defaults = await expectedDefaults(ctx, args.expectedDefaultsRevision);
   const overlay = effectiveOverlay(defaults, args.overlay);
+  if (args.agentTools && (args.automation || args.planYolo || resume || operationId !== SESSION_OPERATION_ID))
+    throw new OmpRefusal("agent_tools_mode_unsupported");
   if (args.automation && (args.planYolo || overlay.task?.agentAdvisor?.task === "on" || overlay.task?.prewalk === true ||
     overlay.advisor?.enabled === true || overlay.prewalk?.enabled === true ||
     overlay.retry?.modelFallback === true)) throw new OmpRefusal("restricted_delegation_unsupported");
@@ -698,6 +712,7 @@ async function sessionRuntimePreparation(
   );
   const automation = args.automation ?? { mode: "ordinary" as const };
   if (args.automation || resume) requireSdkRuntime(current.deployment.installation?.machine, operationId);
+  if (args.agentTools) requireAgentToolsRuntime(current.deployment.installation?.machine, operationId);
   const skills = await resolveSkills(ctx, args.machineId, args.skills ?? (args.automation ? { mode: "disabled" } : undefined));
   if (args.planYolo && skills.mode !== "preserve") throw new OmpRefusal("skills_plan_unsupported");
   if (skills.mode !== "preserve") requireSkillRuntime(current.deployment.installation?.machine, operationId);
@@ -719,6 +734,7 @@ async function sessionRuntimePreparation(
     automation: JSON.stringify(automation),
     resumeOverrides: JSON.stringify(overrides ?? {}),
     ...(sessionId ? { sessionId, resume } : {}),
+    ...(args.agentTools === undefined ? {} : { agentTools: true }),
   });
   return { defaults, overlay, pool, reference, gateway, current, input, config, skills, inputs, automation };
 }
@@ -730,7 +746,8 @@ async function sessionPreparation(
   resume = false,
 ) {
   await authorizeTarget(ctx, args);
-  const operationId = `${OMP_PLUGIN_ID}.${sessionId ? "harness" : "launch"}`;
+  const operationId = sessionId ? `${OMP_PLUGIN_ID}.harness`
+    : args.agentTools ? SESSION_OPERATION_ID : `${OMP_PLUGIN_ID}.launch`;
   const { defaults, overlay, pool, reference, gateway, current, input, config, skills, inputs, automation } =
     await sessionRuntimePreparation(ctx, args, operationId, sessionId, resume);
   const destination = {
@@ -747,6 +764,7 @@ async function sessionPreparation(
     skills,
     automation,
     ...(args.inferenceLimits === undefined ? {} : { inferenceLimits: args.inferenceLimits }),
+    ...(args.agentTools === undefined ? {} : { agentTools: args.agentTools }),
     reviewDigest: digestOf({
       actor: actor(ctx),
       destination,
@@ -760,9 +778,10 @@ async function sessionPreparation(
       skills,
       inputs,
       inferenceLimits: args.inferenceLimits ?? null,
+      ...(args.agentTools === undefined ? {} : { agentTools: args.agentTools }),
     }),
   };
-  return { review, input, config, inputs, broker: reference, gateway };
+  return { review, input, config, inputs, broker: reference, gateway, current };
 }
 export async function reviewSession(
   ctx: OmpContext,
@@ -806,7 +825,8 @@ async function oneShotPreparation(
   args: ActionInput<"runSession">,
 ) {
   const prepared = await sessionPreparation(ctx, args);
-  const current = await currentOperation(ctx, args.machineId, SESSION_OPERATION_ID);
+  const current = prepared.review.operationId === SESSION_OPERATION_ID ? prepared.current
+    : await currentOperation(ctx, args.machineId, SESSION_OPERATION_ID);
   const declared = current.deployment.installation?.machine?.operations[SESSION_OPERATION_ID]?.limits;
   let limits: PublicJob["limits"] | undefined;
   if (args.inferenceLimits !== undefined) {
@@ -864,9 +884,9 @@ async function oneShotPreparation(
  * and a bounded `session` output lease, which the owner mounts at `SESSION_GUEST_PATH`, that omp
  * writes its transcript straight into.
  *
- * The caller's `reviewDigest` covers the session's content, which is placement-agnostic;
- * the door covers the placement, by pinning the operation it posts across both
- * preparations and recording it in the retained provenance.
+ * Ordinary review remains placement-agnostic; tool-selected calls review the
+ * one-shot operation directly. Both pin the actual operation across preparation
+ * and record the exact submitted input in retained provenance.
  */
 export async function runSession(
   ctx: OmpContext,
@@ -882,7 +902,18 @@ export async function runSession(
   const jobId = await ctx.newId();
   const latest = await oneShotPreparation(ctx, args);
   if (latest.digest !== first.digest) throw new OmpRefusal("resources_changed");
-  const input = latest.input;
+  const agentRun: NativeAgentRunBinding | undefined = args.agentTools === undefined ? undefined : {
+    runId: args.agentTools.runId,
+    sessionId: randomUUID(),
+    target: { machineId: args.machineId, containerId: args.containerId },
+  };
+  const input = agentRun === undefined ? latest.input : boundedInput({
+    ...latest.input,
+    automation: JSON.stringify({
+      ...latest.prepared.review.automation,
+      agentTools: { runId: agentRun.runId, sessionId: agentRun.sessionId },
+    }),
+  });
   const provenance = provenanceSchema.parse({
     target: latest.prepared.review.destination,
     operationId: SESSION_OPERATION_ID,
@@ -903,7 +934,7 @@ export async function runSession(
   });
   return execute(ctx, jobId, provenance, [
     { name: SESSION_OUTPUT_NAME, locationId: RUNS_LOCATION_ID, components: [jobId] },
-  ]);
+  ], agentRun);
 }
 /** The retained provenance of a session this door posted, or a refusal naming why not. */
 async function sessionProvenance(ctx: OmpContext, target: Target, jobId: string) {

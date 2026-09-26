@@ -188,6 +188,8 @@ export const PublicJobSchema = z.strictObject({
   authority: JobAuthoritySchema,
   terminal,
   service,
+  /** The admitted native Run correlation; not a credential or selectable tool grant. */
+  agentRunId: id.optional(),
 });
 export type PublicJob = z.infer<typeof PublicJobSchema>;
 

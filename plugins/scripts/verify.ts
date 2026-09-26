@@ -147,6 +147,7 @@ async function delegated(): Promise<void> {
       `OMP_PACK_GIT=${gitPath}`,
       `MANIFOLD_TEST_STATIC_BUSYBOX=${busyboxPath}`,
       `OMP_VERIFY_UNSHARE=${unsharePath}`,
+      ...(process.env.OMP_VERIFY_CONSUMER_MODULE ? [`OMP_VERIFY_CONSUMER_MODULE=${process.env.OMP_VERIFY_CONSUMER_MODULE}`] : []),
       process.execPath,
       "--no-env-file",
       "--no-install",
@@ -354,7 +355,9 @@ async function isolated(): Promise<void> {
           OMP_VERIFY_CGROUP: workloads,
           OMP_VERIFY_SYSTEM: process.env.OMP_VERIFY_SYSTEM!,
           OMP_VERIFY_BWRAP: process.env.OMP_VERIFY_BWRAP!,
+          OMP_VERIFY_DEVELOPMENT_SHELL: busybox,
           OMP_PACK_GIT: process.env.OMP_PACK_GIT!,
+          ...(process.env.OMP_VERIFY_CONSUMER_MODULE ? { OMP_VERIFY_CONSUMER_MODULE: process.env.OMP_VERIFY_CONSUMER_MODULE } : {}),
           NODE_ENV: "test",
           LANG: "C",
           TZ: "UTC",
@@ -424,6 +427,8 @@ async function isolated(): Promise<void> {
 }
 
 try {
+  const consumerModule = process.env.OMP_VERIFY_CONSUMER_MODULE;
+  check(consumerModule === undefined || (isAbsolute(consumerModule) && consumerModule.endsWith(".ts")), "invalid-consumer-module");
   if (!process.env.OMP_VERIFY_UNIT) await verifyConsumer();
   check(Bun.version === "1.4.2", "pinned-bun-required");
   check(

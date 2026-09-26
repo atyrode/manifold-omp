@@ -800,6 +800,13 @@
             "literal": "-p"
           },
           {
+            "literal": "--agent-tools",
+            "when": {
+              "input": "agentTools",
+              "equals": true
+            }
+          },
+          {
             "literal": "--mode"
           },
           {
@@ -828,6 +835,10 @@
           }
         ],
         "input": {
+          "agentTools": {
+            "type": "boolean",
+            "required": false
+          },
           "models": {
             "type": "string",
             "required": true,

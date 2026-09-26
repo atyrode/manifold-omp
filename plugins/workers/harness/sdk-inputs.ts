@@ -1,6 +1,15 @@
 import { constants, closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { z } from "zod";
-import { AutomationReviewSchema, ResumeSessionInputSchema } from "../../api/index.ts";
+import { AgentToolsSelectionSchema, AutomationReviewSchema, OmpSessionRefSchema, ResumeSessionInputSchema } from "../../api/index.ts";
+
+// The host generates the session identity after review. It is sealed beside the
+// ordinary policy, not accepted as a public profile or model-supplied selector.
+const nativeAutomation = z.union([
+  AutomationReviewSchema.options[0].extend({
+    agentTools: AgentToolsSelectionSchema.extend({ sessionId: OmpSessionRefSchema.shape.sessionId }).optional(),
+  }),
+  AutomationReviewSchema.options[1],
+]);
 
 export function readSessionInput(name: "automation" | "resumeOverrides" | "prompt" | "sessionId", limit = 65536): string {
   const fd = openSync(`/inputs/${name}`, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -14,7 +23,7 @@ export function readSessionInput(name: "automation" | "resumeOverrides" | "promp
   } finally { closeSync(fd); }
 }
 export function readAutomation() {
-  return AutomationReviewSchema.parse(JSON.parse(readSessionInput("automation", 4096)));
+  return nativeAutomation.parse(JSON.parse(readSessionInput("automation", 4096)));
 }
 export function readResumeOverrides() {
   const value: unknown = JSON.parse(readSessionInput("resumeOverrides", 4096));

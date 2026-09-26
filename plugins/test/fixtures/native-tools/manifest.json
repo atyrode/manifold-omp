@@ -1,0 +1,9 @@
+{
+  "id": "fixture.omp-tools",
+  "version": "1.0.0",
+  "title": "Disposable OMP tool witness",
+  "description": "Run-owned durable native consumer proof",
+  "capabilities": ["containers:write"],
+  "contributes": { "panels": [], "sections": [], "elements": [], "tools": [], "events": [] },
+  "entry": { "server": true, "web": "web.js" }
+}
