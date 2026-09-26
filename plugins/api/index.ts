@@ -15,6 +15,7 @@ import {
   AccountReferenceSchema,
   AccountsObservationSchema,
   BrokerClientAccessSchema,
+  GatewayRequestLimitsSchema,
 } from "./contracts.ts";
 import {
   ProbeIdentitiesSchema,
@@ -399,12 +400,15 @@ const gatewayReviewInput = TargetSchema.extend({
   expectedServiceRevision: id.nullable(),
   // Omission retains the existing schedule; null explicitly removes it.
   prices: GatewayPricesSchema.nullable().optional(),
+  // Omission retains the installed limits; null explicitly removes them.
+  requestLimits: GatewayRequestLimitsSchema.nullable().optional(),
 });
 export const GatewayReviewSchema = z.strictObject({
   destination: TargetSchema,
   expectedServiceRevision: id.nullable(),
   runtime: ResourcePinsSchema,
   prices: GatewayPricesSchema.nullable(),
+  requestLimits: GatewayRequestLimitsSchema.nullable(),
   reviewDigest: digest,
 });
 export const GatewaySetupSchema = z.strictObject({
@@ -470,6 +474,8 @@ export const rootActionSchemas = {
     result: PreparedSessionSchema,
   },
   /** The same reviewed session, placed as a governed one-shot job instead of a terminal.
+   * The job registers, and its gateway holds credentials for, only the pool providers its
+   * configuration names a model of; terminals keep the whole reviewed pool.
    * `inputs` binds sealed outputs of earlier jobs on the same machine to this run's
    * declared inputs; the door passes them to the hub verbatim and reads none of them, so
    * what the material is and how the prompt refers to it are the caller's business. */

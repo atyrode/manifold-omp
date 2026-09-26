@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { expect, test } from "bun:test";
 import { JobDescriptionSchema, JobFollowSnapshotSchema, MachineHalfSchema, type Cap } from "@manifold/protocol";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import {
   BROKER_SERVICE_ID,
   ACCOUNTS_PLUGIN_ID,
@@ -14,6 +15,7 @@ import {
   MATERIAL_SESSION_OPERATION_ID,
   SESSION_OUTPUT_NAME,
   createOmpClient,
+  exactModelScope,
   type ActionInput,
   type ActionReply,
   type OmpAction,
@@ -24,6 +26,8 @@ import { digestOf, type OmpContext } from "../atyrode.omp/machine-server.ts";
 import { handlers as rootHandlers } from "../atyrode.omp/server.ts";
 import rootManifest from "../atyrode.omp/manifest.json";
 import sdkRuntimeArtifacts from "../sdk-host/runtime-artifacts.json";
+import { OPENROUTER_LISTING_TEMPLATE } from "../workers/gateway/template.ts";
+import { ProbeModelsConfigSchema } from "../workers/probe/inputs.ts";
 
 type JobInput = Record<string, string | number | boolean>;
 type JobNode = { kind: "job"; machineId: string; operationId: string; jobId: string };
@@ -740,6 +744,126 @@ test("a session that served under a model it was not configured with is refused"
   expect(await f.client.call("readSession", { ...target, jobId: job.jobId })).toEqual({
     refused: "omp_model_substituted",
   });
+});
+
+/**
+ * The substitution itself, before any receipt: a one-shot configured with a model only the
+ * live listing carries ran `anthropic/claude-opus-4-8` when the gateway answered discovery after
+ * OMP's 10 s budget, and `openrouter/openai/gpt-5.5` when it did not answer at all (#49). OMP
+ * binds a one-shot's model once, at startup, so the job's own configuration has to leave it
+ * nothing but the configured model — and nothing to resolve by a resembling name.
+ */
+test("a one-shot pins its configured live-listed model, so discovery timing cannot substitute another", async () => {
+  const f = fixture();
+  f.ctx.services.readInstance = async () => ({ type: "service_result", requestId: "fixture-request", ok: true, result: { credentials: [
+    { id: 7, provider: "anthropic", identityKey: "fixture-identity", credential: { type: "oauth", email: "fixture@example.invalid" } },
+    { id: 8, provider: "openrouter", identityKey: null, credential: { type: "api_key" } },
+  ] } });
+  const configured = "openrouter/stealth/space-bunny-alpha:medium";
+  // The premise: the pinned SDK catalog does not carry it, only the gateway's live listing does.
+  expect(getBundledModels("openrouter").some(model => model.id === "stealth/space-bunny-alpha")).toBe(false);
+  const live = { ...session,
+    accountPool: { ...session.accountPool, openrouter: [{ scope, credentialId: 8, identityKey: null }] },
+    overlay: { modelRoles: { default: configured }, retry: { enabled: true, modelFallback: false } } };
+  const reviewDigest = await reviewDigestOf(f.client, live);
+  const job = await f.client.call("runSession", { ...live, reviewDigest });
+  if ("refused" in job) throw new Error(job.refused);
+  const posted = f.posted[0]!.input;
+  const config: { modelRoles: { default: string }; enabledModels?: string[] } = JSON.parse(String(posted.config));
+  const models: { providers: Record<string, { discovery: { timeoutMs?: number } }> } = JSON.parse(String(posted.models));
+
+  // Startup may select exactly the configured model, the scope the SDK host also admits.
+  expect(config.modelRoles.default).toBe(configured);
+  expect(config.enabledModels).toEqual([exactModelScope(configured)]);
+  // A slow gateway is waited for past OMP's 10 s default instead of being given up on.
+  const pooled = Object.values(models.providers);
+  for (const provider of pooled) expect(provider.discovery.timeoutMs).toBeGreaterThan(10_000);
+  // The listing names the model but not how it reasons, so its `:medium` is pinned from the same
+  // template the gateway serves it with, under the provider the listing reaches it through.
+  const template = OPENROUTER_LISTING_TEMPLATE?.thinking;
+  expect(template?.efforts.map(String)).toContain("medium");
+  for (const provider of pooled)
+    expect(provider).toMatchObject({ modelOverrides: { "openrouter/stealth/space-bunny-alpha": { reasoning: true, thinking: template } } });
+  // The owner fills in the endpoint and bearer; the native worker admits the rest as composed.
+  const bearer = "fixture-native-service-bearer-0000000000000001";
+  expect(ProbeModelsConfigSchema.safeParse({ providers: Object.fromEntries(Object.entries(models.providers).map(
+    ([name, provider]) => [name, { ...provider, baseUrl: "http://127.0.0.1:42123", apiKey: bearer }])) }).success).toBe(true);
+
+  // An operator's terminal from the same review keeps its full `/model` picker.
+  const terminal = await f.client.call("prepareSession", { ...live, reviewDigest });
+  if ("refused" in terminal) throw new Error(terminal.refused);
+  expect(JSON.parse(String(terminal.runtime.input.config)).enabledModels).toBeUndefined();
+});
+
+/**
+ * Every provider a session registers makes its own `models` call through the service proxy, each
+ * one an authorization the owner has to decide (atyrode/manifold#841), and the gateway lists every
+ * model its pool reaches under each of them. So a one-shot registers, and hands its gateway, only
+ * the providers its configuration names; a terminal from the same review keeps the whole pool.
+ */
+test("a one-shot registers and hands its gateway only the providers its configuration names", async () => {
+  const f = fixture();
+  f.ctx.services.readInstance = async () => ({ type: "service_result", requestId: "fixture-request", ok: true, result: { credentials: [
+    { id: 7, provider: "anthropic", identityKey: "fixture-identity", credential: { type: "oauth", email: "fixture@example.invalid" } },
+    { id: 8, provider: "openrouter", identityKey: null, credential: { type: "api_key" } },
+  ] } });
+  const pool = { ...session.accountPool, openrouter: [{ scope, credentialId: 8, identityKey: null }] };
+  const posted = async (modelRoles: Record<string, string>) => {
+    const reviewed = await f.client.call("reviewSession", { ...session, accountPool: pool, overlay: { modelRoles } });
+    if ("refused" in reviewed) throw new Error(reviewed.refused);
+    // The review covers the pool the caller chose; the one-shot is placed with part of it.
+    expect(reviewed.accountPool).toEqual(pool);
+    const input = { ...session, accountPool: pool, overlay: { modelRoles }, reviewDigest: reviewed.reviewDigest };
+    const job = await f.client.call("runSession", input);
+    if ("refused" in job) throw new Error(job.refused);
+    const terminal = await f.client.call("prepareSession", input);
+    if ("refused" in terminal) throw new Error(terminal.refused);
+    const placed = (runtime: JobInput) => ({
+      providers: Object.keys(JSON.parse(String(runtime.models)).providers).sort(),
+      disabled: ["anthropic", "openrouter"].filter(provider =>
+        JSON.parse(String(runtime.config)).disabledProviders.includes(provider)),
+      accountPool: JSON.parse(String(runtime.accountPool)),
+    });
+    return { oneShot: placed(f.posted.at(-1)!.input), terminal: placed(terminal.runtime.input) };
+  };
+
+  expect(await posted({ default: "openrouter/openai/gpt-5.5" })).toEqual({
+    // The gateway still holds every credential of the provider that serves the configured model.
+    oneShot: { providers: ["openrouter"], disabled: ["anthropic"], accountPool: { openrouter: pool.openrouter } },
+    terminal: { providers: ["anthropic", "openrouter"], disabled: [], accountPool: pool },
+  });
+  // A role the operator configured for another provider keeps that provider.
+  expect((await posted({ default: "openrouter/openai/gpt-5.5", smol: "anthropic/claude-haiku-4-5" })).oneShot)
+    .toEqual({ providers: ["anthropic", "openrouter"], disabled: [], accountPool: pool });
+});
+
+/**
+ * Startup is not the one-shot's last selection. A task agent, the advisor, the plan hand-off and
+ * compaction resolve a model role later, against the session's whole catalog, where an unset role
+ * is not the default model (an enabled advisor with no model of its own fell to OMP's reasoning
+ * list) and a workspace's `.omp/config.yml` may name any model for any role (#49). The job's own
+ * configuration outranks the workspace's, so it names a model for every chat role.
+ */
+test("a one-shot holds every model role its configuration leaves unset to the configured model", async () => {
+  const f = fixture();
+  const configured = "anthropic/claude-sonnet-4-5:medium";
+  const smol = "anthropic/claude-haiku-4-5";
+  const advised = { ...session, overlay: { modelRoles: { default: configured, smol }, advisor: { enabled: true },
+    retry: { enabled: true, modelFallback: false } } };
+  const reviewDigest = await reviewDigestOf(f.client, advised);
+  const job = await f.client.call("runSession", { ...advised, reviewDigest });
+  if ("refused" in job) throw new Error(job.refused);
+  const roles: Record<string, string> = JSON.parse(String(f.posted[0]!.input.config)).modelRoles;
+  // The chat roles of OMP 18.1.14 and of the SDK host's 18.2.7, which adds `memory`.
+  for (const role of ["default", "slow", "vision", "plan", "commit", "tiny", "memory", "task", "advisor"])
+    expect(roles[role]).toBe(configured);
+  // A role the operator configured keeps its model.
+  expect(roles.smol).toBe(smol);
+
+  // An operator's terminal from the same review resolves its roles as OMP ordinarily does.
+  const terminal = await f.client.call("prepareSession", { ...advised, reviewDigest });
+  if ("refused" in terminal) throw new Error(terminal.refused);
+  expect(JSON.parse(String(terminal.runtime.input.config)).modelRoles).toEqual({ default: configured, smol });
 });
 
 test("readSession refuses a transcript that does not name the session it reports", async () => {

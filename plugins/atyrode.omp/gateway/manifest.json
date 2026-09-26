@@ -39,6 +39,11 @@
             "type": "string",
             "required": true,
             "maxLength": 65536
+          },
+          "requestLimits": {
+            "type": "string",
+            "required": true,
+            "maxLength": 256
           }
         },
         "environment": {
@@ -56,6 +61,9 @@
         "inputFiles": {
           "accountPool": {
             "input": "accountPool"
+          },
+          "requestLimits": {
+            "input": "requestLimits"
           },
           "serviceBearer": {
             "generated": "service-bearer"

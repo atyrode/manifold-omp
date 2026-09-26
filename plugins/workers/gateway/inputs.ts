@@ -1,8 +1,8 @@
 import { accessSync, constants, closeSync, fstatSync, openSync, readdirSync, readSync } from "node:fs";
-import { RuntimeAccountPoolSchema, type RuntimeAccountPool } from "../../api/contracts.ts";
+import { GatewayRequestLimitsSchema, RuntimeAccountPoolSchema, type GatewayRequestLimits, type RuntimeAccountPool } from "../../api/contracts.ts";
 
 export const INPUT_LIMIT = 128 * 1024;
-export interface GatewayInputs { broker: { url: string; token: string }; accountPool: RuntimeAccountPool; serviceBearer: string }
+export interface GatewayInputs { broker: { url: string; token: string }; accountPool: RuntimeAccountPool; serviceBearer: string; requestLimits: GatewayRequestLimits | null }
 export const unavailable = (): Error => new Error("gateway_unavailable");
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -11,7 +11,7 @@ function record(value: unknown): value is Record<string, unknown> {
 function bearer(value: unknown): value is string {
   return typeof value === "string" && /^[A-Za-z0-9._~-]{32,4096}$/.test(value);
 }
-export function parseInputs(broker: unknown, pool: unknown, serviceBearer: unknown): GatewayInputs {
+export function parseInputs(broker: unknown, pool: unknown, serviceBearer: unknown, requestLimits: unknown): GatewayInputs {
   if (!record(broker) || Object.keys(broker).length !== 2 || typeof broker.url !== "string" || !bearer(broker.token) || !bearer(serviceBearer)) throw unavailable();
   // Native proxy is an exact numeric IPv4 loopback origin, not a URL selected by a provider or environment.
   if (!/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}$/.test(broker.url)) throw unavailable();
@@ -19,6 +19,9 @@ export function parseInputs(broker: unknown, pool: unknown, serviceBearer: unkno
   if (Number(url.port) < 1 || Number(url.port) > 65535) throw unavailable();
   const parsed = RuntimeAccountPoolSchema.safeParse(pool);
   if (!parsed.success) throw unavailable();
+  const limits = GatewayRequestLimitsSchema.nullable().safeParse(requestLimits);
+  if (!limits.success) throw unavailable();
+  if (limits.data) Object.freeze(limits.data);
   const accountPool = parsed.data;
   const slots = new Set<number>();
   let scope: string | undefined;
@@ -34,7 +37,7 @@ export function parseInputs(broker: unknown, pool: unknown, serviceBearer: unkno
     Object.freeze(selected);
   }
   Object.freeze(accountPool);
-  return { broker: { url: broker.url, token: broker.token }, accountPool, serviceBearer };
+  return { broker: { url: broker.url, token: broker.token }, accountPool, serviceBearer, requestLimits: limits.data };
 }
 
 export function readSealedJSON(path: string): unknown {
@@ -62,7 +65,7 @@ export function readSealedJSON(path: string): unknown {
 
 export function requirePrivateInputRoot(): void {
   const names = readdirSync("/inputs");
-  if (names.length !== 3 || names.some(name => !["broker", "accountPool", "serviceBearer"].includes(name))) throw unavailable();
+  if (names.length !== 4 || names.some(name => !["broker", "accountPool", "serviceBearer", "requestLimits"].includes(name))) throw unavailable();
   let writable = false;
   try { accessSync("/inputs", constants.W_OK); writable = true; } catch {}
   if (writable) throw unavailable();

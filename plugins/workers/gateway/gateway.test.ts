@@ -99,7 +99,7 @@ describe("native account-pool gateway", () => {
     const apiKey: SnapshotEntry = { id: 5, provider: "anthropic", identityKey: null, rotatesInMs: null, credential: { type: "api_key", key: "fixture-key-never-admitted" } };
     expect(resolveCredentialIdentityKey("anthropic", apiKey.credential)).toBeNull();
     const fixture = new FixtureBroker([credential(1, "chosen"), credential(2, "other"), credential(3, "chosen", "openai-codex"), credential(4, "chosen", "github-copilot"), apiKey, credential(6, "chosen")]);
-    const inputs = parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }], "openai-codex": [] }, serviceBearer);
+    const inputs = parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }], "openai-codex": [] }, serviceBearer, null);
     const controller = new AbortController();
     const storage = await openPoolStorage(broker, inputs.accountPool, controller.signal, fixture.fetch);
     try {
@@ -117,7 +117,7 @@ describe("native account-pool gateway", () => {
     const selected: SnapshotEntry = { id: 7, provider: "openai", identityKey: null, rotatesInMs: null, credential: { type: "api_key", key: "fixture-selected-api-key" } };
     const peer: SnapshotEntry = { ...selected, id: 8, credential: { type: "api_key", key: "fixture-unselected-api-key" } };
     const fixture = new FixtureBroker([selected, peer, { ...peer, id: 9, provider: "anthropic" }]);
-    const inputs = parseInputs(broker, { openai: [{ scope: "fixture-scope", credentialId: 7, identityKey: null }] }, serviceBearer);
+    const inputs = parseInputs(broker, { openai: [{ scope: "fixture-scope", credentialId: 7, identityKey: null }] }, serviceBearer, null);
     const controller = new AbortController();
     const storage = await openPoolStorage(broker, inputs.accountPool, controller.signal, fixture.fetch);
     try {
@@ -136,11 +136,7 @@ describe("native account-pool gateway", () => {
   });
   test("credential issuance fails closed when broker authority is unavailable", async () => {
     const fixture = new FixtureBroker([credential(1, "chosen")]);
-    const inputs = parseInputs(
-      broker,
-      { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] },
-      serviceBearer,
-    );
+    const inputs = parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] }, serviceBearer, null);
     const controller = new AbortController();
     const storage = await openPoolStorage(broker, inputs.accountPool, controller.signal, fixture.fetch);
     try {
@@ -172,7 +168,7 @@ describe("native account-pool gateway", () => {
 
   test("refresh cannot act on an unselected slot or substitute another selected slot", async () => {
     const fixture = new FixtureBroker([credential(1, "chosen"), credential(2, "other")]);
-    const inputs = parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }, { scope: "fixture-scope", credentialId: 2, identityKey: "other" }] }, serviceBearer);
+    const inputs = parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }, { scope: "fixture-scope", credentialId: 2, identityKey: "other" }] }, serviceBearer, null);
     const controller = new AbortController();
     const storage = await openPoolStorage(broker, inputs.accountPool, controller.signal, fixture.fetch);
     try {
@@ -190,7 +186,7 @@ describe("native account-pool gateway", () => {
   test("real SDK storage observes live disable and cannot reuse the selected bearer", async () => {
     const fixture = new FixtureBroker([credential(1, "chosen"), credential(2, "other")]);
     const controller = new AbortController();
-    const inputs = parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] }, serviceBearer);
+    const inputs = parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] }, serviceBearer, null);
     const storage = await openPoolStorage(broker, inputs.accountPool, controller.signal, fixture.fetch);
     try {
       await fixture.listening.promise;
@@ -206,7 +202,7 @@ describe("native account-pool gateway", () => {
     const entry = credential(1, "chosen");
     const fixture = new FixtureBroker([entry]);
     const controller = new AbortController();
-    const inputs = parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] }, serviceBearer);
+    const inputs = parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] }, serviceBearer, null);
     const storage = await openPoolStorage(broker, inputs.accountPool, controller.signal, fixture.fetch);
     try {
       await fixture.listening.promise;
@@ -223,7 +219,7 @@ describe("native account-pool gateway", () => {
 
   test("an accepted SSE identity change removes the selected account", async () => {
     const fixture = new FixtureBroker([credential(1, "chosen")]);
-    const inputs = parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] }, serviceBearer);
+    const inputs = parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] }, serviceBearer, null);
     const controller = new AbortController();
     const storage = await openPoolStorage(broker, inputs.accountPool, controller.signal, fixture.fetch);
     try {
@@ -244,7 +240,7 @@ describe("native account-pool gateway", () => {
     const inputs = parseInputs(broker, {
       anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "removed" }, { scope: "fixture-scope", credentialId: 2, identityKey: "current" }],
       openai: [{ scope: "fixture-scope", credentialId: 9, identityKey: null }],
-    }, serviceBearer);
+    }, serviceBearer, null);
     const controller = new AbortController();
     const storage = await openPoolStorage(broker, inputs.accountPool, controller.signal, fixture.fetch);
     try {
@@ -296,18 +292,26 @@ describe("native account-pool gateway", () => {
 
   test("sealed endpoint validation rejects authority tricks and strips ambient credentials before SDK loading", () => {
     for (const url of ["https://127.0.0.1:12345", "http://localhost:12345", "http://127.1:12345", "http://127.0.0.1:12345/v1", "http://127.0.0.1:12345?token=secret", "http://127.0.0.1:65536"]) {
-      expect(() => parseInputs({ ...broker, url }, {}, serviceBearer)).toThrow();
+      expect(() => parseInputs({ ...broker, url }, {}, serviceBearer, null)).toThrow();
     }
-    expect(() => parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }, { scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] }, serviceBearer)).toThrow();
-    expect(() => parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 0, identityKey: null }] }, serviceBearer)).toThrow();
-    expect(() => parseInputs(broker, { anthropic: ["chosen"] }, serviceBearer)).toThrow();
+    expect(() => parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }, { scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] }, serviceBearer, null)).toThrow();
+    expect(() => parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 0, identityKey: null }] }, serviceBearer, null)).toThrow();
+    expect(() => parseInputs(broker, { anthropic: ["chosen"] }, serviceBearer, null)).toThrow();
     const environment: NodeJS.ProcessEnv = { PATH: "/bin", MANIFOLD_JOB_CONTEXT_FD: "3", ANTHROPIC_API_KEY: "private", HOME: "/source", HTTP_PROXY: "secret", PI_DEBUG_STARTUP: "1" };
     isolateEnvironment(environment);
     expect(environment).toEqual({ PATH: "/bin", MANIFOLD_JOB_CONTEXT_FD: "3", HOME: "/inputs" });
   });
 
+  test("the fourth sealed input is required and only admits a strict bounded policy or null", () => {
+    for (const limits of [undefined, {}, { maxAttemptsPerCall: 0, maxOutputTokens: 1 }, { maxAttemptsPerCall: 33, maxOutputTokens: 1 }, { maxAttemptsPerCall: 1, maxOutputTokens: 1_000_001 }, { maxAttemptsPerCall: 1.5, maxOutputTokens: 1 }, { maxAttemptsPerCall: 1, maxOutputTokens: 1, extra: true }]) {
+      expect(() => parseInputs(broker, {}, serviceBearer, limits)).toThrow("gateway_unavailable");
+    }
+    expect(parseInputs(broker, {}, serviceBearer, null).requestLimits).toBeNull();
+    expect(parseInputs(broker, {}, serviceBearer, { maxAttemptsPerCall: 32, maxOutputTokens: 1_000_000 }).requestLimits).toEqual({ maxAttemptsPerCall: 32, maxOutputTokens: 1_000_000 });
+  });
+
   test("SSE failure projection discards raw SDK diagnostics across chunk boundaries", async () => {
-    const model = [...poolModels(parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] }, serviceBearer).accountPool).values()][0]!;
+    const model = [...poolModels(parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] }, serviceBearer, null).accountPool).values()][0]!;
     const raw = `data: ${JSON.stringify({ type: "error", reason: "error", error: { errorMessage: "fixture-source-token", content: [{ type: "text", text: "fixture-credential-body" }] } })}\n\n`;
     const bytes = new TextEncoder().encode(raw);
     const source = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(bytes.slice(0, 17)); controller.enqueue(bytes.slice(17)); controller.close(); } });
@@ -320,7 +324,7 @@ describe("native account-pool gateway", () => {
   });
 
   test("a charged failure preserves only validated usage and status through redaction", async () => {
-    const model = [...poolModels(parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] }, serviceBearer).accountPool).values()][0]!;
+    const model = [...poolModels(parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] }, serviceBearer, null).accountPool).values()][0]!;
     const usage = { input: 17, output: 3, cacheRead: 2, cacheWrite: 5, totalTokens: 27,
       cost: { input: 0.01, output: 0.02, cacheRead: 0.001, cacheWrite: 0.005, total: 0.036 } };
     const source = new ReadableStream<Uint8Array>({ start(controller) {
@@ -354,7 +358,7 @@ describe("native account-pool gateway", () => {
       `const { safeNativeStream } = await import(${JSON.stringify(gateway)});`,
       `const { parseInputs } = await import(${JSON.stringify(inputs)});`,
       `const { poolModels } = await import(${JSON.stringify(storage)});`,
-      `const pool = parseInputs(${JSON.stringify(broker)}, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] }, ${JSON.stringify(serviceBearer)}).accountPool;`,
+      `const pool = parseInputs(${JSON.stringify(broker)}, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] }, ${JSON.stringify(serviceBearer)}, null).accountPool;`,
       `const model = [...poolModels(pool).values()][0];`,
       // BOTH REAL SHAPES, in the order the boundary meets them. The first is what an upstream
       // rejection actually looks like arriving through the SDK — a `message_start` whose assistant
@@ -406,7 +410,7 @@ describe("native account-pool gateway", () => {
         init!.signal!.addEventListener("abort", () => { stopped.resolve(); reject(new Error("fixture-private-broker-error")); }, { once: true });
       });
     }, { preconnect: fetch.preconnect });
-    const opening = startPoolGateway(parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] }, serviceBearer), controller.signal, blockedFetch);
+    const opening = startPoolGateway(parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] }, serviceBearer, null), controller.signal, blockedFetch);
     await entered.promise;
     controller.abort();
     await stopped.promise;
@@ -416,7 +420,7 @@ describe("native account-pool gateway", () => {
   test("real SDK gateway publishes only authenticated native models and closes its broker watch", async () => {
     const fixture = new FixtureBroker([]);
     const controller = new AbortController();
-    const gateway = await startPoolGateway(parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] }, serviceBearer), controller.signal, fixture.fetch);
+    const gateway = await startPoolGateway(parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] }, serviceBearer, null), controller.signal, fixture.fetch);
     const url = `http://127.0.0.1:${gateway.port}`;
     try {
       expect((await fetch(url + "/v1/models")).status).toBe(401);

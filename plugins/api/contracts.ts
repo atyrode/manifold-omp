@@ -17,6 +17,13 @@ export const BrokerClientAccessSchema = z.strictObject({
 });
 export type BrokerClientAccess = z.infer<typeof BrokerClientAccessSchema>;
 
+/** Native-owned limits applied to each SDK request's provider attempts and output. */
+export const GatewayRequestLimitsSchema = z.strictObject({
+  maxAttemptsPerCall: z.number().int().min(1).max(32),
+  maxOutputTokens: z.number().int().min(1).max(1_000_000),
+});
+export type GatewayRequestLimits = z.infer<typeof GatewayRequestLimitsSchema>;
+
 const accountScope = z.string().min(1).max(1024);
 const identityKey = z.string().min(1).max(1024);
 const credentialId = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);

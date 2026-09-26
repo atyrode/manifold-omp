@@ -1,7 +1,7 @@
 import { accessSync, closeSync, constants, fstatSync, mkdirSync, openSync, readSync, readdirSync } from "node:fs";
 import { z } from "zod";
-import { identifier } from "../../api/contracts.ts";
-import { ProbeError, ProbeIdentitiesSchema, parseBenchmarkInput, type BenchmarkInput, type ProbeIdentity } from "../../api/probe.ts";
+import { identifier, modelId, ThinkingLevelSchema } from "../../api/contracts.ts";
+import { GATEWAY_DISCOVERY_TIMEOUT_MS, PROBE_MODEL_LIMIT, ProbeError, ProbeIdentitiesSchema, parseBenchmarkInput, type BenchmarkInput, type ProbeIdentity } from "../../api/probe.ts";
 
 export const PROBE_HOME = "/home/job";
 export const PROBE_AGENT = `${PROBE_HOME}/.omp/agent`;
@@ -9,10 +9,24 @@ export const PROBE_INPUT_LIMIT = 1024 * 1024;
 const loopbackUrl = z.string().regex(/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}(?:\/v1)?$/)
   .refine(value => { try { return Number(new URL(value).port) <= 65535; } catch { return false; } });
 // This is a deliberately narrow native OMP models configuration, not a consumer
-// catalog. No !command api keys, headers, environment references or custom code.
+// catalog. No !command api keys, headers, environment references, custom models or code.
+// A model override only lets a configured live-listed model reason at its configured level:
+// it carries no identity, transport, endpoint or price.
+const PinnedThinkingSchema = z.strictObject({
+  reasoning: z.literal(true),
+  thinking: z.strictObject({
+    mode: z.enum(["effort", "budget", "google-level", "anthropic-adaptive", "anthropic-budget-effort"]),
+    efforts: z.array(ThinkingLevelSchema).min(1).max(ThinkingLevelSchema.options.length),
+    defaultLevel: ThinkingLevelSchema.optional(),
+    requiresEffort: z.boolean().optional(),
+  }),
+});
 export const ProbeModelsConfigSchema = z.strictObject({ providers: z.record(identifier, z.strictObject({
   baseUrl: loopbackUrl, apiKey: z.string().regex(/^[A-Za-z0-9._~-]{32,4096}$/),
-  transport: z.literal("pi-native"), discovery: z.strictObject({ type: z.literal("proxy") }),
+  transport: z.literal("pi-native"),
+  discovery: z.strictObject({ type: z.literal("proxy"), timeoutMs: z.literal(GATEWAY_DISCOVERY_TIMEOUT_MS).optional() }),
+  modelOverrides: z.record(modelId, PinnedThinkingSchema)
+    .refine(value => Object.keys(value).length <= PROBE_MODEL_LIMIT).optional(),
 })).refine(value => Object.keys(value).length > 0 && Object.keys(value).length <= 16) });
 export const ProbeConfigSchema = z.strictObject({
   extensions: z.array(z.never()).length(0),
