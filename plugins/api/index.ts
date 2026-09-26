@@ -247,6 +247,9 @@ export const InventoryInputSchema = executionInput.extend({
  * Bytes, not characters: three-byte UTF-8 passes a character count three times over.
  */
 export const PROMPT_MAX_BYTES = 45056;
+/** Selects an existing authorized Run, never credentials or a model-chosen tool list. */
+export const AgentToolsSelectionSchema = z.strictObject({ runId: id });
+export type AgentToolsSelection = z.infer<typeof AgentToolsSelectionSchema>;
 export const SessionInputSchema = executionInput.extend({
   overlay: OverlaySchema,
   // Empty is the interactive terminal opened with no initial prompt (`hasPrompt: false`).
@@ -264,6 +267,7 @@ export const SessionInputSchema = executionInput.extend({
   skills: SkillSelectionSchema.optional(),
   automation: RestrictedAutomationSchema.optional(),
   inferenceLimits: JobInferenceLimitsSchema.refine(value => Object.keys(value).length > 0, "empty inference limits").optional(),
+  agentTools: AgentToolsSelectionSchema.optional(),
 });
 /** Durable dials share the exact validated launch settings; paths and credentials
  * are deliberately not part of a profile. Defaults are reviewed at each launch. */
@@ -275,6 +279,7 @@ export const OmpHarnessProfileSchema = SessionInputSchema.omit({
   skills: true,
   automation: true,
   inferenceLimits: true,
+  agentTools: true,
 });
 export type OmpHarnessProfile = z.infer<typeof OmpHarnessProfileSchema>;
 export const SessionReviewSchema = ReviewSchema.extend({
@@ -284,6 +289,7 @@ export const SessionReviewSchema = ReviewSchema.extend({
   skills: SkillReviewSchema,
   automation: AutomationReviewSchema,
   inferenceLimits: JobInferenceLimitsSchema.optional(),
+  agentTools: AgentToolsSelectionSchema.optional(),
 });
 export const PreparedSessionSchema = z
   .strictObject({
@@ -456,7 +462,7 @@ export const rootActionSchemas = {
   },
   reviewSession: { input: SessionInputSchema, result: SessionReviewSchema },
   prepareSession: {
-    input: SessionInputSchema.extend({ reviewDigest: digest }),
+    input: SessionInputSchema.omit({ agentTools: true }).extend({ reviewDigest: digest }),
     result: PreparedSessionSchema,
   },
   /** The same reviewed session, placed as a governed one-shot job instead of a terminal.

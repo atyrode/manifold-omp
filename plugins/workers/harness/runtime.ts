@@ -4,6 +4,7 @@ import { constants, closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { connect, type Socket } from "node:net";
 import { setTimeout, clearTimeout } from "node:timers";
 import { ActionRunner } from "@manifold/sdk";
+import type { WorkerContext } from "@manifold/sdk/worker";
 import type { ActionRunnerResponse } from "@manifold/protocol";
 import { z } from "zod";
 import { probeChildEnvironment } from "../probe/inputs.ts";
@@ -14,6 +15,7 @@ import { dispatchOmpModelRequest, OmpModelToolInputSchema } from "./model.ts";
 import { validateSkillInputs } from "./skills.ts";
 import { readAutomation } from "./sdk-inputs.ts";
 import { forwardOmpOutput, type ReportOmpProgress } from "./progress.ts";
+import { createAgentToolRelay } from "./agent-tools.ts";
 
 const runnerEnvironment = z.strictObject({
   origin: z.string().url(), token: z.string().regex(/^[a-f0-9]{64}$/i), runId: z.string().min(1).max(128),
@@ -96,25 +98,34 @@ export async function runOmpResume(signal: AbortSignal): Promise<boolean> {
   }
 }
 
-/** Interactive paths hand over the terminal directly. One-shot paths additionally
- * observe the published JSON stream without changing argv or output bytes. */
-export async function runOmpNative(signal: AbortSignal, reportProgress: ReportOmpProgress): Promise<boolean> {
+/** Interactive paths hand over the terminal directly. One-shot paths observe
+ * unchanged output bytes and optionally attach the narrow host-tool channel. */
+export async function runOmpNative(context: WorkerContext): Promise<boolean> {
+  const { signal } = context;
+  const reportProgress: ReportOmpProgress = progress => context.reportProgress(progress);
   const skills = validateSkillInputs();
   if (signal.aborted) throw new Error("harness_cancelled");
   const separator = process.argv.indexOf("--", 3);
   const options = process.argv.slice(3, separator < 0 ? undefined : separator);
   const print = options.includes("-p");
+  const automation = readAutomation();
+  const agentTools = automation.mode === "ordinary" ? automation.agentTools : undefined;
+  if (options.includes("--agent-tools") !== (agentTools !== undefined) ||
+    (agentTools && (!print || options.includes("--plan-yolo"))))
+    throw new Error("omp_agent_tools_mode_unsupported");
   let sessionFile: string | undefined;
-  if (!print) {
-    const root = openSessionsRoot();
-    try { sessionFile = prepareSessionFile(root, SessionIdSchema.parse(inputText("sessionId", 36)), "/home/job/workspace", false); }
+  if (!print || agentTools) {
+    const id = agentTools?.sessionId ?? SessionIdSchema.parse(inputText("sessionId", 36));
+    const root = openSessionsRoot(agentTools ? "/outputs/session" : SESSIONS_ROOT);
+    try { sessionFile = prepareSessionFile(root, id, "/home/job/workspace", false); }
     finally { closeSync(root); }
   }
-  if (readAutomation().mode === "restricted" || skills.mode !== "preserve") {
+  if (agentTools || automation.mode === "restricted" || skills.mode !== "preserve") {
     if (options.includes("--plan-yolo")) throw new Error("omp_skills_plan_unsupported");
     const child = spawn("/runtime/bin/bun", ["--no-env-file", "--no-install", "--config=/dev/null", "/runtime/bin/sdkHost",
       print ? "print" : "interactive", ...(sessionFile ? [sessionFile] : [])], {
-      cwd: "/inputs", env: ompEnvironment, stdio: print ? ["inherit", "pipe", "inherit"] : "inherit",
+      cwd: "/inputs", env: ompEnvironment,
+      stdio: agentTools ? ["inherit", "pipe", "inherit", "ipc"] : print ? ["inherit", "pipe", "inherit"] : "inherit",
     });
     const exit = Promise.withResolvers<number | null>();
     child.once("close", exit.resolve);
@@ -123,19 +134,52 @@ export async function runOmpNative(signal: AbortSignal, reportProgress: ReportOm
       ? forwardOmpOutput(child.stdout!, process.stdout, reportProgress, signal).then(() => true, () => false)
       : Promise.resolve(true);
     let timeout: NodeJS.Timeout | undefined;
+    let stopping = false;
+    let relayFailed = false;
+    let closeTools: (() => void) | undefined;
     const stop = () => {
+      if (stopping) return;
+      stopping = true;
       child.kill("SIGTERM");
       timeout = setTimeout(() => child.kill("SIGKILL"), 1000);
       timeout.unref();
     };
+    if (agentTools) {
+      const pendingSends = new Set<(reason: unknown) => void>();
+      const relay = createAgentToolRelay(context, message => new Promise<void>((resolve, reject) => {
+        if (!child.connected) { reject(new Error("omp_agent_tools_disconnected")); return; }
+        pendingSends.add(reject);
+        try {
+          child.send(message, error => {
+            pendingSends.delete(reject);
+            if (error) reject(error); else resolve();
+          });
+        } catch (error) { pendingSends.delete(reject); reject(error); }
+      }), () => { relayFailed = true; stop(); });
+      const disconnect = () => {
+        relay.close();
+        for (const reject of pendingSends) reject(new Error("omp_agent_tools_disconnected"));
+        pendingSends.clear();
+      };
+      child.on("message", relay.receive);
+      child.once("disconnect", disconnect);
+      closeTools = () => {
+        disconnect();
+        child.off("message", relay.receive);
+        child.off("disconnect", disconnect);
+      };
+    }
     signal.addEventListener("abort", stop, { once: true });
     if (signal.aborted) stop();
     try {
       const code = await exit.promise;
       const forwarded = await output;
-      return code === 0 && forwarded && !signal.aborted;
+      return code === 0 && forwarded && !signal.aborted && !relayFailed;
+    } finally {
+      closeTools?.();
+      signal.removeEventListener("abort", stop);
+      clearTimeout(timeout);
     }
-    finally { signal.removeEventListener("abort", stop); clearTimeout(timeout); }
   }
   const environment = { ...process.env };
   for (const name of Object.keys(environment)) if (name.startsWith("MANIFOLD_")) delete environment[name];
@@ -169,7 +213,9 @@ export async function runOmpNative(signal: AbortSignal, reportProgress: ReportOm
 export async function runOmpHarness(signal: AbortSignal): Promise<boolean> {
   const skills = validateSkillInputs();
   if (skills.mode !== "preserve" && process.argv.includes("--plan-yolo")) throw new Error("omp_skills_plan_unsupported");
-  if (readAutomation().mode === "restricted") throw new Error("omp_restricted_harness_unsupported");
+  const automation = readAutomation();
+  if (automation.mode === "restricted") throw new Error("omp_restricted_harness_unsupported");
+  if (automation.agentTools) throw new Error("omp_agent_tools_mode_unsupported");
   const binding = takeRunEnvironment(process.env);
   const sessionId = SessionIdSchema.parse(inputText("sessionId", 36));
   const prompt = inputText("prompt", 16384 * 4);

@@ -84,6 +84,31 @@ Startup is not a one-shot's last selection. Task agents (`@task`, `@smol`), an e
 
 A one-shot registers, and hands its gateway the credentials of, only the providers its configuration names: those of its model roles, fallback chains and task-agent model overrides, which for a configuration that names only a default is that model's provider. The review still covers the pool the caller chose; the posted job receives every credential that pool holds for those providers and none for any other. Each provider a session registers makes its own `models` discovery call through the native service proxy, one authorization for the owner to decide, and the gateway lists every model its pool reaches under each of them, serving a provider-qualified id with that model's own provider's credential. A whole pool therefore cost one discovery call per pool provider and let the three selections above reach a provider nobody configured. They now resolve within the configured providers or not at all: an agent definition that names another provider's model no longer resolves, and compaction's last resort is the largest-context model of the configured providers. Within a configured provider they can still choose another of its models: a text-only OpenRouter model's image question goes to an OpenRouter vision model, and OpenRouter's catalog carries its own routes to other vendors' models, served with the OpenRouter credential.
 
+## Explicit existing-Run tools
+
+Only ordinary one-shot `reviewSession` and `runSession` accept `agentTools: { runId }`.
+The Run must already exist and authorize the caller and concrete target. This selector
+is not a grant, a credential or an Agent profile field. Review binds the exact selector
+and native one-shot operation; admission rechecks authority and binds the generated
+journal UUID to the job's `agentRunId`. Omitting it remains ordinary, unbound behavior.
+Terminal preparation, resume, plan-yolo and restricted automation refuse the selection.
+Skills and prior transcripts never establish or recover this authority.
+
+The parent worker retains the sole private WorkerContext. The SDK receives only a
+bounded child relay, fixed namespaced doors and published argument schemas, never a
+general Run bearer. The model must read policy and explicitly acknowledge its exact
+revision through `manifold_policy` and `manifold_ack_policy`; neither OMP nor Code
+auto-acknowledges. Original model JSON reaches host validation without SDK coercion,
+default insertion or extra-field deletion. Collisions and unsupported runtime
+capabilities refuse rather than downgrade. Ordinary instruction discovery is unchanged.
+Completed results, refusals and cancellation with unknown effect acknowledgement
+remain distinct; the adapter never replays an uncertain invocation.
+
+Upgrade the compatible Manifold host first, then the exact native source, then any
+Code consumer pin. This contract requires the declared `MANIFOLD_REV` host's protocol
+43, native owner RPC 41 and hardened worker contract 7 support, with SDK host 18.2.7.
+Disposable unpaid native and compiled-SDK proofs do not establish live deployment,
+provider spending, fleet installation or the independently tracked material-only mode.
 ## One-shot inference limits
 
 `reviewSession` and `runSession` accept ephemeral `inferenceLimits`: a nonempty combination of `calls`, `inputTokens`, `outputTokens` and `costMicros`. Requested values cannot exceed the current operation's declared ceilings. Cost review requires compatible native metering and reviewed prices for every served model. Limits are bound into review, admission and retained receipt checks; cancellation still targets the same proven job if its reported limits change. Terminal preparation and Agent harnesses refuse unsupported limits, and limits are not saved in defaults or profiles.

@@ -228,8 +228,11 @@ export function parseSessionArchive(
     cacheWrite += assistant.usage.cacheWrite;
     if (assistant.usage.cost) cost = (cost ?? 0) + assistant.usage.cost.total;
   }
-  // The archived name is the only authority on where the transcript landed.
-  if (sessionId === null || model === null || !member.name.endsWith(`_${sessionId}.jsonl`))
+  // Stock OMP prefixes its journal with a timestamp; a reviewed native launch
+  // creates the exact UUID filename before SDK startup. Both must name the
+  // transcript's own identity, never merely end in the same unseparated suffix.
+  if (sessionId === null || model === null ||
+    (member.name !== `${sessionId}.jsonl` && !member.name.endsWith(`_${sessionId}.jsonl`)))
     invalid();
   return parse(SessionReceiptSchema, {
     sessionId,

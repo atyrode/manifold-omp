@@ -48,6 +48,22 @@ async function snapshot(directory: string): Promise<Record<string, string>> {
   return files;
 }
 
+/** Bundle bytes are the assertion; bounded field fingerprints make a mismatch diagnosable
+ * instead of letting the test runner truncate two multi-megabyte base64 strings. */
+function differingFields(before: unknown, after: unknown, path: string, differences: unknown[]): void {
+  if (before === after || differences.length >= 32) return;
+  if (before !== null && after !== null && typeof before === "object" && typeof after === "object") {
+    const left = before as Record<string, unknown>, right = after as Record<string, unknown>;
+    for (const key of new Set([...Object.keys(left), ...Object.keys(right)]))
+      differingFields(left[key], right[key], `${path}/${key}`, differences);
+    return;
+  }
+  const fingerprint = (value: unknown) => typeof value === "string" && value.length > 160
+    ? { bytes: Buffer.byteLength(value), sha256: new Bun.CryptoHasher("sha256").update(value).digest("hex") }
+    : value;
+  differences.push({ path, before: fingerprint(before), after: fingerprint(after) });
+}
+
 async function priorFamily(destination: string): Promise<Record<string, string>> {
   await mkdir(join(destination, "stale-member"), { recursive: true });
   await writeFile(join(destination, "stale-member", "retained.txt"), "prior nested bytes\n");
@@ -139,7 +155,16 @@ for (const destinationKind of ["default", "caller"] as const) {
       const firstBytes = await snapshot(destination);
       const second = await packWithReorderedAssets(destination);
       expect(second.map(({ id }) => id)).toEqual(family);
-      expect(await snapshot(destination)).toEqual(firstBytes);
+      const secondBytes = await snapshot(destination);
+      for (const file of publishedFiles) {
+        if (!file.endsWith(".json") || firstBytes[file] === secondBytes[file] ||
+          firstBytes[file] === undefined || secondBytes[file] === undefined) continue;
+        const differences: unknown[] = [];
+        differingFields(JSON.parse(Buffer.from(firstBytes[file]!, "base64").toString()),
+          JSON.parse(Buffer.from(secondBytes[file]!, "base64").toString()), file, differences);
+        console.error("package_determinism_mismatch", JSON.stringify(differences));
+      }
+      expect(secondBytes).toEqual(firstBytes);
     }, 360_000);
   });
 }

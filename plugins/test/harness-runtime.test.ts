@@ -3,10 +3,11 @@ import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ACTION_RUNNER_MAX_FRAME_BYTES, ActionRunnerResponseSchema, type ActionRunnerRequest } from "@manifold/protocol";
+import { ACTION_RUNNER_MAX_FRAME_BYTES, ActionRunnerResponseSchema, WORKER_MAX_PENDING, type ActionRunnerRequest, type AgentToolReply } from "@manifold/protocol";
 import { ADMISSION_CONTEXT_BYTES, writeAdmissionContext } from "../workers/harness/admission.ts";
 import { dispatchOmpModelRequest } from "../workers/harness/model.ts";
 import { createSessionFile, openSessionsRoot, prepareSessionFile } from "../workers/harness/sessions.ts";
+import { createAgentToolRelay } from "../workers/harness/agent-tools.ts";
 
 const discovery = (description: string) => ActionRunnerResponseSchema.parse({
   type: "discovery", id: null, runId: "root-run", protocolVersion: 1,
@@ -95,4 +96,106 @@ test("a successful root finish replies before returning terminal success, even w
 test("a failed root finish is not mistaken for successful shutdown", async () => {
   const runner = { closed: false, successful: false, async accept(_frame: ActionRunnerRequest) { this.closed = true; } };
   expect(await dispatchOmpModelRequest(runner, { request: { type: "finish", outcome: "failed" } }, "root-run", async () => {})).toBe("failed");
+});
+
+const effectReply: AgentToolReply = { type: "result", door: "fixture.proof.record", traceId: 1, outcome: { ok: true } };
+const toolCall = (id = randomUUID()) => ({
+  type: "agent_tool_call", id, request: { type: "invoke", door: "fixture.proof.record", args: {} },
+});
+const settle = () => new Promise<void>(resolve => setImmediate(resolve));
+
+test("replaying a settled child request terminates the relay without repeating its effect", async () => {
+  let effects = 0;
+  let failures = 0;
+  const delivered = Promise.withResolvers<void>();
+  const relay = createAgentToolRelay({
+    signal: new AbortController().signal,
+    async callAgent() { effects++; return effectReply; },
+  }, async () => { delivered.resolve(); }, () => { failures++; });
+  const call = toolCall();
+  try {
+    relay.receive(call);
+    await delivered.promise;
+    await settle();
+    relay.receive(call);
+    relay.receive(toolCall());
+    expect(effects).toBe(1);
+    expect(failures).toBe(1);
+  } finally { relay.close(); }
+});
+
+test("cancelling an unanswered call cannot free its slot for another host effect", async () => {
+  let effects = 0;
+  let failures = 0;
+  const outstanding = Promise.withResolvers<AgentToolReply>();
+  const overflow = toolCall();
+  const refused = Promise.withResolvers<AgentToolReply>();
+  const relay = createAgentToolRelay({
+    signal: new AbortController().signal,
+    async callAgent() { effects++; return outstanding.promise; },
+  }, async message => { if (message.id === overflow.id) refused.resolve(message.reply); }, () => { failures++; });
+  const first = toolCall();
+  try {
+    relay.receive(first);
+    for (let index = 1; index < WORKER_MAX_PENDING; index++) relay.receive(toolCall());
+    relay.receive({ type: "agent_tool_cancel", id: first.id });
+    relay.receive(overflow);
+    expect(await refused.promise).toEqual({ type: "refused", code: "saturated", traceId: null });
+    expect(effects).toBe(WORKER_MAX_PENDING);
+    expect(failures).toBe(0);
+  } finally {
+    relay.close();
+    outstanding.resolve(effectReply);
+    await settle();
+  }
+});
+
+test("unconfirmed child delivery bounds further host effects and fails closed", async () => {
+  let effects = 0;
+  let failures = 0;
+  let sends = 0;
+  const blocked = Promise.withResolvers<void>();
+  const full = Promise.withResolvers<void>();
+  const relay = createAgentToolRelay({
+    signal: new AbortController().signal,
+    async callAgent() { effects++; return effectReply; },
+  }, async () => {
+    if (++sends === WORKER_MAX_PENDING) full.resolve();
+    await blocked.promise;
+  }, () => { failures++; });
+  try {
+    for (let index = 0; index < WORKER_MAX_PENDING; index++) relay.receive(toolCall());
+    await full.promise;
+    relay.receive(toolCall());
+    expect(effects).toBe(WORKER_MAX_PENDING);
+    expect(failures).toBe(1);
+  } finally {
+    relay.close();
+    blocked.resolve();
+    await settle();
+  }
+});
+
+test("cancellation after a host effect remains unknown rather than a non-effect refusal", async () => {
+  let effects = 0;
+  let failures = 0;
+  const delivered = Promise.withResolvers<AgentToolReply>();
+  const relay = createAgentToolRelay({
+    signal: new AbortController().signal,
+    async callAgent(_request, options) {
+      effects++;
+      return new Promise<AgentToolReply>((_resolve, reject) => {
+        if (!options?.signal) throw new Error("fixture requires cancellable host admission");
+        options.signal.addEventListener("abort", () => reject(new Error("effect already admitted")), { once: true });
+      });
+    },
+  }, async message => { delivered.resolve(message.reply); }, () => { failures++; });
+  const call = toolCall();
+  try {
+    relay.receive(call);
+    relay.receive({ type: "agent_tool_cancel", id: call.id });
+    expect(await delivered.promise).toEqual({ type: "unknown", reason: "cancelled", traceId: null });
+    expect(effects).toBe(1);
+    expect(failures).toBe(0);
+  } finally { relay.close(); }
 });

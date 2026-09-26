@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import type { ActionInput, ActionResult, OmpAction } from "../api/index.ts";
 import type { TestAgent } from "../../../manifold/packages/testkit/src/index.ts";
@@ -42,9 +42,11 @@ try {
   phase = "pack";
   const bundles = await pack(join(root, "bundles"));
   check(bundles.length === expectedFamily.length && bundles.every((bundle, index) => bundle.id === expectedFamily[index]), "unexpected-packed-family");
+  const policyFile = join(root, "agent-policy.txt");
+  await writeFile(policyFile, "Disposable native proof policy A.\n", { mode: 0o600 });
   phase = "server-start";
   let server = await startServer({ dataDir: join(root, "hub"), ownerKey: randomBytes(32).toString("hex"),
-    env: { MANIFOLD_PLUGIN_DEV_PATHS: "1" } });
+    env: { MANIFOLD_PLUGIN_DEV_PATHS: "1", MANIFOLD_AGENT_POLICY_FILE: policyFile } });
   const hub = { url: server.httpUrl, ownerKey: server.ownerKey };
   const installed: string[] = [];
   let cleanupFailed = false;
@@ -103,6 +105,10 @@ try {
           omp_operation_unavailable: "operation-unavailable",
           omp_broker_unavailable: "broker-unavailable",
           omp_resources_changed: "resources-changed",
+          omp_result_unavailable: "result-unavailable",
+          omp_invalid_session: "invalid-session",
+          omp_provenance_changed: "provenance-changed",
+          omp_model_substituted: "model-substituted",
         } as const;
         const reason = Object.hasOwn(known, refusal.data.refused)
           ? known[refusal.data.refused as keyof typeof known] : "unexpected-refusal";
@@ -272,6 +278,11 @@ try {
     check(bwrapStat.isFile() && (bwrapStat.mode & 0o111) !== 0 && (bwrapStat.mode & 0o6000) === 0, "invalid-bubblewrap-fixture");
     const system = JobOwnerConfigSchema.shape.runtimeTools.parse({ system: JSON.parse(await readFile(systemPath, "utf8")) });
     check(system.system?.every(bind => bind.kind === "file"), "system-closure-must-name-library-files");
+    const shell = process.env.OMP_VERIFY_DEVELOPMENT_SHELL;
+    check(shell && isAbsolute(shell), "explicit-development-shell-required");
+    const shellStat = await lstat(shell);
+    check(shellStat.isFile() && (shellStat.mode & 0o111) !== 0, "invalid-development-shell");
+    const development = [{ source: shell, target: "/bin/sh", kind: "file" as const }];
     const accountMachine = MachineHalfSchema.parse(loaded.find(row => row.manifest.id === ACCOUNTS_PLUGIN_ID)?.manifest.machine);
     const controlDirectory = join(root, "owner");
     const stateDirectory = join(controlDirectory, "state");
@@ -290,12 +301,14 @@ try {
     check(machineArtifacts(accountMachine).every(artifact => !artifact.url || origins.has(new URL(artifact.url).origin)),
       "packed-runtime-expanded-download-authority");
     await mkdir(join(root, "runtime", "skill-bundles"), { mode: 0o700 });
+    await mkdir(join(root, "home", "omp-workspaces"), { recursive: true, mode: 0o700 });
+    await mkdir(join(root, "runtime", "omp", "runs"), { recursive: true, mode: 0o700 });
     const ownerConfiguration = JobOwnerConfigSchema.parse({
       machineId: target.machineId, admissionPublicKey: initialNative.admissionPublicKey,
       stateDirectory, delegatedCgroup: ownerGroup, bubblewrap,
       protectedDirectories: [controlDirectory],
       anchors: { home: join(root, "home"), state: join(root, "state"), data: join(root, "data"), runtime: join(root, "runtime") },
-      runtimeTools: system,
+      runtimeTools: { ...system, development },
       artifactOrigins: [...origins],
     });
     await writeFile(config, JSON.stringify(ownerConfiguration), { mode: 0o600 });
@@ -306,7 +319,8 @@ try {
     phase = "native-service-owner-bootstrap";
     await server.stop();
     server = await startServer({ dataDir: server.dataDir, port: server.port, ownerKey: server.ownerKey,
-      env: { MANIFOLD_PLUGIN_DEV_PATHS: "1", MANIFOLD_SERVICE_OWNER_MACHINE_ID: target.machineId } });
+      env: { MANIFOLD_PLUGIN_DEV_PATHS: "1", MANIFOLD_SERVICE_OWNER_MACHINE_ID: target.machineId,
+        MANIFOLD_AGENT_POLICY_FILE: policyFile } });
     hub.url = server.httpUrl;
     const nativeRoot = resolve(import.meta.dir, "../../../manifold");
     nativeOwner = Bun.spawn([process.execPath, "--no-env-file", "--no-install", "packages/agent/src/main.ts", "--terminal-host"], {
@@ -330,7 +344,7 @@ try {
       return value.connected && value.resources?.tools.system ? value : false;
     }, 30_000, 50);
     check(eligible.platforms.includes("linux-x64"), "native-owner-platform-mismatch");
-    check(Object.keys(eligible.resources!.tools).length === 1, "ambient-runtime-tool-exposed");
+    check(Object.keys(eligible.resources!.tools).sort().join(",") === "development,system", "ambient-runtime-tool-exposed");
 
     phase = "packed-accounts-deployment-review";
     const deploymentRequest = { deploymentId: randomUUID(), pluginId: ACCOUNTS_PLUGIN_ID,
@@ -348,9 +362,9 @@ try {
     phase = "packed-accounts-installation";
     await waitFor(async () => {
       const current = JobDeploymentSchema.parse(await ownerAction(hub, "engine.jobs.readDeployment", { deploymentId: deploymentRequest.deploymentId }));
-      // A refusal that does not name itself costs a whole CI round trip to diagnose.
+      // Report the validated lifecycle state, never worker-supplied denial text.
       const stuck = current.targets.find(value => ["refused", "needs_review", "cancelled", "superseded"].includes(value.state));
-      check(!stuck, `packed-deployment-${`${stuck?.state}-${stuck?.reason ?? "unstated"}`.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/-+$/, "").slice(0, 64)}`);
+      check(!stuck, `packed-deployment-${stuck?.state ?? "unknown"}`);
       return current.targets.every(value => value.state === "ready");
     }, 480_000, 100);
     const ready = await describeAccounts();
@@ -559,8 +573,20 @@ try {
     check(recoveredSnapshot.status === 200, "recovery-broke-unchanged-legacy-client");
     await recoveredSnapshot.body?.cancel();
     check((await call("accounts", {})).status === "fresh", "recovered-broker-not-readable");
-    check(!(await roster(hub)).some(row => row.manifest.id === "atyrode.code" || row.manifest.id.startsWith("atyrode.code.")),
-      "positive-worker-introduced-code-dependency");
+    phase = "native-agent-tools";
+    // Keep SDK loading behind this verifier's private-environment check.
+    const { verifyNativeTools, NativeToolProofFailure } = await import("./verify-native-tools.ts");
+    try {
+      await verifyNativeTools({ root, policyFile, hub, target, expectedDefaultsRevision: changed.revision,
+        broker: { origin: `http://${clientAccess.bind}`, bearer: clientBearer }, installed, call,
+        ...(process.env.OMP_VERIFY_CONSUMER_MODULE ? { consumerModule: process.env.OMP_VERIFY_CONSUMER_MODULE } : {}) });
+    } catch (error) {
+      if (error instanceof NativeToolProofFailure) throw new VerificationFailure(`native-tools-${error.code}`);
+      throw error;
+    }
+    if (!process.env.OMP_VERIFY_CONSUMER_MODULE)
+      check(!(await roster(hub)).some(row => row.manifest.id === "atyrode.code" || row.manifest.id.startsWith("atyrode.code.")),
+        "positive-worker-introduced-code-dependency");
     phase = "packaged-sdk-host";
     const { verifySdkHost } = await import("./verify-sdk-host.ts");
     await verifySdkHost({ root, bubblewrap, systemBindings: system.system!,
