@@ -150,8 +150,11 @@ const plugin = {
       // caps belong to the native target admission below, not context-level caps.
       caps: name === "listSessions" || name === "resumeSession" ? [] : [writes[name] ? "containers:write" : "containers:read"],
       delegates: delegates[name],
+      // Reading the defaults is container-graded like the session doors that need it: a session
+      // composed under one container's authority (a scoped token, or a run carrying a press's
+      // container grant, manifold#883) reads the overlay it will run with. Writing stays owner-only.
       scope:
-        name === "readDefaults" || name === "writeDefaults" || name === "writeSkillCatalog" || name === "listSessions" || name === "resumeSession"
+        name === "writeDefaults" || name === "writeSkillCatalog" || name === "listSessions" || name === "resumeSession"
           ? "workspace"
           : "container",
       trace: "opaque",
