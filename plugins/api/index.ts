@@ -258,6 +258,9 @@ export const MaterialOnlyIsolationSchema = z.strictObject({
   bytes: z.number().int().positive().max(MATERIAL_MAX_BYTES),
 });
 export type MaterialOnlyIsolation = z.infer<typeof MaterialOnlyIsolationSchema>;
+/** Selects an existing authorized Run, never credentials or a model-chosen tool list. */
+export const AgentToolsSelectionSchema = z.strictObject({ runId: id });
+export type AgentToolsSelection = z.infer<typeof AgentToolsSelectionSchema>;
 export const SessionInputSchema = executionInput.extend({
   overlay: OverlaySchema,
   // Empty is the interactive terminal opened with no initial prompt (`hasPrompt: false`).
@@ -276,6 +279,7 @@ export const SessionInputSchema = executionInput.extend({
   automation: RestrictedAutomationSchema.optional(),
   isolation: MaterialOnlyIsolationSchema.optional(),
   inferenceLimits: JobInferenceLimitsSchema.refine(value => Object.keys(value).length > 0, "empty inference limits").optional(),
+  agentTools: AgentToolsSelectionSchema.optional(),
 });
 /** Durable dials share the exact validated launch settings; paths and credentials
  * are deliberately not part of a profile. Defaults are reviewed at each launch. */
@@ -288,6 +292,7 @@ export const OmpHarnessProfileSchema = SessionInputSchema.omit({
   automation: true,
   isolation: true,
   inferenceLimits: true,
+  agentTools: true,
 });
 export type OmpHarnessProfile = z.infer<typeof OmpHarnessProfileSchema>;
 export const SessionReviewSchema = ReviewSchema.extend({
@@ -298,6 +303,7 @@ export const SessionReviewSchema = ReviewSchema.extend({
   automation: AutomationReviewSchema,
   isolation: MaterialOnlyIsolationSchema.optional(),
   inferenceLimits: JobInferenceLimitsSchema.optional(),
+  agentTools: AgentToolsSelectionSchema.optional(),
 });
 export const PreparedSessionSchema = z
   .strictObject({
@@ -470,7 +476,7 @@ export const rootActionSchemas = {
   },
   reviewSession: { input: SessionInputSchema, result: SessionReviewSchema },
   prepareSession: {
-    input: SessionInputSchema.extend({ reviewDigest: digest }),
+    input: SessionInputSchema.omit({ agentTools: true }).extend({ reviewDigest: digest }),
     result: PreparedSessionSchema,
   },
   /** The same reviewed session, placed as a governed one-shot job instead of a terminal.

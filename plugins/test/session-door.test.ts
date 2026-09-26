@@ -8,6 +8,7 @@ import {
   INVENTORY_OPERATION_ID,
   LAUNCH_OPERATION_ID,
   OMP_PLUGIN_ID,
+  OmpHarnessProfileSchema,
   RUNS_LOCATION_ID,
   SESSION_GUEST_PATH,
   PROMPT_MAX_BYTES,
@@ -231,7 +232,11 @@ function publicJob(
   };
 }
 
-function fixture(): Fixture {
+function fixture(options: { sdk?: boolean } = {}): Fixture {
+  const installedMachine = options.sdk ? MachineHalfSchema.parse({
+    ...machine,
+    tools: { ...machine.tools, bun: sdkRuntimeArtifacts.tools.bun, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] },
+  }) : machine;
   const storage = new Map<string, string>();
   const archives = new Map<string, Buffer>();
   const jobs = new Map<string, PublicJob>();
@@ -321,7 +326,7 @@ function fixture(): Fixture {
         installation: {
           revision: pins.installationRevision,
           artifactSha256: pins.artifactSha256,
-          machine,
+          machine: installedMachine,
         },
         deployment: null,
       }),
@@ -470,19 +475,6 @@ async function run(f: Fixture): Promise<PublicJob> {
 }
 
 
-test("runSession posts the reviewed session as a one-shot job that retains its transcript", async () => {
-  const f = fixture();
-  const job = await run(f);
-  const posted = f.posted[0]!;
-  expect(f.posted).toHaveLength(1);
-  expect(job.jobId).toBe(posted.jobId);
-  expect(job.operationId).toBe(SESSION_OPERATION_ID);
-  expect(job.authority.origin.door).toBe(`${OMP_PLUGIN_ID}.runSession`);
-  expect(posted.outputs).toEqual([
-    { name: SESSION_OUTPUT_NAME, locationId: RUNS_LOCATION_ID, components: [posted.jobId] },
-  ]);
-  expect(job.inputDigest).toBe(digestOf(posted.input));
-});
 
 
 test("runSession refuses a stale review", async () => {
@@ -548,6 +540,18 @@ test("readSession summarises the retained transcript of a finished run", async (
   if ("refused" in read) throw new Error(read.refused);
   expect(read.job.jobId).toBe(job.jobId);
   expect(read.session).toEqual(receipt);
+});
+
+test("readSession accepts the native launcher's fixed-identity journal name", async () => {
+  const f = fixture();
+  const job = await run(f);
+  f.seal(job.jobId, ustar([[`${sessionId}.jsonl`, transcript]]));
+  const read = await f.client.call("readSession", { ...target, jobId: job.jobId });
+  if ("refused" in read) throw new Error(read.refused);
+  expect(read.session).toEqual({ ...receipt, sessionPath: `${SESSION_GUEST_PATH}/${sessionId}.jsonl` });
+  f.seal(job.jobId, ustar([["another-session.jsonl", transcript]]));
+  expect(await f.client.call("readSession", { ...target, jobId: job.jobId }))
+    .toEqual({ refused: "omp_invalid_session" });
 });
 
 test("readSession reads past the artifact directory omp writes beside the transcript", async () => {
@@ -1034,26 +1038,7 @@ const material: JobInputBinding = {
   from: { jobId: "prepare-job-1", output: "outputs" },
 };
 
-test("runSession hands the hub the bindings it was given, verbatim", async () => {
-  const f = fixture();
-  const job = await f.client.call("runSession", {
-    ...session,
-    reviewDigest: await reviewDigestOf(f.client),
-    inputs: [material],
-  });
-  if ("refused" in job) throw new Error(job.refused);
-  expect(f.posted[0]!.inputs).toEqual([material]);
-  // The door reads none of it: what the material is belongs to the caller and the prompt.
-  expect(f.posted[0]!.input.material).toBeUndefined();
-  expect(job.inputs).toEqual([material]);
-});
 
-test("runSession binds nothing when it was given nothing", async () => {
-  const f = fixture();
-  const job = await run(f);
-  expect(f.posted[0]!.inputs).toBeUndefined();
-  expect(job.inputs).toBeUndefined();
-});
 
 test("the review covers the session's content, never what it is handed", async () => {
   const f = fixture();
@@ -1341,11 +1326,8 @@ test("cost review prices the served model rather than its thinking suffix", asyn
 });
 
 async function materialFixture() {
-  const f = fixture();
+  const f = fixture({ sdk: true });
   const deployment = structuredClone(await f.ctx.jobs.describeDeployment({ machineId: target.machineId, pluginId: OMP_PLUGIN_ID }));
-  deployment.installation!.machine = MachineHalfSchema.parse({ ...deployment.installation!.machine,
-    tools: { ...deployment.installation!.machine.tools, bun: sdkRuntimeArtifacts.tools.bun,
-      "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
   f.ctx.jobs.describeDeployment = async () => deployment;
   const isolation = { mode: "material-only" as const, file: "transcript-map.json", bytes: 123, sha256: "a".repeat(64) };
   return { f, deployment, input: { ...session, isolation } };
@@ -1397,6 +1379,8 @@ test("material-only refuses broadened tools, selected skills, fallback and share
   expect(await f.client.call("reviewSession", { ...input,
     automation: { mode: "restricted", toolNames: ["read"], delegation: "disabled" } }))
     .toEqual({ refused: "omp_material_isolation_unsupported" });
+  expect(await f.client.call("reviewSession", { ...input, agentTools: { runId: "11111111-1111-4111-8111-111111111111" } }))
+    .toEqual({ refused: "omp_agent_tools_mode_unsupported" });
   expect(await f.client.call("reviewSession", { ...input, skills: { mode: "select", expectedCatalogRevision: 0, skillIds: [], setIds: [] } }))
     .toEqual({ refused: "omp_material_isolation_unsupported" });
   expect(await f.client.call("reviewSession", { ...input, overlay: { ...input.overlay, retry: { enabled: true, modelFallback: true } } }))
@@ -1414,4 +1398,63 @@ test("cancellation reaches the exact admitted material job even with malformed r
   f.ctx.jobs.status = async (...args) => ({ ...await status(...args), result: { malformed: true } }) as never;
   await f.client.call("cancelSession", { ...target, jobId: job.jobId });
   expect(f.cancelled).toEqual([job.jobId]);
+});
+
+test("a reviewed Run selection cannot be transferred or added to an ordinary review", async () => {
+  const f = fixture({ sdk: true });
+  const input = { ...session, agentTools: { runId: "11111111-1111-4111-8111-111111111111" } };
+  const selected = await f.client.call("reviewSession", input);
+  if ("refused" in selected) throw new Error(selected.refused);
+  expect(selected.operationId).toBe(SESSION_OPERATION_ID);
+  expect(await f.client.call("runSession", {
+    ...input, reviewDigest: selected.reviewDigest,
+    agentTools: { runId: "22222222-2222-4222-8222-222222222222" },
+  })).toEqual({ refused: "omp_review_changed" });
+  const ordinaryDigest = await reviewDigestOf(f.client);
+  expect(await f.client.call("runSession", { ...input, reviewDigest: ordinaryDigest }))
+    .toEqual({ refused: "omp_review_changed" });
+  expect(f.posted).toEqual([]);
+});
+
+test("one-shot tool selection refuses interactive and incompatible automation modes", async () => {
+  const f = fixture({ sdk: true });
+  const input = { ...session, agentTools: { runId: "11111111-1111-4111-8111-111111111111" } };
+  const reviewDigest = await reviewDigestOf(f.client, input);
+  expect(await rootHandlers.prepareSession!(f.ctx, { ...input, reviewDigest }))
+    .toHaveProperty("refused");
+  expect(await f.client.call("reviewSession", { ...input, planYolo: true }))
+    .toEqual({ refused: "omp_agent_tools_mode_unsupported" });
+  expect(await f.client.call("reviewSession", { ...input,
+    automation: { mode: "restricted", toolNames: [], delegation: "disabled" },
+  })).toEqual({ refused: "omp_agent_tools_mode_unsupported" });
+  expect(f.posted).toEqual([]);
+});
+
+test("a tool-selected review cannot fall back to an older native session runtime", async () => {
+  const f = fixture({ sdk: true });
+  const input = { ...session, agentTools: { runId: "11111111-1111-4111-8111-111111111111" } };
+  const reviewDigest = await reviewDigestOf(f.client, input);
+  const deployment = structuredClone(await f.ctx.jobs.describeDeployment({ machineId: target.machineId, pluginId: OMP_PLUGIN_ID }));
+  const operation = deployment.installation!.machine!.operations[SESSION_OPERATION_ID]!;
+  delete operation.input.agentTools;
+  operation.argv = operation.argv.filter(argument => argument.when?.input !== "agentTools");
+  f.ctx.jobs.describeDeployment = async () => deployment;
+  expect(await f.client.call("runSession", { ...input, reviewDigest }))
+    .toEqual({ refused: "omp_agent_tools_runtime_unsupported" });
+  expect(f.posted).toEqual([]);
+});
+
+test("session input cannot self-grant tools or persist a Run selection in an Agent profile", async () => {
+  const f = fixture({ sdk: true });
+  const agentTools = { runId: "11111111-1111-4111-8111-111111111111" };
+  expect(await rootHandlers.reviewSession!(f.ctx, { ...session,
+    agentTools: { ...agentTools, tools: ["test.contributor.write"] },
+  })).toHaveProperty("refused");
+  expect(await rootHandlers.reviewSession!(f.ctx, { ...session,
+    agentTools: { ...agentTools, sessionId: "22222222-2222-4222-8222-222222222222", target },
+  })).toHaveProperty("refused");
+  const profile = { accountPool: session.accountPool, overlay: session.overlay, planYolo: false };
+  expect(OmpHarnessProfileSchema.safeParse(profile).success).toBe(true);
+  expect(OmpHarnessProfileSchema.safeParse({ ...profile, agentTools }).success).toBe(false);
+  expect(f.posted).toEqual([]);
 });

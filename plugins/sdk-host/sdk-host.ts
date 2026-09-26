@@ -14,6 +14,7 @@ import { validateSkillInputs } from "../workers/harness/skills.ts";
 import { readAutomation, readResumeOverrides, readSessionInput } from "../workers/harness/sdk-inputs.ts";
 import { admitSdkSession, SdkSessionConfigSchema } from "./sdk-admission.ts";
 import { MATERIAL_SYSTEM_PROMPT, materialMessage, readMaterial } from "./material.ts";
+import { loadAgentTools, type AgentToolAdapter } from "./agent-tools.ts";
 
 // This entry is always a new, sanitized child, never imported by CLI passthrough.
 const materialOnly = process.argv[2] === "material-print";
@@ -29,12 +30,14 @@ let auth: AuthStorage | undefined;
 let created: CreateAgentSessionResult | undefined;
 let mode: InteractiveMode | undefined;
 let heldFile: number | undefined;
+let toolAdapter: AgentToolAdapter | undefined;
 let code = 1;
 try {
   if (Object.keys(process.env).some(name => name.startsWith("MANIFOLD_"))) throw new Error("omp_sdk_environment_invalid");
   const kind = z.enum(["interactive", "print", "material-print", "resume", "rpc", "rpc-resume"]).parse(process.argv[2]);
   const resume = kind === "resume" || kind === "rpc-resume";
   const rpc = kind === "rpc" || kind === "rpc-resume";
+  const sessionRoot = kind === "print" || materialOnly ? "/outputs/session" : SESSIONS_ROOT;
   const automation = readAutomation();
   const restricted = automation.mode === "restricted";
   if (materialOnly && (!restricted || automation.toolNames.length !== 0 || process.argv.length !== 3))
@@ -45,6 +48,12 @@ try {
       readMaterial(MaterialOnlyIsolationSchema.parse(JSON.parse(readSessionInput("isolation", 4096)))))
     : undefined;
   if (rpc && restricted) throw new Error("omp_restricted_harness_unsupported");
+  const agentTools = automation.mode === "ordinary" ? automation.agentTools : undefined;
+  if (agentTools) {
+    if (kind !== "print") throw new Error("omp_agent_tools_mode_unsupported");
+    if (process.argv[3] === undefined) throw new Error("omp_sdk_session_changed");
+    toolAdapter = await loadAgentTools(agentTools.runId, controller.signal);
+  }
   const overrides = readResumeOverrides();
   if (!resume && overrides) throw new Error("omp_sdk_input_invalid");
   const skillsRuntime = validateSkillInputs();
@@ -74,7 +83,12 @@ try {
   // Restricted startup never reads ambient settings. Both paths share the stock TUI singleton.
   const settings = await Settings.init({ inMemory: true, cwd: restricted ? "/home/job" : cwd,
     agentDir: PROBE_AGENT, configFiles: restricted ? [] : [`${PROBE_AGENT}/config.yml`],
-    overrides: restricted ? settingsOverrides : { "startup.setupWizard": false } });
+    overrides: restricted ? settingsOverrides : {
+      "startup.setupWizard": false,
+      // Host-published schemas must reach the model without an extra required
+      // intent argument. This is an in-memory setting only for this opt-in.
+      ...(agentTools ? { "tools.intentTracing": false } : {}),
+    } });
   mkdirSync("/home/job/tmp", { recursive: true, mode: 0o700 });
   auth = await AuthStorage.create("/home/job/tmp/sdk-auth.db");
   const registry = new ModelRegistry(auth, `${PROBE_AGENT}/models.yml`, {
@@ -89,15 +103,15 @@ try {
   if (resume || process.argv[3] !== undefined) {
     const filename = process.argv[3];
     if (!filename || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}\.jsonl$/.test(filename)) throw new Error("omp_resume_session_unavailable");
-    const root = openSessionsRoot();
+    const root = openSessionsRoot(sessionRoot);
     try {
-      const id = SessionIdSchema.parse(readSessionInput("sessionId", 36));
+      const id = agentTools?.sessionId ?? SessionIdSchema.parse(readSessionInput("sessionId", 36));
       if (resolveSessionFile(root, id) !== filename) throw new Error("omp_resume_session_changed");
-      resumePath = `${SESSIONS_ROOT}/${filename}`;
+      resumePath = `${sessionRoot}/${filename}`;
       heldFile = openSync(`/proc/self/fd/${root}/${filename}`, constants.O_RDONLY | constants.O_NOFOLLOW);
       original = fstatSync(heldFile);
       if (!original.isFile() || original.nlink !== 1) throw new Error("omp_resume_session_unavailable");
-      manager = await SessionManager.open(resumePath, SESSIONS_ROOT, undefined, { throwIfMissing: true });
+      manager = await SessionManager.open(resumePath, sessionRoot, undefined, { throwIfMissing: true });
       if (manager.getSessionId() !== id || manager.getSessionFile() !== resumePath || manager.getCwd() !== cwd)
         throw new Error("omp_resume_session_changed");
       if (!resume && manager.getEntries().length !== 0) throw new Error("omp_sdk_session_changed");
@@ -127,7 +141,7 @@ try {
   }
   if (controller.signal.aborted) throw new Error("omp_sdk_cancelled");
   if (!manager) {
-    const sessionRoot = kind === "print" || materialOnly ? "/outputs/session" : SESSIONS_ROOT;
+
     const root = openSessionsRoot(sessionRoot);
     try { manager = SessionManager.create(cwd, sessionRoot); }
     finally { closeSync(root); }
@@ -148,10 +162,12 @@ try {
       rules: [], contextFiles: [], promptTemplates: [], slashCommands: [],
       enableMCP: false, enableLsp: false, enableIrc: false, skipPythonPreflight: true, spawns: "",
     } : {}),
+    ...(toolAdapter ? { customTools: toolAdapter.tools, extensions: [toolAdapter.extension] } : {}),
   });
   if (materialOnly && (created.session.getAllToolNames().length !== 0 ||
     created.session.getActiveToolNames().length !== 0 || created.session.getXdevToolEntries().length !== 0))
     throw new Error("omp_material_registry_not_empty");
+  toolAdapter?.assertRegistry(created);
   if (created.modelFallbackMessage || created.session.model?.provider !== admitted.model.provider ||
     created.session.model.id !== admitted.model.id) throw new Error("omp_resume_model_changed");
   if (created.session.configuredThinkingLevel() !== admitted.thinkingLevel) throw new Error("omp_resume_thinking_incompatible");
@@ -185,10 +201,11 @@ try {
     }
   } finally { controller.signal.removeEventListener("abort", abort); }
 } catch (error) {
-  const reason = error instanceof Error && /^omp_(?:resume|sdk|restricted|material)_[a-z_]+$/.test(error.message)
+  const reason = error instanceof Error && /^omp_(?:resume|sdk|restricted|material|agent_tools)_[a-z_]+$/.test(error.message)
     ? error.message : "omp_sdk_failed";
   writeSync(2, `${reason}\n`);
 } finally {
+  toolAdapter?.close();
   try {
     await created?.session.abort();
     await created?.session.dispose();
