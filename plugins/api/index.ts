@@ -502,11 +502,17 @@ export const rootActionSchemas = {
   /**
    * The session a `runSession` posting key already posted for this caller and target. It names
    * only the target and the key: it reads no review, defaults or preparation input and never
-   * posts, so it still finds the session after any of those changed. A key that posted
-   * nothing refuses `omp_posting_unknown`.
+   * posts or executes, so it still finds the session after any of those changed. A key that
+   * posted nothing refuses `omp_posting_unknown`.
+   *
+   * `retire: true` settles the key for good: when nothing is retained under it, no posting under
+   * it can ever happen, and `omp_posting_unknown` is final. A key whose provenance is retained
+   * but whose dispatch has not landed refuses the retryable `omp_posting_pending`. A retired key
+   * refuses `omp_posting_retired` to `runSession` and to a plain adoption, and `omp_posting_unknown`
+   * to another retire.
    */
   adoptSession: {
-    input: TargetSchema.extend({ postingKey: PostingKeySchema }),
+    input: TargetSchema.extend({ postingKey: PostingKeySchema, retire: z.literal(true).optional() }),
     result: PublicJobSchema,
   },
   /**

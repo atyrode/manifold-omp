@@ -107,7 +107,7 @@ const delegates: Record<RootAction, readonly Cap[]> = {
   // Posting the one-shot job discharges that operation's own declared rights, not only
   // the observation `prepareSession` needs to hand a terminal its descriptor.
   runSession: [...observedRuntimeCaps, "network:host", "locations:write"],
-  // Adopting a keyed posting reads the job's status and nothing else.
+  // Adopting a keyed posting reads the job's status, and a retire writes a marker; neither executes.
   adoptSession: ["jobs:read"],
   readSession: nativeObservationCaps,
   followSession: ["jobs:read"],
@@ -122,6 +122,8 @@ const writes: Partial<Record<RootAction, true>> = {
   prepareWorkspace: true,
   prepareSession: true,
   runSession: true,
+  // A retire settles a posting key by writing its retired marker.
+  adoptSession: true,
   cancelSession: true,
 };
 export const handlers = Object.fromEntries(

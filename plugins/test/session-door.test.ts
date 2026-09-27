@@ -1481,6 +1481,9 @@ async function posted(f: Fixture, request: ActionInput<"runSession">): Promise<P
 async function adopted(f: Fixture, postingKey = "babel-run-1") {
   return f.client.call("adoptSession", { ...target, postingKey });
 }
+async function retired(f: Fixture, postingKey = "babel-run-1") {
+  return f.client.call("adoptSession", { ...target, postingKey, retire: true });
+}
 
 test("a posting key posts its session once and answers every retry with that job", async () => {
   const f = fixture();
@@ -1538,8 +1541,11 @@ test("a posting interrupted after its provenance is retained is finished once, f
   f.ctx.jobs.execute = async () => { throw new Error("jobs.execute: hub_unreachable"); };
   expect(await f.client.call("runSession", request)).toEqual({ refused: "omp_operation_unavailable" });
   f.ctx.jobs.execute = execute;
-  // Adoption never dispatches, so a posting the hub never received is unknown to it.
+  // Adoption never dispatches, so a posting the hub never received is unknown to it. A retire
+  // does not execute either, and it is not final while that dispatch may still land.
   expect(await adopted(f)).toEqual({ refused: "omp_posting_unknown" });
+  expect(await retired(f)).toEqual({ refused: "omp_posting_pending" });
+  expect(await retired(f)).toEqual({ refused: "omp_posting_pending" });
   expect(f.posted).toEqual([]);
   // The retry must not prepare again: a moved gateway would refuse a fresh preparation.
   f.state.gatewayRevision = "2";
@@ -1550,7 +1556,88 @@ test("a posting interrupted after its provenance is retained is finished once, f
   expect(f.posted[0]!.outputs).toEqual([{ name: SESSION_OUTPUT_NAME, locationId: RUNS_LOCATION_ID, components: [job.jobId] }]);
   expect(await posted(f, request)).toEqual(job);
   expect(await adopted(f)).toEqual(job);
+  expect(await retired(f)).toEqual(job);
   expect(f.posted).toHaveLength(1);
+});
+
+test("a retire of a key that posted nothing is final: that key never posts", async () => {
+  const f = fixture();
+  const compareAndSet = f.ctx.storage.compareAndSet.bind(f.ctx.storage);
+  const written: string[] = [];
+  f.ctx.storage.compareAndSet = async (key, expected, value) => {
+    written.push(key);
+    return compareAndSet(key, expected, value);
+  };
+  expect(await retired(f)).toEqual({ refused: "omp_posting_unknown" });
+  const request = await keyedRequest(f);
+  expect(await f.client.call("runSession", request)).toEqual({ refused: "omp_posting_retired" });
+  expect(await retired(f)).toEqual({ refused: "omp_posting_unknown" });
+  expect(await adopted(f)).toEqual({ refused: "omp_posting_retired" });
+  expect(f.posted).toEqual([]);
+  // The marker takes the key's job slot and names no job to the session doors.
+  expect(written).toHaveLength(1);
+  const jobId = written[0]!.slice("jobs/".length);
+  expect(await f.client.call("readSession", { ...target, jobId })).toEqual({ refused: "omp_result_unavailable" });
+  expect(await f.client.call("cancelSession", { ...target, jobId })).toEqual({ refused: "omp_result_unavailable" });
+});
+
+test("a retire and a creator racing for a key's slot: whichever takes it, the other answers consistently", async () => {
+  // The retire takes the slot between the creator's lookup and its provenance write.
+  const creatorLoses = fixture();
+  const request = await keyedRequest(creatorLoses);
+  const compareAndSet = creatorLoses.ctx.storage.compareAndSet.bind(creatorLoses.ctx.storage);
+  let raced = false;
+  let retire: unknown;
+  creatorLoses.ctx.storage.compareAndSet = async (key, expected, value) => {
+    if (!raced && key.startsWith("jobs/")) {
+      raced = true;
+      retire = await retired(creatorLoses);
+    }
+    return compareAndSet(key, expected, value);
+  };
+  expect(await creatorLoses.client.call("runSession", request)).toEqual({ refused: "omp_posting_retired" });
+  expect(retire).toEqual({ refused: "omp_posting_unknown" });
+  expect(await creatorLoses.client.call("runSession", request)).toEqual({ refused: "omp_posting_retired" });
+  expect(creatorLoses.posted).toEqual([]);
+
+  // The creator takes the slot between the retire's lookup and its marker write, and its
+  // dispatch has not landed: the retire answers pending and executes nothing.
+  const pending = fixture();
+  const pendingRequest = await keyedRequest(pending);
+  const execute = pending.ctx.jobs.execute;
+  const landed = Promise.withResolvers<void>();
+  const released = Promise.withResolvers<void>();
+  pending.ctx.jobs.execute = async (args) => {
+    landed.resolve();
+    await released.promise;
+    return execute(args);
+  };
+  const creator = pending.client.call("runSession", pendingRequest);
+  await landed.promise;
+  expect(await retired(pending)).toEqual({ refused: "omp_posting_pending" });
+  expect(pending.posted).toEqual([]);
+  released.resolve();
+  const job = await creator;
+  if ("refused" in job) throw new Error(job.refused);
+  expect(await retired(pending)).toEqual(job);
+  expect(pending.posted).toHaveLength(1);
+
+  // The creator retains and posts before the retire writes its marker: the retire returns it.
+  const creatorWins = fixture();
+  const winnerRequest = await keyedRequest(creatorWins);
+  const retireCompareAndSet = creatorWins.ctx.storage.compareAndSet.bind(creatorWins.ctx.storage);
+  let posting: PublicJob | undefined;
+  let lookedUp = false;
+  creatorWins.ctx.storage.compareAndSet = async (key, expected, value) => {
+    if (!lookedUp && key.startsWith("jobs/") && JSON.parse(value).retired === true) {
+      lookedUp = true;
+      creatorWins.ctx.storage.compareAndSet = retireCompareAndSet;
+      posting = await posted(creatorWins, winnerRequest);
+    }
+    return retireCompareAndSet(key, expected, value);
+  };
+  expect(await retired(creatorWins)).toEqual(posting!);
+  expect(creatorWins.posted).toHaveLength(1);
 });
 
 test("a call that loses the provenance race under a key answers with the winner's job", async () => {

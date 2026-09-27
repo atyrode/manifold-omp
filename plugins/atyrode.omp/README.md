@@ -149,9 +149,18 @@ A keyed call is answered before any preparation:
 - When the key's provenance is retained and the hub has the job, the call returns that job, checked against the provenance as `readSession` checks it. A retry therefore returns the posted session whatever else changed since, including the review, defaults, gateway or accounts.
 - When the provenance is retained but the hub never received the job (a failure between retention and dispatch), the call dispatches the retained provenance, unchanged, under the same id and output lease. The hub answers an exact repeat of a job id with the job it already has, so the session is admitted once.
 - When nothing is retained, the call reviews, prepares and posts as usual under the derived id. A call that loses the retention race to another call with the same key returns that call's job instead of `omp_job_conflict`.
+- A retired key refuses `omp_posting_retired`, and so does a call whose provenance CAS loses to a retire.
 - Retained provenance under the derived id that belongs to another door, principal or target refuses `omp_posting_key_conflict`.
 
-`adoptSession({ containerId, machineId, postingKey })` returns the job a key already posted for this caller and target, and never posts one. It names nothing else: no review digest, defaults revision, profile or preparation input, so a caller whose defaults, profile or review changed after posting still finds the session and can read or cancel it. A key with no retained provenance, or whose provenance the hub never received, refuses `omp_posting_unknown`. The door reads only the retained provenance and the hub's job status, under the caller's container read authority and a `jobs:read` delegate.
+`adoptSession({ containerId, machineId, postingKey })` returns the job a key already posted for this caller and target. It names nothing else: no review digest, defaults revision, profile or preparation input, so a caller whose defaults, profile or review changed after posting still finds the session and can read or cancel it. It never reviews, prepares, posts or executes. A key with no retained provenance, or whose provenance the hub never received, refuses `omp_posting_unknown`. The door is container-write graded because of `retire`, and delegates only `jobs:read`.
+
+`adoptSession({ ..., retire: true })` settles a key for good:
+
+- The hub has the key's job: the call returns it, and the caller may cancel it.
+- Nothing is retained under the key: the call writes a retired marker into the key's provenance slot, by the same create-only CAS a creator's provenance write uses, and refuses `omp_posting_unknown`. That answer is final. A creator whose provenance CAS loses to the marker refuses `omp_posting_retired`, as does every later keyed `runSession` and plain adoption of the key; a later retire answers `omp_posting_unknown` again, and the session doors treat the marker's job id as unknown.
+- Provenance is retained but the hub has no job: the call refuses the retryable `omp_posting_pending` and executes nothing. A retire never executes, so it can never buy a session after the caller has stopped; the caller keeps its reservation and asks again, and a later retire either finds the job or is still pending.
+
+The provenance CAS is the creator's last step before its hub execute, and nothing that can refuse sits between them, so retained provenance always means the creator committed to that dispatch. The boundary: a creator that crashes between the CAS and the hub execute, or whose hub execute is refused, leaves the key pending under retire for good. Only a keyed `runSession` retry dispatches retained provenance, and it may be refused again.
 
 A key with `agentTools` refuses `omp_posting_key_agent_tools_unsupported`: a Run-bound session carries a fresh random session id, so its request cannot be repeated. Calls without a key are unchanged.
 

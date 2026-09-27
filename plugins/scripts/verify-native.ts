@@ -194,6 +194,16 @@ try {
     const runBound = RefusalSchema.safeParse(await client.call("runSession", { ...session, prompt: "verify",
       reviewDigest: unreviewed, postingKey: "verify-posting", agentTools: { runId: randomUUID() } }));
     check(runBound.success && runBound.data.refused === "omp_posting_key_agent_tools_unsupported", "posting-key-agent-tools-not-refused");
+    // A retire of an unused key takes its slot in real plugin storage: the key never posts again.
+    for (const [name, input, expected] of [
+      ["adoptSession", { ...target, postingKey: "verify-retired", retire: true }, "omp_posting_unknown"],
+      ["runSession", { ...session, prompt: "verify", reviewDigest: unreviewed, postingKey: "verify-retired" }, "omp_posting_retired"],
+      ["adoptSession", { ...target, postingKey: "verify-retired", retire: true }, "omp_posting_unknown"],
+      ["adoptSession", { ...target, postingKey: "verify-retired" }, "omp_posting_retired"],
+    ] as const) {
+      const reply = RefusalSchema.safeParse(await client.call(name, input as ActionInput<typeof name>));
+      check(reply.success && reply.data.refused === expected, `posting-retire-${expected.slice(4).replaceAll("_", "-")}-not-refused`);
+    }
     await refused("listSessions", { machineId: target.machineId });
     await refused("resumeSession", { machineId: target.machineId, sessionId: randomUUID() });
     await refused("startInventory", { ...target, expectedDefaultsRevision: changed.revision, accountPool: {} });
