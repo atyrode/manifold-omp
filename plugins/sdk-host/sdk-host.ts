@@ -7,15 +7,18 @@ import {
 import type { SettingsOptions } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import { runRpcMode } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
+import { MaterialOnlyIsolationSchema, PROMPT_MAX_BYTES } from "../api/index.ts";
 import { ProbeModelsConfigSchema, PROBE_AGENT, readProbeInput } from "../workers/probe/inputs.ts";
 import { openSessionsRoot, resolveSessionFile, SESSIONS_ROOT, SessionIdSchema } from "../workers/harness/sessions.ts";
 import { validateSkillInputs } from "../workers/harness/skills.ts";
 import { readAutomation, readResumeOverrides, readSessionInput } from "../workers/harness/sdk-inputs.ts";
 import { admitSdkSession, SdkSessionConfigSchema } from "./sdk-admission.ts";
+import { MATERIAL_SYSTEM_PROMPT, materialMessage, readMaterial, runMaterialPrintMode } from "./material.ts";
 import { loadAgentTools, type AgentToolAdapter } from "./agent-tools.ts";
 
 // This entry is always a new, sanitized child, never imported by CLI passthrough.
-const cwd = "/home/job/workspace";
+const materialOnly = process.argv[2] === "material-print";
+const cwd = materialOnly ? "/home/job/tmp" : "/home/job/workspace";
 const controller = new AbortController();
 const stopped = Promise.withResolvers<void>();
 const cancel = () => { controller.abort(); stopped.resolve(); };
@@ -31,12 +34,19 @@ let toolAdapter: AgentToolAdapter | undefined;
 let code = 1;
 try {
   if (Object.keys(process.env).some(name => name.startsWith("MANIFOLD_"))) throw new Error("omp_sdk_environment_invalid");
-  const kind = z.enum(["interactive", "print", "resume", "rpc", "rpc-resume"]).parse(process.argv[2]);
+  const kind = z.enum(["interactive", "print", "material-print", "resume", "rpc", "rpc-resume"]).parse(process.argv[2]);
   const resume = kind === "resume" || kind === "rpc-resume";
   const rpc = kind === "rpc" || kind === "rpc-resume";
-  const sessionRoot = kind === "print" ? "/outputs/session" : SESSIONS_ROOT;
+  const sessionRoot = kind === "print" || materialOnly ? "/outputs/session" : SESSIONS_ROOT;
   const automation = readAutomation();
   const restricted = automation.mode === "restricted";
+  if (materialOnly && (!restricted || automation.toolNames.length !== 0 || process.argv.length !== 3))
+    throw new Error("omp_material_policy_invalid");
+  // Validate and read the one reviewed file before any model discovery/inference.
+  const initialMaterial = materialOnly
+    ? materialMessage(readSessionInput("prompt", PROMPT_MAX_BYTES),
+      readMaterial(MaterialOnlyIsolationSchema.parse(JSON.parse(readSessionInput("isolation", 4096)))))
+    : undefined;
   if (rpc && restricted) throw new Error("omp_restricted_harness_unsupported");
   const agentTools = automation.mode === "ordinary" ? automation.agentTools : undefined;
   if (agentTools) {
@@ -48,6 +58,7 @@ try {
   if (!resume && overrides) throw new Error("omp_sdk_input_invalid");
   const skillsRuntime = validateSkillInputs();
   if (restricted && skillsRuntime.mode === "preserve") throw new Error("omp_restricted_skills_unsupported");
+  if (materialOnly && skillsRuntime.mode !== "disabled") throw new Error("omp_material_policy_invalid");
   const config = SdkSessionConfigSchema.parse(readProbeInput("config"));
   const expectedSkills = skillsRuntime.mode === "disabled" ? { enabled: false }
     : skillsRuntime.mode === "selected" ? { customDirectories: skillsRuntime.names.map((_, index) => `/inputs/optionalSkill${index}`) }
@@ -141,15 +152,20 @@ try {
     ...(restricted || skillsRuntime.mode === "disabled" ? { skills } : {}),
     ...(rpc ? { appendSystemPrompt: readFileSync(process.argv[4]!, "utf8") } : {}),
     ...(restricted ? {
-      systemPrompt: ["You are a coding assistant operating under an explicit native tool policy. Delegation is disabled. Selected skills are instructions only, never authorization.",
-        ...skills.map(skill => `Selected skill ${skill.name}: ${skill.description}. Read skill://${skill.name} for instructions and resources.`)],
-      toolNames: automation.toolNames, restrictToolNames: true, allowRestrictedCustomTools: false,
+      systemPrompt: materialOnly
+        ? [MATERIAL_SYSTEM_PROMPT]
+        : ["You are a coding assistant operating under an explicit native tool policy. Delegation is disabled. Selected skills are instructions only, never authorization.",
+          ...skills.map(skill => `Selected skill ${skill.name}: ${skill.description}. Read skill://${skill.name} for instructions and resources.`)],
+      toolNames: materialOnly ? [] : automation.toolNames, restrictToolNames: true, allowRestrictedCustomTools: false,
       customTools: [], extensions: [], additionalExtensionPaths: [], disableExtensionDiscovery: true,
       rules: [], contextFiles: [], promptTemplates: [], slashCommands: [],
       enableMCP: false, enableLsp: false, enableIrc: false, skipPythonPreflight: true, spawns: "",
     } : {}),
     ...(toolAdapter ? { customTools: toolAdapter.tools, extensions: [toolAdapter.extension] } : {}),
   });
+  if (materialOnly && (created.session.getAllToolNames().length !== 0 ||
+    created.session.getActiveToolNames().length !== 0 || created.session.getXdevToolEntries().length !== 0))
+    throw new Error("omp_material_registry_not_empty");
   toolAdapter?.assertRegistry(created);
   if (created.modelFallbackMessage || created.session.model?.provider !== admitted.model.provider ||
     created.session.model.id !== admitted.model.id) throw new Error("omp_resume_model_changed");
@@ -164,7 +180,10 @@ try {
   controller.signal.addEventListener("abort", abort, { once: true });
   if (controller.signal.aborted) abort();
   try {
-    if (kind === "print") {
+    if (initialMaterial !== undefined) {
+      // The source-bearing message is retained verbatim by SessionManager and never prompt-processed.
+      code = await runMaterialPrintMode(created.session, initialMaterial);
+    } else if (kind === "print") {
       code = await runPrintMode(created.session, { mode: "json", initialMessage: readSessionInput("prompt") });
     } else if (rpc) {
       await runRpcMode(created.session, created.setToolUIContext, created.eventBus);
@@ -182,7 +201,7 @@ try {
     }
   } finally { controller.signal.removeEventListener("abort", abort); }
 } catch (error) {
-  const reason = error instanceof Error && /^omp_(?:resume|sdk|restricted|agent_tools)_[a-z_]+$/.test(error.message)
+  const reason = error instanceof Error && /^omp_(?:resume|sdk|restricted|material|agent_tools)_[a-z_]+$/.test(error.message)
     ? error.message : "omp_sdk_failed";
   writeSync(2, `${reason}\n`);
 } finally {

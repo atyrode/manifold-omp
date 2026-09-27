@@ -28,12 +28,14 @@ beforeAll(async () => {
   fixturePack = module.pack;
 }, 180_000);
 
+// Removing the copied dependency graphs takes longer than Bun's 5 s hook default on hosted
+// runners, so cleanup gets the same bound as the setup that created them.
 afterAll(async () => {
   await Promise.all([
     ...(fixture ? [rm(fixture, { recursive: true, force: true })] : []),
     ...(scratch ? [rm(scratch, { recursive: true, force: true })] : []),
   ]);
-});
+}, 180_000);
 
 async function snapshot(directory: string): Promise<Record<string, string>> {
   const files: Record<string, string> = {};

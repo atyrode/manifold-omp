@@ -108,6 +108,9 @@ export async function runOmpNative(context: WorkerContext): Promise<boolean> {
   const separator = process.argv.indexOf("--", 3);
   const options = process.argv.slice(3, separator < 0 ? undefined : separator);
   const print = options.includes("-p");
+  const materialOnly = options.includes("--material-only");
+  if (materialOnly && (!print || skills.mode !== "disabled" || options.includes("--plan-yolo")))
+    throw new Error("omp_material_policy_invalid");
   const automation = readAutomation();
   const agentTools = automation.mode === "ordinary" ? automation.agentTools : undefined;
   if (options.includes("--agent-tools") !== (agentTools !== undefined) ||
@@ -120,10 +123,10 @@ export async function runOmpNative(context: WorkerContext): Promise<boolean> {
     try { sessionFile = prepareSessionFile(root, id, "/home/job/workspace", false); }
     finally { closeSync(root); }
   }
-  if (agentTools || automation.mode === "restricted" || skills.mode !== "preserve") {
+  if (materialOnly || agentTools || automation.mode === "restricted" || skills.mode !== "preserve") {
     if (options.includes("--plan-yolo")) throw new Error("omp_skills_plan_unsupported");
     const child = spawn("/runtime/bin/bun", ["--no-env-file", "--no-install", "--config=/dev/null", "/runtime/bin/sdkHost",
-      print ? "print" : "interactive", ...(sessionFile ? [sessionFile] : [])], {
+      materialOnly ? "material-print" : print ? "print" : "interactive", ...(sessionFile ? [sessionFile] : [])], {
       cwd: "/inputs", env: ompEnvironment,
       stdio: agentTools ? ["inherit", "pipe", "inherit", "ipc"] : print ? ["inherit", "pipe", "inherit"] : "inherit",
     });

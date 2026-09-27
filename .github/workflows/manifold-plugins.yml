@@ -17,7 +17,7 @@ jobs:
     # This workflow and MANIFOLD_REV pin the same verified native SDK revision.
     # The reusable job installs only CI containment fixtures; this repository
     # has no fleet-daemon installation or production/release deployment job.
-    uses: atyrode/manifold/.github/workflows/plugins.yml@b00c1fa350dbe28b247ae4261d7eef817e00b2c8
+    uses: atyrode/manifold/.github/workflows/plugins.yml@2229a2fa84905a4414ed4548fba4ec7aabc47a22
     with:
       plugins-dir: plugins
       prepare-command: bun --no-env-file --no-install workers/build.ts --prepare-dependencies && bun --no-env-file --no-install scripts/prepare-ci.ts
