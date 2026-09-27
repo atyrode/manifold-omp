@@ -28,6 +28,7 @@ import {
   reviewSession,
   prepareSession,
   runSession,
+  adoptSession,
   readSession,
   followSession,
   cancelSession,
@@ -54,6 +55,7 @@ const implementations: RootHandlers = {
   reviewSession,
   prepareSession,
   runSession,
+  adoptSession,
   readSession,
   followSession,
   cancelSession,
@@ -105,6 +107,8 @@ const delegates: Record<RootAction, readonly Cap[]> = {
   // Posting the one-shot job discharges that operation's own declared rights, not only
   // the observation `prepareSession` needs to hand a terminal its descriptor.
   runSession: [...observedRuntimeCaps, "network:host", "locations:write"],
+  // Adopting a keyed posting reads the job's status and nothing else.
+  adoptSession: ["jobs:read"],
   readSession: nativeObservationCaps,
   followSession: ["jobs:read"],
   // Ending a run needs no observation of the machine, only the job's own two verbs.

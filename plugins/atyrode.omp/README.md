@@ -151,7 +151,9 @@ A keyed call is answered before any preparation:
 - When nothing is retained, the call reviews, prepares and posts as usual under the derived id. A call that loses the retention race to another call with the same key returns that call's job instead of `omp_job_conflict`.
 - Retained provenance under the derived id that belongs to another door, principal or target refuses `omp_posting_key_conflict`.
 
-`adoptOnly: true` returns the job a key already posted and never posts one. A key with no retained provenance, or whose provenance the hub never received, refuses `omp_posting_unknown`. An adoption reads only the retained provenance and the hub's job status; it never reviews, prepares or posts. `adoptOnly` without `postingKey` refuses `omp_posting_key_required`. A key with `agentTools` refuses `omp_posting_key_agent_tools_unsupported`: a Run-bound session carries a fresh random session id, so its request cannot be repeated. Calls without a key are unchanged.
+`adoptSession({ containerId, machineId, postingKey })` returns the job a key already posted for this caller and target, and never posts one. It names nothing else: no review digest, defaults revision, profile or preparation input, so a caller whose defaults, profile or review changed after posting still finds the session and can read or cancel it. A key with no retained provenance, or whose provenance the hub never received, refuses `omp_posting_unknown`. The door reads only the retained provenance and the hub's job status, under the caller's container read authority and a `jobs:read` delegate.
+
+A key with `agentTools` refuses `omp_posting_key_agent_tools_unsupported`: a Run-bound session carries a fresh random session id, so its request cannot be repeated. Calls without a key are unchanged.
 
 ## Repository gate
 

@@ -933,18 +933,13 @@ const sessionOutputs = (jobId: string): OutputBinding[] => [
   { name: SESSION_OUTPUT_NAME, locationId: RUNS_LOCATION_ID, components: [jobId] },
 ];
 /**
- * The session a posting key has already posted, or null when it has posted nothing.
- *
- * Provenance is retained before the hub is asked, so a posting interrupted between the two is
- * finished from that retained provenance, never prepared again, and the hub admits it once.
- * `adoptOnly` never posts: a key whose provenance or hub job is missing refuses by name.
+ * What a posting key has retained: nothing (null), or its provenance and the hub's job, which
+ * is null when the hub never received it. Provenance is retained before the hub is asked, so
+ * a posting interrupted between the two is finished from that provenance, never prepared again.
  */
-async function postedSession(ctx: OmpContext, target: Target, jobId: string, adoptOnly: boolean) {
+async function keyedPosting(ctx: OmpContext, target: Target, jobId: string) {
   const raw = await ctx.storage.get(`jobs/${jobId}`);
-  if (raw === null) {
-    if (adoptOnly) throw new OmpRefusal("posting_unknown");
-    return null;
-  }
+  if (raw === null) return null;
   const provenance = provenanceSchema.parse(JSON.parse(raw));
   if (provenance.door !== "runSession" || provenance.requester !== ctx.auth.principal.id ||
     digestOf(provenance.target) !== digestOf(target))
@@ -957,11 +952,25 @@ async function postedSession(ctx: OmpContext, target: Target, jobId: string, ado
   } catch (error) {
     // The hub's own word for a job id it was never asked to run, as a guest receives it.
     if (!(error instanceof Error && /(?:^|: )job_not_started$/.test(error.message))) throw error;
-    if (adoptOnly) throw new OmpRefusal("posting_unknown");
-    return dispatch(ctx, jobId, provenance, sessionOutputs(jobId));
+    return { provenance, job: null };
   }
   checkJob(job, provenance, jobId);
-  return job;
+  return { provenance, job };
+}
+/**
+ * The session a posting key already posted, found from the target and the key alone. Nothing
+ * here reviews, prepares or posts, so a caller whose defaults, profile or review changed since
+ * still finds, reads and can stop that session.
+ */
+export async function adoptSession(
+  ctx: OmpContext,
+  args: ActionInput<"adoptSession">,
+): Promise<ActionResult<"adoptSession">> {
+  await authorizeTarget(ctx, args);
+  const target = { containerId: args.containerId, machineId: args.machineId };
+  const posting = await keyedPosting(ctx, target, postingJobId(ctx, target, args.postingKey));
+  if (!posting?.job) throw new OmpRefusal("posting_unknown");
+  return posting.job;
 }
 /**
  * The reviewed session, placed as a governed job instead of a terminal. It runs on
@@ -981,7 +990,6 @@ export async function runSession(
   args: ActionInput<"runSession">,
 ): Promise<ActionResult<"runSession">> {
   await authorizeTarget(ctx, args, true);
-  if (args.adoptOnly && args.postingKey === undefined) throw new OmpRefusal("posting_key_required");
   // A Run-bound session carries a fresh random session id, so its request cannot be repeated.
   if (args.postingKey !== undefined && args.agentTools !== undefined)
     throw new OmpRefusal("posting_key_agent_tools_unsupported");
@@ -990,13 +998,14 @@ export async function runSession(
     throw new OmpRefusal("invalid_material_input");
   if (args.isolation && args.inputs?.length !== 1) throw new OmpRefusal("invalid_material_input");
   // A keyed posting is answered before any preparation: a retry returns the job the key
-  // already named, and an adoption never reaches anything that could post or spend.
+  // already named instead of reviewing again or buying another.
   const target = { containerId: args.containerId, machineId: args.machineId };
   const keyed = args.postingKey === undefined ? undefined : postingJobId(ctx, target, args.postingKey);
-  if (keyed !== undefined) {
-    const posted = await postedSession(ctx, target, keyed, args.adoptOnly === true);
-    if (posted !== null) return posted;
-  }
+  const retained = keyed === undefined ? null : await keyedPosting(ctx, target, keyed);
+  // A posting the hub never received is dispatched from its retained provenance. The hub admits
+  // an exact repeat of a job id once, so this never buys a second session.
+  if (keyed !== undefined && retained !== null)
+    return retained.job ?? dispatch(ctx, keyed, retained.provenance, sessionOutputs(keyed));
   const first = await oneShotPreparation(ctx, args);
   if (first.prepared.review.reviewDigest !== args.reviewDigest)
     throw new OmpRefusal("review_changed");
@@ -1039,9 +1048,9 @@ export async function runSession(
   } catch (error) {
     // Another call with the same key retained its provenance first: that posting is this one.
     if (keyed === undefined || !(error instanceof OmpRefusal && error.code === "job_conflict")) throw error;
-    const posted = await postedSession(ctx, target, keyed, false);
-    if (posted === null) throw error;
-    return posted;
+    const winner = await keyedPosting(ctx, target, keyed);
+    if (winner === null) throw error;
+    return winner.job ?? dispatch(ctx, keyed, winner.provenance, sessionOutputs(keyed));
   }
 }
 /** The retained provenance of a session this door posted, or a refusal naming why not. */

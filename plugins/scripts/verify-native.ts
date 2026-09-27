@@ -186,18 +186,14 @@ try {
     await refused("reviewSession", session);
     await refused("prepareSession", { ...session, reviewDigest: unreviewed });
     await refused("runSession", { ...session, prompt: "verify", reviewDigest: unreviewed });
-    // A keyed adoption is answered before any preparation and names its refusals exactly.
-    // The native-runs phase below also proves none of these calls queued work.
-    for (const [input, expected] of [
-      [{ postingKey: "verify-posting", adoptOnly: true }, "omp_posting_unknown"],
-      [{ adoptOnly: true }, "omp_posting_key_required"],
-      [{ postingKey: "verify-posting", agentTools: { runId: randomUUID() } }, "omp_posting_key_agent_tools_unsupported"],
-    ] as const) {
-      phase = "public-run-session-posting-key";
-      const reply = RefusalSchema.safeParse(await client.call("runSession",
-        { ...session, prompt: "verify", reviewDigest: unreviewed, ...input }));
-      check(reply.success && reply.data.refused === expected, `posting-key-${expected.slice(4).replaceAll("_", "-")}-not-refused`);
-    }
+    // A keyed adoption reads only its target and key, and a key cannot bind a Run. Both refuse
+    // by exact name; the native-runs phase below also proves neither queued work.
+    phase = "public-posting-key";
+    const unposted = RefusalSchema.safeParse(await client.call("adoptSession", { ...target, postingKey: "verify-posting" }));
+    check(unposted.success && unposted.data.refused === "omp_posting_unknown", "posting-key-unknown-not-refused");
+    const runBound = RefusalSchema.safeParse(await client.call("runSession", { ...session, prompt: "verify",
+      reviewDigest: unreviewed, postingKey: "verify-posting", agentTools: { runId: randomUUID() } }));
+    check(runBound.success && runBound.data.refused === "omp_posting_key_agent_tools_unsupported", "posting-key-agent-tools-not-refused");
     await refused("listSessions", { machineId: target.machineId });
     await refused("resumeSession", { machineId: target.machineId, sessionId: randomUUID() });
     await refused("startInventory", { ...target, expectedDefaultsRevision: changed.revision, accountPool: {} });

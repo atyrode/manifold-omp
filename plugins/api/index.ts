@@ -490,16 +490,23 @@ export const rootActionSchemas = {
    * what the material is and how the prompt refers to it are the caller's business.
    *
    * `postingKey` makes the posting retryable: the job a key names for this caller and target
-   * is posted at most once, and repeating the call returns it instead of buying another.
-   * `adoptOnly` asks for that job and never posts one, refusing `omp_posting_unknown` when the
-   * key has posted nothing. */
+   * is posted at most once, and repeating the call returns it instead of buying another. */
   runSession: {
     input: SessionInputSchema.extend({
       reviewDigest: digest,
       inputs: z.array(JobInputBindingSchema).max(16).optional(),
       postingKey: PostingKeySchema.optional(),
-      adoptOnly: z.boolean().optional(),
     }),
+    result: PublicJobSchema,
+  },
+  /**
+   * The session a `runSession` posting key already posted for this caller and target. It names
+   * only the target and the key: it reads no review, defaults or preparation input and never
+   * posts, so it still finds the session after any of those changed. A key that posted
+   * nothing refuses `omp_posting_unknown`.
+   */
+  adoptSession: {
+    input: TargetSchema.extend({ postingKey: PostingKeySchema }),
     result: PublicJobSchema,
   },
   /**
