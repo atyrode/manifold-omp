@@ -13,7 +13,7 @@ import { openSessionsRoot, resolveSessionFile, SESSIONS_ROOT, SessionIdSchema } 
 import { validateSkillInputs } from "../workers/harness/skills.ts";
 import { readAutomation, readResumeOverrides, readSessionInput } from "../workers/harness/sdk-inputs.ts";
 import { admitSdkSession, SdkSessionConfigSchema } from "./sdk-admission.ts";
-import { MATERIAL_SYSTEM_PROMPT, materialMessage, readMaterial } from "./material.ts";
+import { MATERIAL_SYSTEM_PROMPT, materialMessage, readMaterial, runMaterialPrintMode } from "./material.ts";
 import { loadAgentTools, type AgentToolAdapter } from "./agent-tools.ts";
 
 // This entry is always a new, sanitized child, never imported by CLI passthrough.
@@ -141,7 +141,6 @@ try {
   }
   if (controller.signal.aborted) throw new Error("omp_sdk_cancelled");
   if (!manager) {
-
     const root = openSessionsRoot(sessionRoot);
     try { manager = SessionManager.create(cwd, sessionRoot); }
     finally { closeSync(root); }
@@ -181,10 +180,11 @@ try {
   controller.signal.addEventListener("abort", abort, { once: true });
   if (controller.signal.aborted) abort();
   try {
-    if (kind === "print" || materialOnly) {
-      // The actual source-bearing initial message is retained by SessionManager.
-      code = await runPrintMode(created.session, { mode: "json",
-        initialMessage: initialMaterial ?? readSessionInput("prompt") });
+    if (initialMaterial !== undefined) {
+      // The source-bearing message is retained verbatim by SessionManager and never prompt-processed.
+      code = await runMaterialPrintMode(created.session, initialMaterial);
+    } else if (kind === "print") {
+      code = await runPrintMode(created.session, { mode: "json", initialMessage: readSessionInput("prompt") });
     } else if (rpc) {
       await runRpcMode(created.session, created.setToolUIContext, created.eventBus);
     } else {

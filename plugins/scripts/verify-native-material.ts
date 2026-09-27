@@ -22,6 +22,9 @@ export async function verifyNativeMaterial({ root, target, hub, producerJobId, m
   materialText: string;
 }): Promise<void> {
   let calls = 0;
+  // The material names the job's own agent config by `@` path. A canary provider id in that
+  // config reaches the model only if the SDK reads the mention from the sandbox.
+  const canary = `NATIVE-AGENT-CONFIG-CANARY-${randomUUID()}`;
   let serviceFailure = false;
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
     try {
@@ -34,8 +37,12 @@ export async function verifyNativeMaterial({ root, target, hub, producerJobId, m
       const body = await request.json() as { modelId: string; context: { tools?: unknown[]; messages: { role: string; content?: unknown; toolCallId?: string; isError?: boolean }[] } };
       check(body.modelId === "fixture/openai/gpt-5" && (body.context.tools ?? []).length === 0, "tools");
       const context = JSON.stringify(body.context);
-      check(context.includes(materialText.replaceAll("\n", "\\n")) && !context.includes("NATIVE-CONFIG-SECRET-SENTINEL") &&
+      check(context.includes(JSON.stringify(materialText).slice(1, -1)) && !context.includes("NATIVE-CONFIG-SECRET-SENTINEL") &&
         !context.includes("UNREVIEWED-SENTINEL"), "input-boundary");
+      // Neither the config canary nor the credential file's content (`pi-native` transport) is read.
+      check(!context.includes(canary) && !context.includes("pi-native"), "mention-read");
+      check(calls > 0 || (body.context.messages.length === 2 && body.context.messages.every(message => message.role === "user")),
+        "initial-messages");
       calls++;
       check(calls <= 2, "extra-inference");
       const tools = calls === 1;
@@ -100,7 +107,7 @@ export async function verifyNativeMaterial({ root, target, hub, producerJobId, m
       return value.targets.every(item => item.state === "ready");
     }, 480000, 100);
     const input = {
-      config: JSON.stringify({ extensions: [], disabledProviders: [], extendedContext: false, startup: { setupWizard: false },
+      config: JSON.stringify({ extensions: [], disabledProviders: [canary], extendedContext: false, startup: { setupWizard: false },
         modelRoles: { default: "fixture/openai/gpt-5" }, skills: { enabled: false } }),
       models: JSON.stringify({ providers: { fixture: { baseUrl: "http://invalid.example", apiKey: "NATIVE-CONFIG-SECRET-SENTINEL",
         transport: "pi-native", discovery: { type: "proxy" } } } }),
@@ -161,7 +168,7 @@ export async function verifyNativeMaterial({ root, target, hub, producerJobId, m
       const receipt = parseSessionArchive(archive, "/outputs/session", 0, "fixture/openai/gpt-5");
       check(receipt.finalMessage === "NATIVE-MATERIAL-COMPLETE", "receipt");
       check(archive.includes(Buffer.from("NATIVE-MATERIAL-WITNESS")) &&
-        !archive.includes(Buffer.from("NATIVE-CONFIG-SECRET-SENTINEL")), "retention-boundary");
+        !archive.includes(Buffer.from("NATIVE-CONFIG-SECRET-SENTINEL")) && !archive.includes(Buffer.from(canary)), "retention-boundary");
     }
   } finally { await server.stop(true); }
 }

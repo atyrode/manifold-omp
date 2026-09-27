@@ -145,7 +145,10 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
         };
         if (material) {
           const content = scenario === "material-utf8" ? Buffer.from([0xff])
-            : Buffer.from("MATERIAL-SOURCE-WITNESS\n" + "x".repeat(scenario === "material-oversized" ? 1048576 : 70000));
+            // Transcripts carry users' `@path` mentions; these name the sandbox's secret sentinel and
+            // credential file, which the model must never receive.
+            : Buffer.from("MATERIAL-SOURCE-WITNESS\nSee @/home/job/.omp/agent/secret-sentinel and @\"/home/job/.omp/agent/models.yml\"\n" +
+              "x".repeat(scenario === "material-oversized" ? 1048576 : 70000));
           await mkdir(join(inputs, "material"));
           await writeFile(join(inputs, "material/transcript-map.json"), content, { mode: 0o400 });
           if (scenario === "material-extra") await sealed(join(inputs, "material/extra"), "UNREVIEWED-SOURCE");

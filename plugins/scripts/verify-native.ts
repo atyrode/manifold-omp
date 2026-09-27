@@ -443,7 +443,10 @@ try {
     const fixtureId = "fixture.omp-skills";
     const producerOperation = `${fixtureId}.produce`;
     const producerLocation = `${fixtureId}.bundles`;
-    const materialText = "NATIVE-MATERIAL-WITNESS\n" + "m".repeat(70000);
+    // Transcripts carry users' `@path` mentions. These name the material job's own agent config
+    // (holding a per-run canary) and its credential file; neither may reach the model.
+    const materialText = "NATIVE-MATERIAL-WITNESS\nSee @/home/job/.omp/agent/config.yml and @\"/home/job/.omp/agent/models.yml\"\n" +
+      "m".repeat(70000);
     const producerSource = Buffer.from(`
       import { mkdirSync, writeFileSync } from "node:fs";
       for (const name of ["alpha", "beta", "private"]) {
