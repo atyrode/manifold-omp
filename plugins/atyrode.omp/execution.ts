@@ -446,6 +446,9 @@ async function execute(
   agentRun?: NativeAgentRunBinding,
 ) {
   // Retain the exact intended request before dispatch. A failed native dispatch cannot grant receipt access.
+  // This CAS is the last step before the hub execute and nothing that can refuse sits between
+  // them, so retained provenance always means a dispatch was committed to. A posting key's
+  // retire relies on that: it answers `posting_pending`, never `posting_unknown`, once this lands.
   if (
     !(await ctx.storage.compareAndSet(
       `jobs/${jobId}`,
@@ -454,6 +457,17 @@ async function execute(
     ))
   )
     throw new OmpRefusal("job_conflict");
+  return dispatch(ctx, jobId, provenance, outputs, agentRun);
+}
+/** Posts retained provenance to the hub. The hub answers an exact repeat of a job id with the
+ * job it already has, so dispatching the same provenance again never admits a second job. */
+async function dispatch(
+  ctx: OmpContext,
+  jobId: string,
+  provenance: Provenance,
+  outputs: OutputBinding[],
+  agentRun?: NativeAgentRunBinding,
+) {
   const job = PublicJobSchema.parse(
     await ctx.jobs.execute({
       jobId,
@@ -477,7 +491,10 @@ async function retainedProvenance(
 ) {
   const raw = await ctx.storage.get(`jobs/${jobId}`);
   if (raw === null) throw new OmpRefusal("result_unavailable");
-  const provenance = provenanceSchema.parse(JSON.parse(raw));
+  const value: unknown = JSON.parse(raw);
+  // A retired posting key's slot names no job.
+  if (RetiredPostingSchema.safeParse(value).success) throw new OmpRefusal("result_unavailable");
+  const provenance = provenanceSchema.parse(value);
   if (digestOf(target) !== digestOf(provenance.target))
     throw new OmpRefusal("provenance_changed");
   return provenance;
@@ -906,6 +923,95 @@ async function oneShotPreparation(
   };
 }
 /**
+ * THE JOB A POSTING KEY NAMES: a digest of the door, the caller, the target and the key, shaped
+ * as a UUID. A retry derives the same id, and two callers using one key never share a job.
+ * Deliberately not exported: a caller holds its own key, never a way to name another's job.
+ */
+function postingJobId(ctx: OmpContext, target: Target, key: string): string {
+  const hex = digestOf(["atyrode.omp.runSession", ctx.auth.principal.id, target.containerId, target.machineId, key]);
+  // RFC 9562 version 8 (custom) with the RFC 4122 variant bits.
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-` +
+    `${(8 | (Number.parseInt(hex[16]!, 16) & 3)).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+/** A session's one output lease is named by its job id. A repeated dispatch must bind exactly
+ * the same lease, or the hub would not recognise the request as the job it already has. */
+const sessionOutputs = (jobId: string): OutputBinding[] => [
+  { name: SESSION_OUTPUT_NAME, locationId: RUNS_LOCATION_ID, components: [jobId] },
+];
+/**
+ * What a retire writes into a posting key's provenance slot when the key has posted nothing. It
+ * takes the slot by the same create-only CAS a creator's provenance does, so exactly one of the
+ * two ever holds it, and a key whose slot is retired can never post.
+ */
+const RetiredPostingSchema = z.strictObject({
+  retired: z.literal(true),
+  door: z.literal("runSession"),
+  requester: z.string(),
+  target: TargetSchema,
+});
+/**
+ * What a posting key has retained: nothing (null), a retire ("retired"), or its provenance and
+ * the hub's job, which is null when the hub never received it. Provenance is the creator's last
+ * write before its hub execute, so retained provenance always means a dispatch was committed to;
+ * a posting interrupted between the two is finished from that provenance, never prepared again.
+ */
+async function keyedPosting(ctx: OmpContext, target: Target, jobId: string) {
+  const raw = await ctx.storage.get(`jobs/${jobId}`);
+  if (raw === null) return null;
+  const value: unknown = JSON.parse(raw);
+  const retired = RetiredPostingSchema.safeParse(value);
+  const owner = retired.success ? retired.data : provenanceSchema.parse(value);
+  if (owner.door !== "runSession" || owner.requester !== ctx.auth.principal.id ||
+    digestOf(owner.target) !== digestOf(target))
+    throw new OmpRefusal("posting_key_conflict");
+  if (!("operationId" in owner)) return "retired" as const;
+  let job: PublicJob;
+  try {
+    job = PublicJobSchema.parse(await ctx.jobs.status({
+      kind: "job", machineId: target.machineId, operationId: owner.operationId, jobId,
+    }));
+  } catch (error) {
+    // The hub's own word for a job id it was never asked to run, as a guest receives it.
+    if (!(error instanceof Error && /(?:^|: )job_not_started$/.test(error.message))) throw error;
+    return { provenance: owner, job: null };
+  }
+  checkJob(job, owner, jobId);
+  return { provenance: owner, job };
+}
+/**
+ * The session a posting key already posted, found from the target and the key alone. Nothing
+ * here reviews, prepares, posts or executes, so a caller whose defaults, profile or review
+ * changed since still finds, reads and can stop that session.
+ *
+ * `retire: true` settles the key for good. A key that has retained nothing gets the retired
+ * marker, and `omp_posting_unknown` is then final: no posting under the key can ever happen. A
+ * key whose provenance is retained but whose dispatch has not landed answers the retryable
+ * `omp_posting_pending`, because a retire never executes and that dispatch may still land.
+ * A plain adoption of a retired key refuses `omp_posting_retired`.
+ */
+export async function adoptSession(
+  ctx: OmpContext,
+  args: ActionInput<"adoptSession">,
+): Promise<ActionResult<"adoptSession">> {
+  await authorizeTarget(ctx, args, true);
+  const target = { containerId: args.containerId, machineId: args.machineId };
+  const jobId = postingJobId(ctx, target, args.postingKey);
+  let posting = await keyedPosting(ctx, target, jobId);
+  if (posting === null && args.retire === true) {
+    const marker = RetiredPostingSchema.parse({ retired: true, door: "runSession", requester: ctx.auth.principal.id, target });
+    if (await ctx.storage.compareAndSet(`jobs/${jobId}`, null, JSON.stringify(marker)))
+      throw new OmpRefusal("posting_unknown");
+    // A creator retained its provenance first: answer for that posting instead.
+    posting = await keyedPosting(ctx, target, jobId);
+    if (posting === null) throw new OmpRefusal("posting_pending");
+  }
+  // A retire of a retired key answers the same final word; an adoption learns why nothing posts.
+  if (posting === "retired") throw new OmpRefusal(args.retire === true ? "posting_unknown" : "posting_retired");
+  if (posting === null) throw new OmpRefusal("posting_unknown");
+  if (posting.job !== null) return posting.job;
+  throw new OmpRefusal(args.retire === true ? "posting_pending" : "posting_unknown");
+}
+/**
  * The reviewed session, placed as a governed job instead of a terminal. It runs on
  * `atyrode.omp.session`, the one-shot sibling of `atyrode.omp.launch`: the same reviewed
  * input, with startup and every unset model role held to the configured model and only the
@@ -923,14 +1029,27 @@ export async function runSession(
   args: ActionInput<"runSession">,
 ): Promise<ActionResult<"runSession">> {
   await authorizeTarget(ctx, args, true);
+  // A Run-bound session carries a fresh random session id, so its request cannot be repeated.
+  if (args.postingKey !== undefined && args.agentTools !== undefined)
+    throw new OmpRefusal("posting_key_agent_tools_unsupported");
   if (args.prompt.length === 0) throw new OmpRefusal("prompt_required");
   if ((args.inputs ?? []).some(binding => binding.name !== "material") || (args.inputs?.length ?? 0) > 1)
     throw new OmpRefusal("invalid_material_input");
   if (args.isolation && args.inputs?.length !== 1) throw new OmpRefusal("invalid_material_input");
+  // A keyed posting is answered before any preparation: a retry returns the job the key
+  // already named instead of reviewing again or buying another.
+  const target = { containerId: args.containerId, machineId: args.machineId };
+  const keyed = args.postingKey === undefined ? undefined : postingJobId(ctx, target, args.postingKey);
+  const retained = keyed === undefined ? null : await keyedPosting(ctx, target, keyed);
+  if (retained === "retired") throw new OmpRefusal("posting_retired");
+  // A posting the hub never received is dispatched from its retained provenance. The hub admits
+  // an exact repeat of a job id once, so this never buys a second session.
+  if (keyed !== undefined && retained !== null)
+    return retained.job ?? dispatch(ctx, keyed, retained.provenance, sessionOutputs(keyed));
   const first = await oneShotPreparation(ctx, args);
   if (first.prepared.review.reviewDigest !== args.reviewDigest)
     throw new OmpRefusal("review_changed");
-  const jobId = await ctx.newId();
+  const jobId = keyed ?? await ctx.newId();
   const latest = await oneShotPreparation(ctx, args);
   if (latest.digest !== first.digest) throw new OmpRefusal("resources_changed");
   const agentRun: NativeAgentRunBinding | undefined = args.agentTools === undefined ? undefined : {
@@ -964,9 +1083,17 @@ export async function runSession(
     ...(latest.limits === undefined ? {} : { limits: latest.limits }),
     ...(args.isolation ? { isolation: args.isolation } : {}),
   });
-  return execute(ctx, jobId, provenance, [
-    { name: SESSION_OUTPUT_NAME, locationId: RUNS_LOCATION_ID, components: [jobId] },
-  ], agentRun);
+  try {
+    return await execute(ctx, jobId, provenance, sessionOutputs(jobId), agentRun);
+  } catch (error) {
+    // Another call with the same key took the slot first: its posting is this one, and a retire
+    // that took it means this key never posts.
+    if (keyed === undefined || !(error instanceof OmpRefusal && error.code === "job_conflict")) throw error;
+    const winner = await keyedPosting(ctx, target, keyed);
+    if (winner === "retired") throw new OmpRefusal("posting_retired");
+    if (winner === null) throw error;
+    return winner.job ?? dispatch(ctx, keyed, winner.provenance, sessionOutputs(keyed));
+  }
 }
 /** The retained provenance of a session this door posted, or a refusal naming why not. */
 async function sessionProvenance(ctx: OmpContext, target: Target, jobId: string) {
