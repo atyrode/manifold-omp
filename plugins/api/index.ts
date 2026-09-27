@@ -261,6 +261,9 @@ export type MaterialOnlyIsolation = z.infer<typeof MaterialOnlyIsolationSchema>;
 /** Selects an existing authorized Run, never credentials or a model-chosen tool list. */
 export const AgentToolsSelectionSchema = z.strictObject({ runId: id });
 export type AgentToolsSelection = z.infer<typeof AgentToolsSelectionSchema>;
+/** A caller-chosen name for one one-shot posting, such as the caller's own run id. OMP derives
+ * the native job id from it, the caller and the target, so a retry names the same job. */
+export const PostingKeySchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
 export const SessionInputSchema = executionInput.extend({
   overlay: OverlaySchema,
   // Empty is the interactive terminal opened with no initial prompt (`hasPrompt: false`).
@@ -484,11 +487,18 @@ export const rootActionSchemas = {
    * configuration names a model of; terminals keep the whole reviewed pool.
    * `inputs` binds sealed outputs of earlier jobs on the same machine to this run's
    * declared inputs; the door passes them to the hub verbatim and reads none of them, so
-   * what the material is and how the prompt refers to it are the caller's business. */
+   * what the material is and how the prompt refers to it are the caller's business.
+   *
+   * `postingKey` makes the posting retryable: the job a key names for this caller and target
+   * is posted at most once, and repeating the call returns it instead of buying another.
+   * `adoptOnly` asks for that job and never posts one, refusing `omp_posting_unknown` when the
+   * key has posted nothing. */
   runSession: {
     input: SessionInputSchema.extend({
       reviewDigest: digest,
       inputs: z.array(JobInputBindingSchema).max(16).optional(),
+      postingKey: PostingKeySchema.optional(),
+      adoptOnly: z.boolean().optional(),
     }),
     result: PublicJobSchema,
   },

@@ -454,6 +454,17 @@ async function execute(
     ))
   )
     throw new OmpRefusal("job_conflict");
+  return dispatch(ctx, jobId, provenance, outputs, agentRun);
+}
+/** Posts retained provenance to the hub. The hub answers an exact repeat of a job id with the
+ * job it already has, so dispatching the same provenance again never admits a second job. */
+async function dispatch(
+  ctx: OmpContext,
+  jobId: string,
+  provenance: Provenance,
+  outputs: OutputBinding[],
+  agentRun?: NativeAgentRunBinding,
+) {
   const job = PublicJobSchema.parse(
     await ctx.jobs.execute({
       jobId,
@@ -906,6 +917,53 @@ async function oneShotPreparation(
   };
 }
 /**
+ * THE JOB A POSTING KEY NAMES: a digest of the door, the caller, the target and the key, shaped
+ * as a UUID. A retry derives the same id, and two callers using one key never share a job.
+ * Deliberately not exported: a caller holds its own key, never a way to name another's job.
+ */
+function postingJobId(ctx: OmpContext, target: Target, key: string): string {
+  const hex = digestOf(["atyrode.omp.runSession", ctx.auth.principal.id, target.containerId, target.machineId, key]);
+  // RFC 9562 version 8 (custom) with the RFC 4122 variant bits.
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-` +
+    `${(8 | (Number.parseInt(hex[16]!, 16) & 3)).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+/** A session's one output lease is named by its job id. A repeated dispatch must bind exactly
+ * the same lease, or the hub would not recognise the request as the job it already has. */
+const sessionOutputs = (jobId: string): OutputBinding[] => [
+  { name: SESSION_OUTPUT_NAME, locationId: RUNS_LOCATION_ID, components: [jobId] },
+];
+/**
+ * The session a posting key has already posted, or null when it has posted nothing.
+ *
+ * Provenance is retained before the hub is asked, so a posting interrupted between the two is
+ * finished from that retained provenance, never prepared again, and the hub admits it once.
+ * `adoptOnly` never posts: a key whose provenance or hub job is missing refuses by name.
+ */
+async function postedSession(ctx: OmpContext, target: Target, jobId: string, adoptOnly: boolean) {
+  const raw = await ctx.storage.get(`jobs/${jobId}`);
+  if (raw === null) {
+    if (adoptOnly) throw new OmpRefusal("posting_unknown");
+    return null;
+  }
+  const provenance = provenanceSchema.parse(JSON.parse(raw));
+  if (provenance.door !== "runSession" || provenance.requester !== ctx.auth.principal.id ||
+    digestOf(provenance.target) !== digestOf(target))
+    throw new OmpRefusal("posting_key_conflict");
+  let job: PublicJob;
+  try {
+    job = PublicJobSchema.parse(await ctx.jobs.status({
+      kind: "job", machineId: target.machineId, operationId: provenance.operationId, jobId,
+    }));
+  } catch (error) {
+    // The hub's own word for a job id it was never asked to run, as a guest receives it.
+    if (!(error instanceof Error && /(?:^|: )job_not_started$/.test(error.message))) throw error;
+    if (adoptOnly) throw new OmpRefusal("posting_unknown");
+    return dispatch(ctx, jobId, provenance, sessionOutputs(jobId));
+  }
+  checkJob(job, provenance, jobId);
+  return job;
+}
+/**
  * The reviewed session, placed as a governed job instead of a terminal. It runs on
  * `atyrode.omp.session`, the one-shot sibling of `atyrode.omp.launch`: the same reviewed
  * input, with startup and every unset model role held to the configured model and only the
@@ -923,14 +981,26 @@ export async function runSession(
   args: ActionInput<"runSession">,
 ): Promise<ActionResult<"runSession">> {
   await authorizeTarget(ctx, args, true);
+  if (args.adoptOnly && args.postingKey === undefined) throw new OmpRefusal("posting_key_required");
+  // A Run-bound session carries a fresh random session id, so its request cannot be repeated.
+  if (args.postingKey !== undefined && args.agentTools !== undefined)
+    throw new OmpRefusal("posting_key_agent_tools_unsupported");
   if (args.prompt.length === 0) throw new OmpRefusal("prompt_required");
   if ((args.inputs ?? []).some(binding => binding.name !== "material") || (args.inputs?.length ?? 0) > 1)
     throw new OmpRefusal("invalid_material_input");
   if (args.isolation && args.inputs?.length !== 1) throw new OmpRefusal("invalid_material_input");
+  // A keyed posting is answered before any preparation: a retry returns the job the key
+  // already named, and an adoption never reaches anything that could post or spend.
+  const target = { containerId: args.containerId, machineId: args.machineId };
+  const keyed = args.postingKey === undefined ? undefined : postingJobId(ctx, target, args.postingKey);
+  if (keyed !== undefined) {
+    const posted = await postedSession(ctx, target, keyed, args.adoptOnly === true);
+    if (posted !== null) return posted;
+  }
   const first = await oneShotPreparation(ctx, args);
   if (first.prepared.review.reviewDigest !== args.reviewDigest)
     throw new OmpRefusal("review_changed");
-  const jobId = await ctx.newId();
+  const jobId = keyed ?? await ctx.newId();
   const latest = await oneShotPreparation(ctx, args);
   if (latest.digest !== first.digest) throw new OmpRefusal("resources_changed");
   const agentRun: NativeAgentRunBinding | undefined = args.agentTools === undefined ? undefined : {
@@ -964,9 +1034,15 @@ export async function runSession(
     ...(latest.limits === undefined ? {} : { limits: latest.limits }),
     ...(args.isolation ? { isolation: args.isolation } : {}),
   });
-  return execute(ctx, jobId, provenance, [
-    { name: SESSION_OUTPUT_NAME, locationId: RUNS_LOCATION_ID, components: [jobId] },
-  ], agentRun);
+  try {
+    return await execute(ctx, jobId, provenance, sessionOutputs(jobId), agentRun);
+  } catch (error) {
+    // Another call with the same key retained its provenance first: that posting is this one.
+    if (keyed === undefined || !(error instanceof OmpRefusal && error.code === "job_conflict")) throw error;
+    const posted = await postedSession(ctx, target, keyed, false);
+    if (posted === null) throw error;
+    return posted;
+  }
 }
 /** The retained provenance of a session this door posted, or a refusal naming why not. */
 async function sessionProvenance(ctx: OmpContext, target: Target, jobId: string) {

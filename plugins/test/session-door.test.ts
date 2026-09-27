@@ -47,6 +47,7 @@ type JobOverrides = {
   inputs?: JobInputBinding[];
   limits?: PublicJob["limits"] | null;
   resultLimits?: PublicJob["limits"];
+  requester?: string;
 };
 interface OmpClient {
   call<K extends OmpAction>(name: K, input: ActionInput<K>): Promise<ActionReply<K>>;
@@ -225,7 +226,7 @@ function publicJob(
         traceId: "fixture-trace",
         door: `${OMP_PLUGIN_ID}.${overrides.door ?? "runSession"}`,
       },
-      requester: "fixture-owner",
+      requester: overrides.requester ?? "fixture-owner",
       executor: null,
       decision: null,
     },
@@ -290,6 +291,7 @@ function fixture(options: { sdk?: boolean } = {}): Fixture {
     const job = jobs.get(jobId)!;
     const next = publicJob(jobId, job.operationId, job.inputDigest, {
       door: doors.get(jobId)!,
+      requester: job.authority.requester,
       ...(bound.get(jobId) === undefined ? {} : { inputs: bound.get(jobId)! }),
       limits: job.limits,
       ...overrides,
@@ -331,7 +333,14 @@ function fixture(options: { sdk?: boolean } = {}): Fixture {
         deployment: null,
       }),
       execute: async (args: PostedJob) => {
+        // Every request reaches `posted`. Like the hub, an exact repeat of a job id returns the
+        // job it already has, and a different request under that id is refused.
         posted.push(args);
+        const existing = jobs.get(args.jobId);
+        if (existing) {
+          if (existing.inputDigest !== digestOf(args.input)) throw new Error("jobs.execute: job_digest_conflict");
+          return existing;
+        }
         const door =
           args.operationId === INVENTORY_OPERATION_ID ? "startInventory" : "runSession";
         doors.set(args.jobId, door);
@@ -341,13 +350,15 @@ function fixture(options: { sdk?: boolean } = {}): Fixture {
           door,
           ...(args.inputs === undefined ? {} : { inputs: args.inputs }),
           limits: args.limits,
+          requester: ctx.auth.principal.id,
         });
         jobs.set(args.jobId, job);
         return job;
       },
       status: async (node: JobNode) => {
         const job = jobs.get(node.jobId);
-        if (!job) throw new Error("unknown job");
+        // The hub's refusal for a job id it never received, as a guest's host call reports it.
+        if (!job) throw new Error("jobs.status: job_not_started");
         return job;
       },
       // The hub makes cancelling a settled job a no-op rather than a refusal.
@@ -1456,5 +1467,109 @@ test("session input cannot self-grant tools or persist a Run selection in an Age
   const profile = { accountPool: session.accountPool, overlay: session.overlay, planYolo: false };
   expect(OmpHarnessProfileSchema.safeParse(profile).success).toBe(true);
   expect(OmpHarnessProfileSchema.safeParse({ ...profile, agentTools }).success).toBe(false);
+  expect(f.posted).toEqual([]);
+});
+
+async function keyedRequest(f: Fixture, postingKey = "babel-run-1") {
+  return { ...session, reviewDigest: await reviewDigestOf(f.client), postingKey };
+}
+async function posted(f: Fixture, request: ActionInput<"runSession">): Promise<PublicJob> {
+  const job = await f.client.call("runSession", request);
+  if ("refused" in job) throw new Error(job.refused);
+  return job;
+}
+
+test("a posting key posts its session once and answers every retry with that job", async () => {
+  const f = fixture();
+  const request = await keyedRequest(f);
+  const job = await posted(f, request);
+  expect(await posted(f, request)).toEqual(job);
+  expect(f.posted).toHaveLength(1);
+  expect(job.jobId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  expect(f.posted[0]!.outputs).toEqual([{ name: SESSION_OUTPUT_NAME, locationId: RUNS_LOCATION_ID, components: [job.jobId] }]);
+  // Another key is another posting.
+  const other = await posted(f, { ...request, postingKey: "babel-run-2" });
+  expect(other.jobId).not.toBe(job.jobId);
+  expect(f.posted).toHaveLength(2);
+});
+
+test("adoption never posts or prepares: an unused key refuses by name and a used one returns its job", async () => {
+  const f = fixture();
+  const request = await keyedRequest(f);
+  expect(await f.client.call("runSession", { ...request, adoptOnly: true })).toEqual({ refused: "omp_posting_unknown" });
+  // Adoption is answered before review, so a stale review is not what refuses it.
+  expect(await f.client.call("runSession", { ...request, reviewDigest: "f".repeat(64), adoptOnly: true }))
+    .toEqual({ refused: "omp_posting_unknown" });
+  expect(f.posted).toEqual([]);
+  const { postingKey: _postingKey, ...unkeyed } = request;
+  expect(await f.client.call("runSession", { ...unkeyed, adoptOnly: true })).toEqual({ refused: "omp_posting_key_required" });
+  expect(f.posted).toEqual([]);
+  const job = await posted(f, request);
+  expect(await posted(f, { ...request, reviewDigest: "f".repeat(64), adoptOnly: true })).toEqual(job);
+  expect(f.posted).toHaveLength(1);
+});
+
+test("a posting key names a job per caller, so another principal never reaches the first job", async () => {
+  const f = fixture();
+  const job = await posted(f, await keyedRequest(f));
+  (f.ctx.auth as { principal: { id: string; kind: string } }).principal = { id: "fixture-other", kind: "human" };
+  const request = await keyedRequest(f);
+  expect(await f.client.call("runSession", { ...request, adoptOnly: true })).toEqual({ refused: "omp_posting_unknown" });
+  const theirs = await posted(f, request);
+  expect(theirs.jobId).not.toBe(job.jobId);
+  expect(theirs.authority.requester).toBe("fixture-other");
+  expect(f.posted).toHaveLength(2);
+  // Retained provenance under a key's job id that is not this caller's refuses rather than answers.
+  const retained = JSON.parse((await f.ctx.storage.get(`jobs/${theirs.jobId}`))!);
+  await f.ctx.storage.set(`jobs/${theirs.jobId}`, JSON.stringify({ ...retained, requester: "fixture-owner" }));
+  expect(await f.client.call("runSession", request)).toEqual({ refused: "omp_posting_key_conflict" });
+  expect(f.posted).toHaveLength(2);
+});
+
+test("a posting interrupted after its provenance is retained is finished once, from that provenance", async () => {
+  const f = fixture();
+  const request = await keyedRequest(f);
+  const execute = f.ctx.jobs.execute;
+  f.ctx.jobs.execute = async () => { throw new Error("jobs.execute: hub_unreachable"); };
+  expect(await f.client.call("runSession", request)).toEqual({ refused: "omp_operation_unavailable" });
+  f.ctx.jobs.execute = execute;
+  expect(await f.client.call("runSession", { ...request, adoptOnly: true })).toEqual({ refused: "omp_posting_unknown" });
+  expect(f.posted).toEqual([]);
+  // The retry must not prepare again: a moved gateway would refuse a fresh preparation.
+  f.state.gatewayRevision = "2";
+  const job = await posted(f, request);
+  expect(f.posted).toHaveLength(1);
+  const retained = JSON.parse((await f.ctx.storage.get(`jobs/${job.jobId}`))!);
+  expect(f.posted[0]!.input).toEqual(retained.input);
+  expect(f.posted[0]!.outputs).toEqual([{ name: SESSION_OUTPUT_NAME, locationId: RUNS_LOCATION_ID, components: [job.jobId] }]);
+  expect(await posted(f, request)).toEqual(job);
+  expect(await posted(f, { ...request, adoptOnly: true })).toEqual(job);
+  expect(f.posted).toHaveLength(1);
+});
+
+test("a call that loses the provenance race under a key answers with the winner's job", async () => {
+  const f = fixture();
+  const request = await keyedRequest(f);
+  const compareAndSet = f.ctx.storage.compareAndSet.bind(f.ctx.storage);
+  let raced = false;
+  let winner: PublicJob | undefined;
+  f.ctx.storage.compareAndSet = async (key, expected, value) => {
+    // The competing call retains and posts between this call's lookup and its own retention.
+    if (!raced && key.startsWith("jobs/")) {
+      raced = true;
+      winner = await posted(f, request);
+    }
+    return compareAndSet(key, expected, value);
+  };
+  expect(await posted(f, request)).toEqual(winner!);
+  expect(f.posted).toHaveLength(1);
+});
+
+test("a Run-bound session cannot take a posting key, because its request cannot be repeated", async () => {
+  const f = fixture({ sdk: true });
+  const input = { ...session, agentTools: { runId: "11111111-1111-4111-8111-111111111111" } };
+  const reviewDigest = await reviewDigestOf(f.client, input);
+  expect(await f.client.call("runSession", { ...input, reviewDigest, postingKey: "babel-run-1" }))
+    .toEqual({ refused: "omp_posting_key_agent_tools_unsupported" });
   expect(f.posted).toEqual([]);
 });
