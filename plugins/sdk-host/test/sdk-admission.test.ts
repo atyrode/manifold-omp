@@ -18,7 +18,8 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { resolveImageQuestionModel } from "@oh-my-pi/pi-coding-agent/utils/image-question";
 import { exactModelScope, pinnedModelRoles, type RuntimeAccountPool } from "../../api/index.ts";
 import { nativeModelConfiguration, oneShotModelConfiguration } from "../../atyrode.omp/execution.ts";
-import { poolModels, resolvePublished } from "../../workers/gateway/storage.ts";
+import { poolModels, publishedModels, resolvePublished, type PublishedCatalog } from "../../workers/gateway/storage.ts";
+import { ABSENT_MODEL_ID, UNLISTED_MODEL_ID, UNLISTED_PUBLISHED_ID } from "../../test/fixtures/models.ts";
 import { admitSdkSession, SdkSessionConfigSchema } from "../sdk-admission.ts";
 
 const listed = (provider: string, id: string): Model => buildModel({
@@ -31,6 +32,7 @@ const replacement = { ...model, id: "replacement" };
 const registry = {
   find: (provider: string, id: string) => provider !== "fixture" ? undefined :
     id === model.id ? model : id === replacement.id ? replacement : undefined,
+  getAll: () => [model, replacement],
   hasConfiguredAuth: () => true,
 };
 
@@ -147,6 +149,42 @@ test("a one-shot's pinned roles leave OMP's later selections nothing but its con
 });
 
 /**
+ * A one-shot's registry, built from the job's files as the SDK host builds it before it admits the
+ * session: every provider the job registers discovers through a gateway double that answers
+ * `models` with the rows the SDK gateway writes for what `published` holds, and counts the calls.
+ */
+async function oneShotRegistry(root: string, configured: string, published: PublishedCatalog["models"],
+  native: { models: { providers: Record<string, object> }; config: object }) {
+  let calls = 0;
+  const gateway = async (request: string | URL | Request) => {
+    if (new URL(request instanceof Request ? request.url : request).pathname !== "/v1/models")
+      throw new Error("unexpected gateway request");
+    calls += 1;
+    // The rows the SDK gateway's `/v1/models` writes.
+    return Response.json({ object: "list", data: [...published.values()].map(listing => ({
+      id: `${listing.provider}/${listing.id}`, object: "model", owned_by: listing.provider, api: listing.api,
+      display_name: listing.name, input_modalities: listing.input, context_length: listing.contextWindow,
+      max_output_tokens: listing.maxTokens,
+    })) });
+  };
+  const agentDir = join(root, crypto.randomUUID());
+  const workspace = join(agentDir, "workspace");
+  mkdirSync(workspace, { recursive: true });
+  // The owner fills in the service proxy's endpoint and bearer.
+  writeFileSync(join(agentDir, "models.yml"), JSON.stringify({ providers: Object.fromEntries(
+    Object.entries(native.models.providers).map(([name, provider]) =>
+      [name, { ...provider, baseUrl: "http://127.0.0.1:42123", apiKey: "fixture-native-service-bearer-0000000000000001" }])) }));
+  const config = { ...native.config, modelRoles: pinnedModelRoles({ default: configured }), enabledModels: [exactModelScope(configured)] };
+  writeFileSync(join(agentDir, "config.yml"), JSON.stringify(config));
+  const settings = await Settings.loadReadOnly({ cwd: workspace, agentDir, configFiles: [join(agentDir, "config.yml")] });
+  const registry = new ModelRegistry(await AuthStorage.create(join(agentDir, "auth.db")), join(agentDir, "models.yml"),
+    { settings, cacheDbPath: join(agentDir, "models.db"), fetch: gateway as typeof fetch });
+  // As the SDK host discovers before it admits the session.
+  await registry.refreshDiscoverableProviders(Object.keys(native.models.providers), "online");
+  return { registry, settings, config, calls };
+}
+
+/**
  * What the pinned roles cannot reach. A task agent whose own definition names a model, an image
  * question the configured model cannot take and compaction's largest-context candidate each
  * resolve against the session's whole catalog, and the gateway lists every model its pool reaches
@@ -165,32 +203,7 @@ test("a one-shot discovers only its configured provider, and nothing it selects 
   const selections = async (configured: string, handed: RuntimeAccountPool,
     native: { models: { providers: Record<string, object> }; config: object }) => {
     const published = poolModels(handed);
-    let calls = 0;
-    const gateway = async (request: string | URL | Request) => {
-      if (new URL(request instanceof Request ? request.url : request).pathname !== "/v1/models")
-        throw new Error("unexpected gateway request");
-      calls += 1;
-      // The rows the SDK gateway's `/v1/models` writes.
-      return Response.json({ object: "list", data: [...published.values()].map(listing => ({
-        id: `${listing.provider}/${listing.id}`, object: "model", owned_by: listing.provider, api: listing.api,
-        display_name: listing.name, input_modalities: listing.input, context_length: listing.contextWindow,
-        max_output_tokens: listing.maxTokens,
-      })) });
-    };
-    const agentDir = join(root, crypto.randomUUID());
-    const workspace = join(agentDir, "workspace");
-    mkdirSync(workspace, { recursive: true });
-    // The owner fills in the service proxy's endpoint and bearer.
-    writeFileSync(join(agentDir, "models.yml"), JSON.stringify({ providers: Object.fromEntries(
-      Object.entries(native.models.providers).map(([name, provider]) =>
-        [name, { ...provider, baseUrl: "http://127.0.0.1:42123", apiKey: "fixture-native-service-bearer-0000000000000001" }])) }));
-    writeFileSync(join(agentDir, "config.yml"), JSON.stringify({ ...native.config,
-      modelRoles: pinnedModelRoles({ default: configured }), enabledModels: [exactModelScope(configured)] }));
-    const settings = await Settings.loadReadOnly({ cwd: workspace, agentDir, configFiles: [join(agentDir, "config.yml")] });
-    const registry = new ModelRegistry(await AuthStorage.create(join(agentDir, "auth.db")), join(agentDir, "models.yml"),
-      { settings, cacheDbPath: join(agentDir, "models.db"), fetch: gateway as typeof fetch });
-    // As the SDK host discovers before it admits the session.
-    await registry.refreshDiscoverableProviders(Object.keys(native.models.providers), "online");
+    const { registry, settings, calls } = await oneShotRegistry(root, configured, published, native);
     const available = registry.getAvailable();
     const credential = (selected: Model | undefined) => selected === undefined ? "none"
       : resolvePublished(published, `${selected.provider}/${selected.id}`)?.provider ?? "unpublished";
@@ -231,6 +244,35 @@ test("a one-shot discovers only its configured provider, and nothing it selects 
     expect(await selections(direct, scoped.accountPool, scoped)).toEqual({
       calls: 1, agentDefinition: "anthropic", imageQuestion: "anthropic", compactionLastResort: "anthropic",
     });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}, 30_000);
+
+/**
+ * A model only the provider's live listing carries has no bundled row: a session learns it from
+ * the gateway's listing alone, under the configured provider, by the id the gateway publishes it
+ * as, which is the whole configured reference. The CLI one-shot's exact startup scope admits that
+ * row; the SDK host, which runs every material-only, restricted and host-tool one-shot, looked for
+ * the bundled spelling only and refused the model before any call.
+ */
+test("a one-shot configured with a live-listed model is admitted with exactly that model, and an unlisted one is not", async () => {
+  const pool = { openrouter: [{ scope: "fixture-scope", credentialId: 8, identityKey: null }] };
+  const { models: published } = await publishedModels(pool, AbortSignal.timeout(5_000), (async () => Response.json({ data: [{
+    id: UNLISTED_MODEL_ID, pricing: { prompt: "0", completion: "0" }, context_length: 262_144, supported_parameters: ["reasoning"],
+  }] })) as unknown as typeof fetch);
+  const root = mkdtempSync(join(tmpdir(), "one-shot-listed-"));
+  const admit = async (configured: string) => {
+    const native = oneShotModelConfiguration(pool, { modelRoles: { default: configured } });
+    const { registry, config } = await oneShotRegistry(root, configured, published, native);
+    return admitSdkSession(registry, undefined, SdkSessionConfigSchema.parse(config), undefined);
+  };
+  try {
+    for (const [configured, thinkingLevel] of [[UNLISTED_PUBLISHED_ID, "off"], [`${UNLISTED_PUBLISHED_ID}:medium`, "medium"]] as const) {
+      const admitted = await admit(configured);
+      expect([admitted.model.provider, admitted.model.id, admitted.thinkingLevel]).toEqual(["openrouter", UNLISTED_PUBLISHED_ID, thinkingLevel]);
+      // The gateway serves the row the session runs as the configured model, with its provider's credential.
+      expect(resolvePublished(published, `${admitted.model.provider}/${admitted.model.id}`)).toBe(published.get(UNLISTED_PUBLISHED_ID)!);
+    }
+    await expect(admit(`openrouter/${ABSENT_MODEL_ID}`)).rejects.toThrow("omp_resume_model_unavailable");
   } finally { rmSync(root, { recursive: true, force: true }); }
 }, 30_000);
 

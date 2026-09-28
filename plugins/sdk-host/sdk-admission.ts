@@ -17,8 +17,24 @@ export const SdkSessionConfigSchema = ProbeConfigSchema.extend(OverlaySchema.sha
 }).refine(config => config.enabledModels === undefined ||
   config.enabledModels[0] === exactModelScope(config.modelRoles?.default ?? ""));
 
+/**
+ * THE MODEL A CONFIGURED REFERENCE NAMES, by either id a session can hold it under.
+ *
+ * `<provider>/<id>` names a bundled model by `<id>` under its provider. A model only the gateway's
+ * live listing carries has no bundled row: the session learns it from that listing alone, which
+ * gives each model the id `<provider>/<id>`, the whole reference, under the same provider. The CLI
+ * one-shot's exact startup scope matches a reference against either id; looking only for the
+ * first refused every live-listed model the gateway serves. The listing's id is matched exactly,
+ * under the named provider, so an id the listing lacks, or merely resembles, stays unavailable.
+ */
+function namedModel(registry: Pick<ModelRegistry, "find" | "getAll">, provider: string, id: string) {
+  const listed = `${provider}/${id}`.toLowerCase();
+  return registry.find(provider, id) ??
+    registry.getAll().find(model => model.provider === provider && model.id.toLowerCase() === listed);
+}
+
 /** No SDK default/fuzzy/fallback model selection is allowed across explicit resume. */
-export function admitSdkSession(registry: Pick<ModelRegistry, "find" | "hasConfiguredAuth">,
+export function admitSdkSession(registry: Pick<ModelRegistry, "find" | "getAll" | "hasConfiguredAuth">,
   manager: SessionManager | undefined, overlay: Overlay, overrides: ActionInput<"resumeSession">["overrides"]) {
   const context = manager?.buildSessionContext();
   const entries = manager?.getBranch();
@@ -31,10 +47,10 @@ export function admitSdkSession(registry: Pick<ModelRegistry, "find" | "hasConfi
   if (!selector) throw new Error("omp_resume_model_missing");
   const selected = parseModelString(selector, {
     allowMaxSuffix: true, allowAutoAlias: false,
-    isLiteralModelId: (provider, id) => registry.find(provider, id) !== undefined,
+    isLiteralModelId: (provider, id) => namedModel(registry, provider, id) !== undefined,
   });
   if (!selected) throw new Error("omp_resume_model_ambiguous");
-  const model = registry.find(selected.provider, selected.id);
+  const model = namedModel(registry, selected.provider, selected.id);
   if (!model || !registry.hasConfiguredAuth(model)) throw new Error("omp_resume_model_unavailable");
   const explicitThinking = overrides?.thinking ?? (overrides?.model ? selected.thinkingLevel : undefined);
   const configured = explicitThinking ?? (context
