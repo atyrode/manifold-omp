@@ -971,7 +971,8 @@
           },
           {
             "locationId": "atyrode.omp.runs",
-            "access": "write"
+            "access": "write",
+            "outputOnly": true
           }
         ],
         "outputs": [

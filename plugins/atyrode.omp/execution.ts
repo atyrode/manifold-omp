@@ -1170,12 +1170,12 @@ async function sessionSilence(
  * owner could not seal is answered with a null receipt AND the word for which of those it
  * is; only a job this door never posted is refused.
  *
- * The `session` lease is created beneath `atyrode.omp.runs`, which every one-shot mounts
- * writable, and the owner withholds a seal until every overlapping writer exits: a
- * finished one-shot therefore reads back without a receipt while another one-shot that
- * was alive when this lease was created is still running. Only one-shots hold that
- * location — an operator's interactive terminal runs `atyrode.omp.launch`, which never
- * mounts it, so a day-long terminal cannot withhold a receipt.
+ * The `session` lease is created beneath `atyrode.omp.runs`, and the owner withholds a seal
+ * until every writer whose mount overlaps the lease exits. Every one-shot therefore declares
+ * that location `outputOnly`: the owner backs the lease with it but never mounts it, so no
+ * one-shot is a writer over another's transcript and a finished one-shot's receipt does not
+ * wait on a sibling that is still running. An operator's interactive terminal runs
+ * `atyrode.omp.launch`, which never declares it at all.
  *
  * That location is also BOUNDED and SHARED, and this door carries what that costs: a
  * session whose siblings filled it never wrote a transcript, and says so as
