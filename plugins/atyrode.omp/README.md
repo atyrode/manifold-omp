@@ -104,7 +104,7 @@ A one-shot's transcript is its `session` output lease, created beneath `atyrode.
 
 ## Gateway stream failures
 
-The gateway answers a failure with the one opaque word `gateway_unavailable` and writes the reason to its own stderr. A failure inside a model stream keeps the upstream's numeric status, and one the upstream gave no status is sent as 503. It also carries the SDK's own classification of that status (`errorId`), the one the client computes for the same status answered over HTTP, so the session's `retry` settings retry a 5xx or 429 instead of ending the session on its first transient fault. A receipt's `failure` still reads `gateway_unavailable`.
+The gateway answers a failure with the one opaque word `gateway_unavailable` and writes the reason to its own stderr. A failure inside a model stream keeps the upstream's numeric status, and one the upstream gave no status is sent as 503. It also carries the SDK's own classification of that status (`errorId`), the one the client computes for the same status answered over HTTP, so the session's `retry` settings retry a 5xx or 429 instead of ending the session on its first transient fault. The failure carries none of the turn's content, so the client cannot see what the turn already produced: a failure after text, a tool call, an image, a server tool or any unknown block gets no classification and ends the session as before, because a retry would produce that output again. Only a turn that produced nothing but thinking or whitespace is retried. A receipt's `failure` still reads `gateway_unavailable`.
 
 ## Explicit existing-Run tools
 

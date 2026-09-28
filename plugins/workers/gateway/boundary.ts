@@ -29,6 +29,19 @@ export function safeFailure(status: number, reason = "unspecified"): Response {
   return Response.json({ error: { type: "gateway_unavailable", message: "gateway_unavailable" } }, { status, headers: { "Cache-Control": "no-store" } });
 }
 
+/**
+ * Whether a turn's content holds output that a retry would produce a second time: the text, tool
+ * calls, images and server tools omp's own retry refuses to replay, and any block this boundary
+ * does not know. Only thinking and whitespace are safe to produce again.
+ */
+function repeatsOnRetry(content: unknown): boolean {
+  return Array.isArray(content) && content.some(block => {
+    const { type, text } = (block ?? {}) as { type?: unknown; text?: unknown };
+    if (type === "thinking" || type === "redactedThinking") return false;
+    return !(type === "text" && typeof text === "string" && text.trim().length === 0);
+  });
+}
+
 /** The SDK has no server error-projection hook. This service-local pi-native
  * boundary forwards only to its fixed SDK listener, never a caller-chosen URL.
  * Successful canonical events are unchanged; failed messages cannot expose SDK
@@ -36,6 +49,11 @@ export function safeFailure(status: number, reason = "unspecified"): Response {
 export function safeNativeStream(body: ReadableStream<Uint8Array>, model: Model<Api>): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let buffered = "";
+  // The projected failure carries no content, so the client cannot see for itself what the turn
+  // already produced. omp decides from a failed turn's content whether a retry is safe, and
+  // would otherwise take a transient failure after committed text or a server tool for one
+  // that produced nothing, and repeat that output.
+  let produced = false;
   const failure = { type: "error", reason: "error", error: {
     role: "assistant", content: [], api: model.api, provider: model.provider, model: model.id,
     stopReason: "error", errorMessage: "gateway_unavailable", timestamp: 0,
@@ -62,7 +80,7 @@ export function safeNativeStream(body: ReadableStream<Uint8Array>, model: Model<
           // owner nothing to read. Same rule as `safeFailure`: a fixed label and numbers only,
           // never a body, header, URL, bearer or upstream message.
           const reported = (event.error ?? event.message ?? event.partial ?? {}) as {
-            stopReason?: unknown; errorStatus?: unknown; errorId?: unknown; status?: unknown; code?: unknown; usage?: unknown;
+            stopReason?: unknown; errorStatus?: unknown; errorId?: unknown; status?: unknown; code?: unknown; usage?: unknown; content?: unknown;
           };
           const numeric = (...values: unknown[]): string => {
             const found = values.find(value => typeof value === "number" && Number.isFinite(value));
@@ -82,19 +100,22 @@ export function safeNativeStream(body: ReadableStream<Uint8Array>, model: Model<
           // to retry, so the session exited on its first transient fault. `errorId` is therefore
           // the SDK's own classification of the projected failure, exactly what the client
           // computes when this boundary answers the same status over HTTP (`AuthGatewayError`):
-          // a number, like the status, never the upstream's text.
+          // a number, like the status, never the upstream's text. A turn that already produced
+          // output a retry would repeat gets none, and ends as it did before.
           const status = [reported.errorStatus, reported.status].find((value): value is number =>
             typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599) ?? 503;
+          produced ||= repeatsOnRetry(reported.content);
           // Missing usage stays missing: inventing zero would make a charged failure look free.
           const projected = { ...failure, error: { ...failure.error,
             ...(usage.success ? { usage: usage.data } : {}),
             errorStatus: status,
-            errorId: classify(new AuthGatewayError(failure.error.errorMessage, status)),
+            ...(produced ? {} : { errorId: classify(new AuthGatewayError(failure.error.errorMessage, status)) }),
           } };
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(projected)}\n\ndata: [DONE]\n\n`));
           controller.terminate();
           return;
         }
+        produced ||= repeatsOnRetry(event.partial?.content);
         controller.enqueue(encoder.encode(frame + "\n\n"));
       }
       if (Buffer.byteLength(buffered) > FRAME_LIMIT) throw unavailable();
