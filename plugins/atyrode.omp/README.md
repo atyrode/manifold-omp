@@ -102,6 +102,10 @@ A one-shot registers, and hands its gateway the credentials of, only the provide
 
 A one-shot's transcript is its `session` output lease, created beneath `atyrode.omp.runs`. The owner seals a lease only after every writer whose mount overlaps it has exited, so `atyrode.omp.session` declares that location `{ access: "write", outputOnly: true }`, as `atyrode.omp.material-session` does: the owner backs the lease with it and never mounts it, and a finished session's receipt no longer waits for every one-shot started beside it. This needs an owner with output-only location support (native owner RPC 42); an older owner cannot run the operation.
 
+## Gateway stream failures
+
+The gateway answers a failure with the one opaque word `gateway_unavailable` and writes the reason to its own stderr. A failure inside a model stream keeps the upstream's numeric status, and one the upstream gave no status is sent as 503. It also carries the SDK's own classification of that status (`errorId`), the one the client computes for the same status answered over HTTP, so the session's `retry` settings retry a 5xx or 429 instead of ending the session on its first transient fault. A receipt's `failure` still reads `gateway_unavailable`.
+
 ## Explicit existing-Run tools
 
 Only ordinary one-shot `reviewSession` and `runSession` accept `agentTools: { runId }`.

@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { writeSync } from "node:fs";
 import { z } from "zod";
+import { AuthGatewayError, classify } from "@oh-my-pi/pi-ai/error";
 import { parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import { unavailable } from "./inputs.ts";
@@ -74,12 +75,21 @@ export function safeNativeStream(body: ReadableStream<Uint8Array>, model: Model<
           const stop = reported.stopReason;
           writeSync(2, `gateway_stream_refused ${event.type} ${typeof stop === "string" ? stop : "none"} ${numeric(reported.errorStatus, reported.status)} ${numeric(reported.errorId, reported.code)}\n`);
           const usage = reportedUsage.safeParse(reported.usage);
-          const status = [reported.errorStatus, reported.status].find(value =>
-            typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599);
+          // A failure the upstream gave no status for is this gateway not serving right now: 503,
+          // the status the boundary gives every failure of its own it cannot attribute. The status
+          // alone does not make omp retry: its retry classifies a failed turn by `errorId` and
+          // text, the text here is one fixed word, and a bare 503 beside it classified as nothing
+          // to retry, so the session exited on its first transient fault. `errorId` is therefore
+          // the SDK's own classification of the projected failure, exactly what the client
+          // computes when this boundary answers the same status over HTTP (`AuthGatewayError`):
+          // a number, like the status, never the upstream's text.
+          const status = [reported.errorStatus, reported.status].find((value): value is number =>
+            typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599) ?? 503;
           // Missing usage stays missing: inventing zero would make a charged failure look free.
           const projected = { ...failure, error: { ...failure.error,
             ...(usage.success ? { usage: usage.data } : {}),
-            ...(status === undefined ? {} : { errorStatus: status }),
+            errorStatus: status,
+            errorId: classify(new AuthGatewayError(failure.error.errorMessage, status)),
           } };
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(projected)}\n\ndata: [DONE]\n\n`));
           controller.terminate();

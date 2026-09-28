@@ -1,4 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
+import * as AIError from "@oh-my-pi/pi-ai/error";
+import { streamPiNative } from "@oh-my-pi/pi-ai/providers/pi-native-client";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import { startPrivateBoundary, type PrivateBoundary } from "../workers/gateway/boundary.ts";
 import { ABSENT_MODEL_ID, UNLISTED_MODEL_ID, UNLISTED_PUBLISHED_ID } from "./fixtures/models.ts";
@@ -54,6 +56,28 @@ test("a rate limit reaches the client as a rate limit, so it backs off instead o
 test("an upstream rejection of the gateway's own credential keeps its status", async () => {
   const response = await stream(401);
   expect(response.status).toBe(401);
+});
+
+test("a stream failure the upstream gave no status reaches the session as a 503 it retries", async () => {
+  // What the gateway's SDK listener streams when its own call fails before any status exists,
+  // such as the owner's authorization of that call timing out. The session saw one opaque word
+  // and no status, omp did not retry it, and the session exited 0 on its first transient fault.
+  upstream = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => new Response(`data: ${JSON.stringify({ type: "error", reason: "error", error: {
+      role: "assistant", content: [], stopReason: "error", errorMessage: "fixture-upstream-detail",
+    } })}\n\n`, { headers: { "content-type": "text/event-stream" } }),
+  });
+  boundary = startPrivateBoundary({ url: upstream.url.origin, bearer: "internal" }, BEARER, models, new AbortController().signal);
+  // The session's own provider transport, from the SDK release the one-shot CLI bundles.
+  const client = { ...models.get(MODEL)!, baseUrl: `http://127.0.0.1:${boundary.port}` } as Model<Api>;
+  const message = await streamPiNative(client, { messages: [] }, { apiKey: BEARER }).result();
+  expect(message).toMatchObject({ stopReason: "error", errorMessage: "gateway_unavailable", errorStatus: 503, content: [] });
+  expect(JSON.stringify(message)).not.toContain("fixture-upstream-detail");
+  // omp's `TurnRecovery.isRetryableError`: a failed turn that emitted nothing is retried exactly
+  // when the SDK classifies it retriable.
+  expect(AIError.retriable(AIError.classifyMessage(message))).toBe(true);
 });
 
 test("an unpublished model is refused before any upstream hop", async () => {
