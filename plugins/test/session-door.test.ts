@@ -633,6 +633,21 @@ test("readSession answers a run whose transcript was never sealed", async () => 
 });
 
 /**
+ * The owner seals a transcript only once every writer whose mount overlaps its lease has exited.
+ * A one-shot that mounted `atyrode.omp.runs` writable overlapped every sibling's lease, so a
+ * session that had finished read back as never sealed while any one-shot started beside it was
+ * still running: 1,203 Babel reviews ended that way (`output_collection_refused`) in two days.
+ */
+test("no operation mounts the location one-shot transcripts are leased from", () => {
+  const mounted = Object.entries(machine.operations)
+    .filter(([, operation]) => operation.locations.some(location => location.locationId === RUNS_LOCATION_ID && !location.outputOnly))
+    .map(([id]) => id);
+  expect(mounted).toEqual([]);
+  // Still declared: the owner creates the `session` lease only beneath a location the job holds.
+  expect(oneShot.locations).toContainEqual({ locationId: RUNS_LOCATION_ID, access: "write", outputOnly: true });
+});
+
+/**
  * #43: FOUR SESSIONS THAT PRODUCED NOTHING, AND WHY EACH ONE PRODUCED NOTHING.
  *
  * Measured on the preview: six one-shots in one container, a shared 1 MiB run destination

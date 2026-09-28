@@ -93,7 +93,7 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
       const home = join(directory, "home");
       const inputs = join(directory, "inputs");
       const outputs = join(directory, "outputs");
-      for (const path of [home, inputs, outputs, join(outputs, "session"), join(home, "workspace"), join(home, "tmp"), join(home, "omp-sessions"), join(home, "omp-runs"), join(home, ".omp/agent")])
+      for (const path of [home, inputs, outputs, join(outputs, "session"), join(home, "workspace"), join(home, "tmp"), join(home, "omp-sessions"), join(home, ".omp/agent")])
         await mkdir(path, { recursive: true, mode: 0o700 });
       const fresh = scenario.startsWith("fresh-");
       const material = scenario.startsWith("material-");
@@ -165,9 +165,9 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
           .map(arg => "literal" in arg ? arg.literal : String(input[arg.input]));
         await sealed(join(inputs, "launch"), { argv, sessionId, ...(oneShot || material ? {
           environment: operation.environment,
-          locations: material ? [] : operation.locations!.map(location => {
-            const guestPath = location.locationId === "atyrode.omp.workspace" ? "/home/job/workspace"
-              : location.locationId === "atyrode.omp.runs" ? "/home/job/omp-runs" : undefined;
+          // As the owner does: an output-only location backs the output lease and is never mounted.
+          locations: operation.locations!.filter(location => !location.outputOnly).map(location => {
+            const guestPath = location.locationId === "atyrode.omp.workspace" ? "/home/job/workspace" : undefined;
             check(guestPath, "print-location");
             return { ...location, guestPath };
           }),

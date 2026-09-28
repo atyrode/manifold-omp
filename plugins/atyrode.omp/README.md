@@ -98,6 +98,10 @@ Startup is not a one-shot's last selection. Task agents (`@task`, `@smol`), an e
 
 A one-shot registers, and hands its gateway the credentials of, only the providers its configuration names: those of its model roles, fallback chains and task-agent model overrides, which for a configuration that names only a default is that model's provider. The review still covers the pool the caller chose; the posted job receives every credential that pool holds for those providers and none for any other. Each provider a session registers makes its own `models` discovery call through the native service proxy, one authorization for the owner to decide, and the gateway lists every model its pool reaches under each of them, serving a provider-qualified id with that model's own provider's credential. A whole pool therefore cost one discovery call per pool provider and let the three selections above reach a provider nobody configured. They now resolve within the configured providers or not at all: an agent definition that names another provider's model no longer resolves, and compaction's last resort is the largest-context model of the configured providers. Within a configured provider they can still choose another of its models: a text-only OpenRouter model's image question goes to an OpenRouter vision model, and OpenRouter's catalog carries its own routes to other vendors' models, served with the OpenRouter credential.
 
+## One-shot transcripts
+
+A one-shot's transcript is its `session` output lease, created beneath `atyrode.omp.runs`. The owner seals a lease only after every writer whose mount overlaps it has exited, so `atyrode.omp.session` declares that location `{ access: "write", outputOnly: true }`, as `atyrode.omp.material-session` does: the owner backs the lease with it and never mounts it, and a finished session's receipt no longer waits for every one-shot started beside it. This needs an owner with output-only location support (native owner RPC 42); an older owner cannot run the operation.
+
 ## Explicit existing-Run tools
 
 Only ordinary one-shot `reviewSession` and `runSession` accept `agentTools: { runId }`.
