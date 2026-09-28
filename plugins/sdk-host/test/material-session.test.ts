@@ -24,8 +24,10 @@ test.each(["/summarize the sealed material", "Summarize the sealed material"])(
   writeFileSync(join(root, "quoted dir", "quoted sentinel.txt"), quoted);
   const requests: PiNativeParsedRequest[] = [];
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+    // The row the SDK gateway's `/v1/models` writes, `<provider>/<id>`. No bundled catalog carries
+    // `fixture`, so this listing is the only way the configured model reaches the session.
     if (request.method === "GET" && new URL(request.url).pathname === "/v1/models")
-      return Response.json({ object: "list", data: [{ id: "openai/gpt-5", object: "model", owned_by: "openai",
+      return Response.json({ object: "list", data: [{ id: "fixture/openai/gpt-5", object: "model", owned_by: "fixture",
         api: "openai-completions", display_name: "gpt-5", context_length: 200_000, max_output_tokens: 8192, input_modalities: ["text"] }] });
     requests.push(parseRequest(await request.json(), request.headers));
     const message: AssistantMessage = {
@@ -66,6 +68,8 @@ test.each(["/summarize the sealed material", "Summarize the sealed material"])(
     // file-mention message, no expanded template, no sentinel or credential bytes. The SDK's own
     // request-time date/cwd reminder rides ahead of the first user turn and is not persisted.
     expect(requests).toHaveLength(1);
+    // Exactly the configured model, as the listing named it: the gateway serves this id as `fixture/openai/gpt-5`.
+    expect(requests[0]!.modelId).toBe("fixture/fixture/openai/gpt-5");
     const [source, trigger, ...extra] = requests[0]!.context.messages;
     expect(extra).toEqual([]);
     expect([source?.role, trigger?.role, trigger && text(trigger)]).toEqual(["user", "user", MATERIAL_TRIGGER]);
