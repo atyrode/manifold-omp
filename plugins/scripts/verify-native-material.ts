@@ -116,7 +116,11 @@ export async function verifyNativeMaterial({ root, target, hub, producerJobId, m
       automation: JSON.stringify({ mode: "restricted", toolNames: [], delegation: "disabled" }), resumeOverrides: "{}",
       isolation: JSON.stringify({ mode: "material-only", file: "transcript-map.json", sha256: hash(materialText), bytes: Buffer.byteLength(materialText) }),
     };
-    for (const source of ["material-extra", "material"] as const) {
+    // Each live job fits the verifier's 1 MiB tmpfs; retaining these completed
+    // transcripts would exhaust it. Re-read every sealed result as scratch is reused.
+    for (let attempt = 0; attempt < 7; attempt++) {
+      const source = attempt === 0 ? "material-extra" : "material";
+      calls = 0;
       const jobId = randomUUID();
       const node = { kind: "job", machineId: target.machineId, operationId: MATERIAL_SESSION_OPERATION_ID, jobId };
       await ownerAction(hub, "engine.jobs.execute", { machineId: target.machineId, pluginId: OMP_PLUGIN_ID,
@@ -140,7 +144,9 @@ export async function verifyNativeMaterial({ root, target, hub, producerJobId, m
           const page = await ownerAction(hub, "engine.jobs.output", { node: { kind: "output",
             machineId: target.machineId, operationId: MATERIAL_SESSION_OPERATION_ID, jobId,
             outputId: stderr.outputId }, offset: 0, maxBytes: stderr.bytes }) as { data: string };
-          const failure = Buffer.from(page.data, "base64").toString("utf8").split("\n")
+          const stderrText = Buffer.from(page.data, "base64").toString("utf8");
+          check(!/ENOSPC|no space left on device/i.test(stderrText), "destination-full");
+          const failure = stderrText.split("\n")
             .find(line => /^omp_(?:resume|sdk|restricted|material)_[a-z_]+$/.test(line));
           if (failure) check(false, failure.replaceAll("_", "-"));
         }

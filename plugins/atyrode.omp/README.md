@@ -100,7 +100,7 @@ A one-shot registers, and hands its gateway the credentials of, only the provide
 
 ## One-shot transcripts
 
-A one-shot's transcript is its `session` output lease, created beneath `atyrode.omp.runs`. The owner seals a lease only after every writer whose mount overlaps it has exited, so `atyrode.omp.session` declares that location `{ access: "write", outputOnly: true }`, as `atyrode.omp.material-session` does: the owner backs the lease with it and never mounts it, and a finished session's receipt no longer waits for every one-shot started beside it. This needs an owner with output-only location support (native owner RPC 42); an older owner cannot run the operation.
+A one-shot's transcript is its `session` output lease, created beneath `atyrode.omp.runs`. Both ordinary and material-only one-shots use `outputOnly` admission: the owner exposes only the fresh named lease, never the backing directory as a broad writer. The runs location also declares `temporary: true`, requiring native owner RPC 43. Each job gets private raw scratch, released only after descendant closure and durable terminal-result publication; sealed transcripts remain available to `readSession`. Failed or cancelled jobs release their raw scratch under the same proof, while uncertain closure retains it and closes admission. Interactive workspaces, persistent session state and legacy raw directories are unchanged. Upgrade the owner before installing this declaration; older owners refuse it rather than falling back to retained or mounted storage.
 
 ## Gateway stream failures
 
