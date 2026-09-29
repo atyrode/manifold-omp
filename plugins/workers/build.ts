@@ -497,7 +497,10 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
     const result = await Bun.build({
       entrypoints: [join(root, source)], outdir: outputDirectory,
       naming: { entry: `${name}.js`, asset: `${name}-assets/[name]-[hash].[ext]` },
-      target: "bun", format: "esm", splitting: false, minify: true,
+      // Bun 1.4.2's identifier minifier can change identical-input worker bytes.
+      // Keep syntax optimization and compact output without unstable binding names.
+      target: "bun", format: "esm", splitting: false,
+      minify: { whitespace: true, syntax: true, identifiers: false },
       sourcemap: "none", packages: "bundle", plugins: [...(legacyPlugin ? [legacyPlugin] : []), plugin],
       define: { "process.env.PI_DOCS_EMBED": JSON.stringify(docs) },
       // The resolver binds OMP packages to the selected prepared graph and
