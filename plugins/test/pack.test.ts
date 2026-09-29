@@ -73,6 +73,8 @@ async function priorFamily(destination: string): Promise<Record<string, string>>
   return snapshot(destination);
 }
 
+// Compare the private copied graph with the original source in another process and cwd.
+// Output ordering alone does not exercise checkout-layout or identifier-minifier drift.
 async function packWithReorderedAssets(destination: string) {
   const script = `
     const originalBuild = Bun.build;
@@ -86,15 +88,15 @@ async function packWithReorderedAssets(destination: string) {
       }
       return result;
     };
-    const { fixture, destination } = JSON.parse(process.env.OMP_PACK_REORDER);
-    const { pack } = await import(fixture + "/pack.ts");
+    const { source, destination } = JSON.parse(process.env.OMP_PACK_REORDER);
+    const { pack } = await import(source + "/pack.ts");
     const bundles = await pack(destination);
     if (!reordered) throw new Error("Compiler output ordering was not exercised");
     process.stdout.write(JSON.stringify(bundles));
   `;
   const child = Bun.spawn([process.execPath, "--no-install", "--eval", script], {
-    cwd: fixture, stdin: "ignore", stdout: "pipe", stderr: "pipe",
-    env: { ...process.env, OMP_PACK_REORDER: JSON.stringify({ fixture, destination }) },
+    cwd: source, stdin: "ignore", stdout: "pipe", stderr: "pipe",
+    env: { ...process.env, OMP_PACK_REORDER: JSON.stringify({ source, destination }) },
   });
   const [exit, stdout, stderr] = await Promise.all([
     child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
