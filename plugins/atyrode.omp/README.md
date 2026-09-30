@@ -176,6 +176,12 @@ A key with `agentTools` refuses `omp_posting_key_agent_tools_unsupported`: a Run
 
 ## Repository gate
 
+The SDK pin and reusable workflow reference advance together. The protocol 48 pin retains
+the existing native and SDK-host contracts while making the upstream machine-core inventory
+and credential-bound lifecycle metadata available to downstream consumers. Its ordinary
+installed-bundle gate and preview live-state verification passed before propagation; the
+local native gate below still has to prove the newly packed family, not just the host.
+
 Use Bun **1.4.2** and a clean sibling `manifold` checkout at the revision in `plugins/MANIFOLD_REV`. From `plugins/`:
 
 ```sh
@@ -199,6 +205,8 @@ The credential and ordinary CLI baseline stays at **18.1.14**. `plugins/package.
 The separately invoked `sdkHost` alone uses unpatched published **18.2.7**, under the independent `plugins/sdk-host/` package and frozen lock. Stock print and RPC implementations are public deep exports from `@oh-my-pi/pi-coding-agent`. Explicit optional peer imports are closed by `proxy-agent@8.0.1`, `supports-color@7.2.0` and `yauzl@3.4.0`; the PAC dependency is pinned to `quickjs-wasi@2.2.0`. This graph has no `patchedDependencies`; any such declaration refuses preparation.
 
 `bun run deps:prepare` prepares both graphs independently with Bun 1.4.2, fresh caches, frozen locks, disabled lifecycle scripts, and private copied dependency trees. Each graph owns its full-tree receipt, lock pin, SDK version, loader digest and native artifact identity. Cross-graph receipt reuse, dependency escape and installed-byte changes refuse packaging. There is no workspace hoisting between roots. Packaging is install-free and credential-free; it reads only prepared trees, owned sources and committed runtime data. The baseline and SDK-host compiler projects resolve their respective actual package graphs; SDK-only type paths are scoped to the SDK project, never global aliases.
+
+Worker compilation uses whitespace compaction without syntax or identifier minification. A matching SDK pin does not waive byte equality: the package regression rebuilds from a private dependency copy and a separate process, compares every published byte, and reports the first differing SDK-host source span when an archive changes. Disabling only identifier minification did not hold that boundary under the protocol-48 SDK; both optional transformations remain off. Native declarations and the final artifact-size budgets still apply unchanged.
 
 Native ingress verifies the service bearer and optional legacy SHA-256 verifiers, with a separate control-bearer check, before forwarding to a private authenticated SDK listener. Native quiesce stops SDK producers immediately. The SDK owns data-operation admission: already-admitted writes finish, while a pre-handoff request receives 503 without mutation. Native lifecycle accounting retains a raw provider operation beyond the SDK's request deadline, without letting an unrelated settled or SDK-handled failure poison drain. The full credential scenarios preserve mutation ordering, restart, ingress, shutdown, quiescence and gateway revocation assertions. The separate SDK-host graph does not claim to repair published 18.2.7 credential behavior.
 
