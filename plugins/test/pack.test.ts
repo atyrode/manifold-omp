@@ -167,23 +167,44 @@ for (const destinationKind of ["default", "caller"] as const) {
         const before = JSON.parse(Buffer.from(firstBytes[file]!, "base64").toString());
         const after = JSON.parse(Buffer.from(secondBytes[file]!, "base64").toString());
         differingFields(before, after, file, differences);
-        const member = "omp-sdkHost.tar.gz";
-        if (typeof before.files?.[member] === "string" && typeof after.files?.[member] === "string" &&
-          before.files[member] !== after.files[member]) {
-          const entries = await Promise.all([before.files[member], after.files[member]].map(async encoded => {
-            const archive = await new Bun.Archive(Buffer.from(encoded, "base64")).files("sdkHost.js");
-            const entry = archive.get("sdkHost.js");
-            if (!entry) throw new Error("SDK-host archive is missing its declared entry");
-            return await entry.text();
-          }));
-          const [left, right] = entries as [string, string];
-          let offset = 0;
-          while (offset < Math.min(left.length, right.length) && left[offset] === right[offset]) offset++;
-          differences.push({ path: `${file}/files/${member}/sdkHost.js`, offset,
-            before: { length: left.length, excerpt: left.slice(Math.max(0, offset - 160), offset + 320) },
-            after: { length: right.length, excerpt: right.slice(Math.max(0, offset - 160), offset + 320) } });
+        for (const member of Object.keys(before.files ?? {})) {
+          if (!member.endsWith(".tar.gz") || typeof before.files[member] !== "string" ||
+            typeof after.files?.[member] !== "string" || before.files[member] === after.files[member]) continue;
+          const archives = await Promise.all([before.files[member], after.files[member]].map(encoded =>
+            new Bun.Archive(Buffer.from(encoded, "base64")).files()));
+          for (const [entryName, leftEntry] of archives[0]!) {
+            const rightEntry = archives[1]!.get(entryName);
+            if (!entryName.endsWith(".js") || !rightEntry) continue;
+            const [left, right] = await Promise.all([leftEntry.text(), rightEntry.text()]);
+            if (left === right) continue;
+            let offset = 0;
+            while (offset < Math.min(left.length, right.length) && left[offset] === right[offset]) offset++;
+            differences.push({ path: `${file}/files/${member}/${entryName}`, offset,
+              before: { length: left.length, excerpt: left.slice(Math.max(0, offset - 160), offset + 320) },
+              after: { length: right.length, excerpt: right.slice(Math.max(0, offset - 160), offset + 320) } });
+            for (const [side, javascript] of [["before", left], ["after", right]] as const) {
+              const compressed = Buffer.from(Bun.gzipSync(Buffer.from(javascript))).toString("base64");
+              const sha256 = new Bun.CryptoHasher("sha256").update(javascript).digest("hex");
+              const parts = Math.ceil(compressed.length / 8192);
+              for (let part = 0; part < parts; part++)
+                console.error("package_determinism_source", JSON.stringify({
+                  destinationKind, member, entryName, side, sha256, part, parts,
+                  content: compressed.slice(part * 8192, (part + 1) * 8192),
+                }));
+            }
+          }
         }
         console.error("package_determinism_mismatch", JSON.stringify(differences));
+      }
+      if (Object.keys(firstBytes).some(file => firstBytes[file] !== secondBytes[file])) {
+        const retained = await mkdtemp(join(tmpdir(), "omp-pack-mismatch-"));
+        for (const [name, bytes] of [["before", firstBytes], ["after", secondBytes]] as const) {
+          const directory = join(retained, name);
+          await mkdir(directory);
+          await Promise.all(Object.entries(bytes).map(([file, content]) =>
+            writeFile(join(directory, file), Buffer.from(content, "base64"))));
+        }
+        console.error("package_determinism_retained", retained);
       }
       expect(secondBytes).toEqual(firstBytes);
     }, 360_000);

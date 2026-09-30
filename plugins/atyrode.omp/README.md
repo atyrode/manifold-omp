@@ -177,10 +177,11 @@ A key with `agentTools` refuses `omp_posting_key_agent_tools_unsupported`: a Run
 ## Repository gate
 
 The SDK pin and reusable workflow reference advance together. The protocol 48 pin retains
-the existing native and SDK-host contracts while making the upstream machine-core inventory
-and credential-bound lifecycle metadata available to downstream consumers. Its ordinary
-installed-bundle gate and preview live-state verification passed before propagation; the
-local native gate below still has to prove the newly packed family, not just the host.
+the existing native and SDK-host contracts and adds an operator-selected finite
+`onJobSettled` lease. Unselected hooks retain their two-second limit; the selected lease
+uses only the settled job's credential and closes further side effects on completion or
+expiry. The local native gate below still has to prove the newly packed family, not just
+the upstream host.
 
 Use Bun **1.4.2** and a clean sibling `manifold` checkout at the revision in `plugins/MANIFOLD_REV`. From `plugins/`:
 
