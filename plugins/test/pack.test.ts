@@ -164,8 +164,25 @@ for (const destinationKind of ["default", "caller"] as const) {
         if (!file.endsWith(".json") || firstBytes[file] === secondBytes[file] ||
           firstBytes[file] === undefined || secondBytes[file] === undefined) continue;
         const differences: unknown[] = [];
-        differingFields(JSON.parse(Buffer.from(firstBytes[file]!, "base64").toString()),
-          JSON.parse(Buffer.from(secondBytes[file]!, "base64").toString()), file, differences);
+        const before = JSON.parse(Buffer.from(firstBytes[file]!, "base64").toString());
+        const after = JSON.parse(Buffer.from(secondBytes[file]!, "base64").toString());
+        differingFields(before, after, file, differences);
+        const member = "omp-sdkHost.tar.gz";
+        if (typeof before.files?.[member] === "string" && typeof after.files?.[member] === "string" &&
+          before.files[member] !== after.files[member]) {
+          const entries = await Promise.all([before.files[member], after.files[member]].map(async encoded => {
+            const archive = await new Bun.Archive(Buffer.from(encoded, "base64")).files("sdkHost.js");
+            const entry = archive.get("sdkHost.js");
+            if (!entry) throw new Error("SDK-host archive is missing its declared entry");
+            return await entry.text();
+          }));
+          const [left, right] = entries as [string, string];
+          let offset = 0;
+          while (offset < Math.min(left.length, right.length) && left[offset] === right[offset]) offset++;
+          differences.push({ path: `${file}/files/${member}/sdkHost.js`, offset,
+            before: { length: left.length, excerpt: left.slice(Math.max(0, offset - 160), offset + 320) },
+            after: { length: right.length, excerpt: right.slice(Math.max(0, offset - 160), offset + 320) } });
+        }
         console.error("package_determinism_mismatch", JSON.stringify(differences));
       }
       expect(secondBytes).toEqual(firstBytes);
