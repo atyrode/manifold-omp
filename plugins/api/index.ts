@@ -63,6 +63,8 @@ export const VALIDATE_WORKSPACE_OPERATION_ID = `${OMP_PLUGIN_ID}.validate-worksp
 export const INVENTORY_OPERATION_ID = `${OMP_PLUGIN_ID}.inventory`;
 export const BENCHMARK_OPERATION_ID = `${OMP_PLUGIN_ID}.benchmark`;
 export const LAUNCH_OPERATION_ID = `${OMP_PLUGIN_ID}.launch`;
+/** Fresh editable, never submitted, SDK-host interactive handoff. */
+export const INTERACTIVE_HANDOFF_OPERATION_ID = `${OMP_PLUGIN_ID}.interactive-handoff-v1`;
 export const RESUME_OPERATION_ID = `${OMP_PLUGIN_ID}.resume`;
 /** The one-shot sibling of `launch`: no stdin, its own bounded output lease. */
 export const SESSION_OPERATION_ID = `${OMP_PLUGIN_ID}.session`;
@@ -284,6 +286,20 @@ export const SessionInputSchema = executionInput.extend({
   inferenceLimits: JobInferenceLimitsSchema.refine(value => Object.keys(value).length > 0, "empty inference limits").optional(),
   agentTools: AgentToolsSelectionSchema.optional(),
 });
+/** Private launch input, not a durable profile or a one-shot prompt alias. */
+export const InteractiveHandoffInputSchema = SessionInputSchema.omit({
+  isolation: true, inferenceLimits: true, agentTools: true,
+}).extend({
+  handoffVersion: z.literal(1),
+  handoffKey: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}(?![\s\S])/),
+  sourceDigest: digest.length(64),
+  initialDraft: z.string().max(PROMPT_MAX_BYTES).refine(
+    value => new TextEncoder().encode(value).byteLength <= PROMPT_MAX_BYTES,
+    "initialDraft exceeds 44 KiB",
+  ),
+  prompt: z.literal(""),
+});
+export type InteractiveHandoffInput = z.infer<typeof InteractiveHandoffInputSchema>;
 /** Durable dials share the exact validated launch settings; paths and credentials
  * are deliberately not part of a profile. Defaults are reviewed at each launch. */
 export const OmpHarnessProfileSchema = SessionInputSchema.omit({
@@ -328,6 +344,55 @@ export const PreparedHarnessSessionSchema = PreparedSessionSchema.safeExtend({
   value.runtime.session.sessionId === value.session.sessionId,
   { message: "harness session does not match admitted runtime" },
 );
+export const InteractiveHandoffReviewSchema = SessionReviewSchema.omit({
+  isolation: true, inferenceLimits: true, agentTools: true,
+}).extend({
+  operationId: z.literal(INTERACTIVE_HANDOFF_OPERATION_ID),
+  handoffVersion: z.literal(1),
+  sourceDigest: digest,
+  draftDigest: digest,
+  compositionDigest: digest,
+});
+/** A client report is not a native observation or permission to open a terminal. */
+export const InteractiveHandoffReportSchema = z.discriminatedUnion("state", [
+  z.strictObject({ claimId: z.uuid(), state: z.literal("clientReported"), terminalId: id }),
+  z.strictObject({ claimId: z.uuid(), state: z.literal("unavailable") }),
+]);
+const handoffAssociation = z.strictObject({
+  handoffVersion: z.literal(1),
+  destination: TargetSchema,
+  session: OmpSessionRefSchema,
+  claimId: z.uuid(),
+  reviewDigest: digest,
+});
+export const PreparedInteractiveHandoffSchema = z.discriminatedUnion("state", [
+  handoffAssociation.extend({
+    state: z.literal("claimed"),
+    runtime: TerminalRuntimeSchema.safeExtend({
+      pluginId: z.literal(OMP_PLUGIN_ID),
+      operationId: z.literal(INTERACTIVE_HANDOFF_OPERATION_ID),
+      session: OmpSessionRefSchema,
+    }),
+  }),
+  handoffAssociation.extend({ state: z.literal("unknown") }),
+  handoffAssociation.extend({
+    state: z.literal("clientReported"), terminalId: id, verification: z.literal("unverified"),
+  }),
+  handoffAssociation.extend({ state: z.literal("unavailable"), terminalId: id.optional() }),
+]).refine(value =>
+  value.session.machineId === value.destination.machineId &&
+  (value.state !== "claimed" || (
+    value.runtime.machineId === value.destination.machineId &&
+    value.runtime.input.sessionId === value.session.sessionId &&
+    value.runtime.input.prompt === "" && value.runtime.input.hasPrompt === false &&
+    value.runtime.input.planYolo === false && typeof value.runtime.input.payload === "string" &&
+    value.runtime.session.harness === value.session.harness &&
+    value.runtime.session.machineId === value.session.machineId &&
+    value.runtime.session.sessionId === value.session.sessionId
+  )), { message: "handoff association does not match admitted runtime" });
+export type InteractiveHandoffReview = z.infer<typeof InteractiveHandoffReviewSchema>;
+export type InteractiveHandoffReport = z.infer<typeof InteractiveHandoffReportSchema>;
+export type PreparedInteractiveHandoff = z.infer<typeof PreparedInteractiveHandoffSchema>;
 export const ResumeSessionInputSchema = z.strictObject({
   machineId: id,
   sessionId: z.uuid(),
@@ -481,6 +546,17 @@ export const rootActionSchemas = {
   prepareSession: {
     input: SessionInputSchema.omit({ agentTools: true }).extend({ reviewDigest: digest }),
     result: PreparedSessionSchema,
+  },
+  reviewInteractiveHandoff: { input: InteractiveHandoffInputSchema, result: InteractiveHandoffReviewSchema },
+  /** Only the CAS winner receives a runtime. All retries/reports retain the same
+   * association without authorizing another createTerminal, even after response loss.
+   * Code must verify current public TerminalInfo with the same credential on every open. */
+  prepareInteractiveHandoff: {
+    input: InteractiveHandoffInputSchema.extend({
+      reviewDigest: digest,
+      report: InteractiveHandoffReportSchema.optional(),
+    }),
+    result: PreparedInteractiveHandoffSchema,
   },
   /** The same reviewed session, placed as a governed one-shot job instead of a terminal.
    * The job registers, and its gateway holds credentials for, only the pool providers its

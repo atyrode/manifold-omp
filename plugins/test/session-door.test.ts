@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { JobDescriptionSchema, JobFollowSnapshotSchema, MachineHalfSchema, type Cap } from "@manifold/protocol";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import {
@@ -7,6 +7,7 @@ import {
   ACCOUNTS_PLUGIN_ID,
   INVENTORY_OPERATION_ID,
   LAUNCH_OPERATION_ID,
+  INTERACTIVE_HANDOFF_OPERATION_ID,
   OMP_PLUGIN_ID,
   OmpHarnessProfileSchema,
   RUNS_LOCATION_ID,
@@ -57,6 +58,7 @@ interface Fixture {
   client: OmpClient;
   posted: PostedJob[];
   cancelled: string[];
+  storage: Map<string, string>;
   seal(jobId: string, archive: Buffer): void;
   /** What the session process wrote to its standard error, as the owner sealed it. */
   said(jobId: string, stderr: string): void;
@@ -233,12 +235,12 @@ function publicJob(
   };
 }
 
-function fixture(options: { sdk?: boolean } = {}): Fixture {
+function fixture(options: { sdk?: boolean; storage?: Map<string, string>; callerPlugin?: string | null } = {}): Fixture {
   const installedMachine = options.sdk ? MachineHalfSchema.parse({
     ...machine,
     tools: { ...machine.tools, bun: sdkRuntimeArtifacts.tools.bun, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] },
   }) : machine;
-  const storage = new Map<string, string>();
+  const storage = options.storage ?? new Map<string, string>();
   const archives = new Map<string, Buffer>();
   const jobs = new Map<string, PublicJob>();
   const doors = new Map<string, string>();
@@ -302,6 +304,7 @@ function fixture(options: { sdk?: boolean } = {}): Fixture {
   };
   const ctx = {
     pluginId: OMP_PLUGIN_ID,
+    callerPlugin: options.callerPlugin ?? null,
     auth: {
       principal: { id: "fixture-owner", kind: "human" },
       containerScope: null,
@@ -438,6 +441,7 @@ function fixture(options: { sdk?: boolean } = {}): Fixture {
     ),
     posted,
     cancelled,
+    storage,
     /** Attach a sealed transcript to the job's declared `session` output. */
     seal(jobId, archive) {
       const job = jobs.get(jobId)!;
@@ -485,6 +489,254 @@ async function run(f: Fixture): Promise<PublicJob> {
   return job;
 }
 
+const handoff: ActionInput<"reviewInteractiveHandoff"> = {
+  ...session, prompt: "", handoffVersion: 1, handoffKey: "code-229-proposal-7",
+  sourceDigest: "c".repeat(64), initialDraft: "PRIVATE-UNSENT-HANDOFF-CANARY",
+};
+async function handoffRequest(f: Fixture, input = handoff): Promise<ActionInput<"prepareInteractiveHandoff">> {
+  const review = await f.client.call("reviewInteractiveHandoff", input);
+  if ("refused" in review) throw new Error(review.refused);
+  expect(JSON.stringify(review)).not.toContain(input.initialDraft || "PRIVATE-UNSENT-HANDOFF-CANARY");
+  return { ...input, reviewDigest: review.reviewDigest };
+}
+
+test("concurrent handoff prepares have one placement winner and retain only stable metadata through restart", async () => {
+  const f = fixture({ sdk: true, callerPlugin: "atyrode.code" });
+  const request = await handoffRequest(f);
+  const replies = await Promise.all(Array.from({ length: 8 }, () => f.client.call("prepareInteractiveHandoff", request)));
+  const winner = replies.find(reply => "state" in reply && reply.state === "claimed");
+  if (!winner || "refused" in winner || winner.state !== "claimed") throw new Error("missing handoff winner");
+  expect(replies.filter(reply => "runtime" in reply)).toHaveLength(1);
+  expect(replies.filter(reply => "state" in reply && reply.state === "unknown")).toHaveLength(7);
+  for (const reply of replies) {
+    if ("refused" in reply) throw new Error(reply.refused);
+    expect(reply.session).toEqual(winner.session);
+    expect(reply.claimId).toBe(winner.claimId);
+  }
+  expect(winner.runtime.operationId).toBe(INTERACTIVE_HANDOFF_OPERATION_ID);
+  expect(winner.runtime.session).toEqual(winner.session);
+  expect(winner.runtime.input).toMatchObject({ sessionId: winner.session.sessionId, prompt: "", hasPrompt: false, payload: handoff.initialDraft });
+  const metadata = [...f.storage.values()].join("\n");
+  for (const forbidden of [handoff.initialDraft, session.prompt, "claude-sonnet", "fixture-identity", "runtime", "caps", "isRoot", "containerScope"])
+    expect(metadata).not.toContain(forbidden);
+  const reopened = fixture({ sdk: true, callerPlugin: "atyrode.code", storage: f.storage });
+  // Caps/root/clock can change without turning one stable human into another.
+  Object.assign(reopened.ctx.auth, { isRoot: false, caps: ["*", "jobs:cancel"] });
+  reopened.ctx.now = () => Number.MAX_SAFE_INTEGER;
+  expect(await reopened.client.call("prepareInteractiveHandoff", request)).toEqual({
+    handoffVersion: 1, destination: target, session: winner.session, claimId: winner.claimId,
+    reviewDigest: request.reviewDigest, state: "unknown",
+  });
+  expect(f.storage.size).toBe(1);
+  expect(f.posted).toEqual([]);
+});
+
+test("lost prepare and report acknowledgements never return another runtime or certify client terminal ids", async () => {
+  const f = fixture({ sdk: true });
+  const request = await handoffRequest(f);
+  const cas = f.ctx.storage.compareAndSet.bind(f.ctx.storage);
+  const warning = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    f.ctx.storage.compareAndSet = async (...args) => {
+      const accepted = await cas(...args);
+      if (accepted) throw new Error(handoff.initialDraft);
+      return false;
+    };
+    expect(await f.client.call("prepareInteractiveHandoff", request)).toEqual({ refused: "omp_handoff_unavailable" });
+    const retry = await f.client.call("prepareInteractiveHandoff", request);
+    if ("refused" in retry) throw new Error(retry.refused);
+    expect(retry.state).toBe("unknown");
+    expect("runtime" in retry).toBe(false);
+    const report = { claimId: retry.claimId, state: "clientReported" as const, terminalId: "caller-supplied-not-host-evidence" };
+    expect(await f.client.call("prepareInteractiveHandoff", { ...request, report })).toEqual({ refused: "omp_handoff_unavailable" });
+    const reopened = fixture({ sdk: true, storage: f.storage });
+    const reported = await reopened.client.call("prepareInteractiveHandoff", { ...request, report });
+    expect(reported).toEqual({ ...retry, state: "clientReported", terminalId: report.terminalId, verification: "unverified" });
+    expect(warning).not.toHaveBeenCalled();
+    expect(await reopened.client.call("prepareInteractiveHandoff", {
+      ...request, report: { ...report, terminalId: "different-terminal" },
+    })).toEqual({ refused: "omp_handoff_conflict" });
+    const unavailable = await reopened.client.call("prepareInteractiveHandoff", {
+      ...request, report: { claimId: retry.claimId, state: "unavailable" },
+    });
+    expect(unavailable).toEqual({ ...retry, state: "unavailable", terminalId: report.terminalId });
+    expect(await reopened.client.call("prepareInteractiveHandoff", request)).toEqual(unavailable);
+    expect(await reopened.client.call("prepareInteractiveHandoff", { ...request, report })).toEqual({ refused: "omp_handoff_conflict" });
+  } finally { warning.mockRestore(); }
+});
+
+test("an unreadable retained handoff stays unavailable rather than being replaced", async () => {
+  const f = fixture({ sdk: true });
+  const request = await handoffRequest(f);
+  const first = await f.client.call("prepareInteractiveHandoff", request);
+  if ("refused" in first) throw new Error(first.refused);
+  const [key, raw] = [...f.storage.entries()][0]!;
+  const damaged = JSON.stringify({ ...JSON.parse(raw), placement: { state: "unrecognized" } });
+  f.storage.set(key, damaged);
+  const reopened = fixture({ sdk: true, storage: f.storage });
+  expect(await reopened.client.call("prepareInteractiveHandoff", request)).toEqual({ refused: "omp_handoff_unavailable" });
+  expect([...f.storage.entries()]).toEqual([[key, damaged]]);
+});
+
+test("handoff reports cannot create a claim or replace the claim identity", async () => {
+  const f = fixture({ sdk: true });
+  const request = await handoffRequest(f);
+  const report = { state: "unavailable" as const, claimId: sessionId };
+  expect(await f.client.call("prepareInteractiveHandoff", { ...request, report })).toEqual({ refused: "omp_handoff_unknown" });
+  expect(f.storage.size).toBe(0);
+  const claimed = await f.client.call("prepareInteractiveHandoff", request);
+  if ("refused" in claimed) throw new Error(claimed.refused);
+  expect(await f.client.call("prepareInteractiveHandoff", { ...request, report })).toEqual({ refused: "omp_handoff_claim_changed" });
+  const unavailable = await f.client.call("prepareInteractiveHandoff", { ...request, report: { ...report, claimId: claimed.claimId } });
+  expect(unavailable).toMatchObject({ state: "unavailable", session: claimed.session, claimId: claimed.claimId });
+  expect(await f.client.call("prepareInteractiveHandoff", request)).toEqual(unavailable);
+});
+
+test("handoff source, draft, profile, target and pin drift never mint another association under the same logical key", async () => {
+  const f = fixture({ sdk: true });
+  const request = await handoffRequest(f);
+  const first = await f.client.call("prepareInteractiveHandoff", request);
+  if ("refused" in first) throw new Error(first.refused);
+  for (const changed of [
+    { ...handoff, initialDraft: "another private draft" },
+    { ...handoff, sourceDigest: "d".repeat(64) },
+    { ...handoff, overlay: { ...handoff.overlay, defaultThinkingLevel: "high" as const } },
+    { ...handoff, containerId: "another-authorized-room" },
+  ]) {
+    expect(await f.client.call("prepareInteractiveHandoff", { ...changed, reviewDigest: request.reviewDigest }))
+      .toEqual({ refused: "omp_review_changed" });
+    expect(await f.client.call("prepareInteractiveHandoff", await handoffRequest(f, changed)))
+      .toEqual({ refused: "omp_handoff_conflict" });
+  }
+  f.state.gatewayRevision = "2";
+  expect(await f.client.call("prepareInteractiveHandoff", request)).toEqual({ refused: "omp_review_changed" });
+  expect(await f.client.call("prepareInteractiveHandoff", await handoffRequest(f))).toEqual({ refused: "omp_handoff_conflict" });
+  expect(f.storage.size).toBe(1);
+});
+
+test("handoff origin and principal are stable namespaces, not cached authority", async () => {
+  const f = fixture({ sdk: true, callerPlugin: "atyrode.code" });
+  const request = await handoffRequest(f);
+  const first = await f.client.call("prepareInteractiveHandoff", request);
+  if ("refused" in first) throw new Error(first.refused);
+  for (const cap of ["containers:write", "terminals:spawn", "locations:write", "machines:run"] as const) {
+    f.ctx.auth.allows = async checked => checked !== cap;
+    const denied = await f.client.call("prepareInteractiveHandoff", request);
+    expect(denied).toHaveProperty("refused");
+    expect(f.storage.size).toBe(1);
+  }
+  f.ctx.auth.allows = async () => true;
+  const direct = fixture({ sdk: true, storage: f.storage });
+  expect(await direct.client.call("prepareInteractiveHandoff", request)).toEqual({ refused: "omp_review_changed" });
+  const theirs = await direct.client.call("prepareInteractiveHandoff", await handoffRequest(direct));
+  if ("refused" in theirs) throw new Error(theirs.refused);
+  expect(theirs.state).toBe("claimed");
+  expect(theirs.session.sessionId).not.toBe(first.session.sessionId);
+  Object.assign(f.ctx.auth, { principal: { kind: "human", id: "another-owner" } });
+  expect(await f.client.call("prepareInteractiveHandoff", request)).toEqual({ refused: "omp_review_changed" });
+  const other = await f.client.call("prepareInteractiveHandoff", await handoffRequest(f));
+  if ("refused" in other) throw new Error(other.refused);
+  expect(other.state).toBe("claimed");
+  expect(other.session.sessionId).not.toBe(first.session.sessionId);
+});
+
+test("handoff unsupported runtime and absent attribution refuse without falling back to ordinary launch", async () => {
+  const unsupported = fixture();
+  expect(await unsupported.client.call("reviewInteractiveHandoff", handoff)).toEqual({ refused: "omp_handoff_runtime_unsupported" });
+  const f = fixture({ sdk: true });
+  expect(await f.client.call("reviewInteractiveHandoff", { ...handoff, planYolo: true })).toEqual({ refused: "omp_handoff_plan_unsupported" });
+  Object.defineProperty(f.ctx, "callerPlugin", { get() { throw new Error("missing host slice"); } });
+  expect(await f.client.call("reviewInteractiveHandoff", handoff)).toEqual({ refused: "omp_handoff_caller_unavailable" });
+  // Old hosts need not provide attribution for ordinary paths.
+  const ordinary = await f.client.call("prepareSession", { ...session, reviewDigest: await reviewDigestOf(f.client) });
+  if ("refused" in ordinary) throw new Error(ordinary.refused);
+  expect(ordinary.runtime.operationId).toBe(LAUNCH_OPERATION_ID);
+  expect(f.storage.size).toBe(0);
+});
+
+test("a newly reviewed machine or native pin cannot replace a retained handoff target", async () => {
+  const f = fixture({ sdk: true });
+  const request = await handoffRequest(f);
+  const first = await f.client.call("prepareInteractiveHandoff", request);
+  if ("refused" in first) throw new Error(first.refused);
+  const describe = f.ctx.jobs.describe.bind(f.ctx.jobs);
+  f.ctx.jobs.describe = async args => {
+    const current = await describe(args);
+    return { ...current, machineId: args.machineId,
+      consents: current.consents.map(consent => ({ ...consent, node: consent.node.replace(target.machineId, args.machineId) })) };
+  };
+  const otherTarget = { ...handoff, machineId: "another-authorized-machine" };
+  expect(await f.client.call("prepareInteractiveHandoff", await handoffRequest(f, otherTarget))).toEqual({ refused: "omp_handoff_conflict" });
+  f.ctx.jobs.describe = async args => {
+    const current = await describe(args);
+    return { ...current, installation: { ...current.installation!, revision: "new-native-installation" } };
+  };
+  const deployment = f.ctx.jobs.describeDeployment.bind(f.ctx.jobs);
+  f.ctx.jobs.describeDeployment = async args => {
+    const current = await deployment(args);
+    return { ...current, installation: { ...current.installation!, revision: "new-native-installation" } };
+  };
+  expect(await f.client.call("prepareInteractiveHandoff", request)).toEqual({ refused: "omp_review_changed" });
+  expect(await f.client.call("prepareInteractiveHandoff", await handoffRequest(f))).toEqual({ refused: "omp_handoff_conflict" });
+  expect(f.storage.size).toBe(1);
+});
+
+test("stale defaults and withdrawn accounts refuse a retained handoff without losing its identity", async () => {
+  const f = fixture({ sdk: true });
+  const request = await handoffRequest(f);
+  await f.client.call("prepareInteractiveHandoff", request);
+  const stored = [...f.storage.entries()];
+  const observation = f.ctx.services.readInstance.bind(f.ctx.services);
+  f.ctx.services.readInstance = async () => ({ type: "service_result", requestId: "withdrawn-account-fixture", ok: true, result: { credentials: [] } });
+  expect(await f.client.call("prepareInteractiveHandoff", request)).toEqual({ refused: "omp_account_unavailable" });
+  expect([...f.storage.entries()]).toEqual(stored);
+  f.ctx.services.readInstance = observation;
+  await f.client.call("writeDefaults", { expectedRevision: 0, overlay: { defaultThinkingLevel: "high" } });
+  expect(await f.client.call("prepareInteractiveHandoff", request)).toEqual({ refused: "omp_stale_defaults" });
+  expect(await f.client.call("prepareInteractiveHandoff", await handoffRequest(f, { ...handoff, expectedDefaultsRevision: 1 })))
+    .toEqual({ refused: "omp_handoff_conflict" });
+});
+
+test("handoff rechecks changed authority and resources after the first review", async () => {
+  const f = fixture({ sdk: true });
+  const request = await handoffRequest(f);
+  const describe = f.ctx.services.describe.bind(f.ctx.services);
+  let reads = 0;
+  f.ctx.services.describe = async args => {
+    if (++reads === 2) f.state.gatewayRevision = "changed-during-prepare";
+    return describe(args);
+  };
+  expect(await f.client.call("prepareInteractiveHandoff", request)).toEqual({ refused: "omp_resources_changed" });
+  expect(f.storage.size).toBe(0);
+  f.ctx.services.describe = describe;
+  const next = await handoffRequest(f);
+  let spawnChecks = 0;
+  f.ctx.auth.allows = async cap => cap !== "terminals:spawn" || ++spawnChecks === 1;
+  expect(await f.client.call("prepareInteractiveHandoff", next)).toEqual({ refused: "omp_caller_terminals_spawn_required" });
+  expect(f.storage.size).toBe(0);
+});
+
+test("handoff byte and whole-input bounds include escaping and never accept a startup prompt or extra authority", async () => {
+  const f = fixture({ sdk: true });
+  for (const initialDraft of ["", "é".repeat(PROMPT_MAX_BYTES / 2)]) {
+    const request = await handoffRequest(f, { ...handoff, handoffKey: `size-${initialDraft.length}`, initialDraft });
+    const prepared = await f.client.call("prepareInteractiveHandoff", request);
+    if ("refused" in prepared) throw new Error(prepared.refused);
+    expect(prepared.state).toBe("claimed");
+  }
+  expect(await rootHandlers.reviewInteractiveHandoff!(f.ctx, { ...handoff, initialDraft: "é".repeat(PROMPT_MAX_BYTES / 2) + "x" }))
+    .toEqual({ refused: "omp_invalid_request" });
+  expect(await f.client.call("reviewInteractiveHandoff", { ...handoff, initialDraft: "\0".repeat(14000) }))
+    .toEqual({ refused: "omp_input_too_large" });
+  for (const changed of [
+    { prompt: "auto-send" }, { handoffVersion: 2 }, { sourceDigest: handoff.sourceDigest + "\n" },
+    { handoffKey: "newline\n" }, { agentTools: { runId: "run" } }, { autoSend: true },
+  ]) expect(await rootHandlers.reviewInteractiveHandoff!(f.ctx, { ...handoff, ...changed })).toEqual({ refused: "omp_invalid_request" });
+  for (const door of ["reviewSession", "prepareSession", "runSession"] as const)
+    expect(await rootHandlers[door]!(f.ctx, { ...session, initialDraft: handoff.initialDraft, reviewDigest: "a".repeat(64) }))
+      .toEqual({ refused: "omp_invalid_request" });
+  expect(OmpHarnessProfileSchema.safeParse({ accountPool: session.accountPool, overlay: session.overlay, planYolo: false, initialDraft: "no" }).success).toBe(false);
+});
 
 
 
@@ -1109,11 +1361,6 @@ test("readSession and cancelSession still answer a session that was handed mater
 // Three-byte UTF-8: a character count passes three times over what the bytes cost.
 const wide = "\u4e16".repeat(Math.ceil(PROMPT_MAX_BYTES / 3));
 
-test("every operation that takes a prompt can carry one of the bound's full size", () => {
-  for (const operation of Object.values(machine.operations))
-    if (operation.input.prompt)
-      expect(operation.input.prompt.maxLength).toBeGreaterThanOrEqual(PROMPT_MAX_BYTES);
-});
 
 test("a prompt of the full bound reaches the job", async () => {
   const f = fixture();

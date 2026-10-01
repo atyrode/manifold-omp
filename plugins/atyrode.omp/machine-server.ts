@@ -33,6 +33,7 @@ import gatewayManifest from "./gateway/manifest.json";
 export type OmpContext = Pick<
   GuestCtx,
   | "pluginId"
+  | "callerPlugin"
   | "jobs"
   | "services"
   | "newId"

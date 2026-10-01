@@ -1,6 +1,6 @@
 import { closeSync } from "node:fs";
 import { connect, type Socket } from "node:net";
-import { copyFile, readFile, readdir, readlink, stat, writeFile } from "node:fs/promises";
+import { copyFile, readFile, readdir, readlink, stat, unlink, writeFile } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
 import { join } from "node:path";
 import { WorkerProgressSchema, type WorkerLocation, type WorkerProgress } from "@manifold/protocol";
@@ -16,6 +16,10 @@ const scenario = process.argv[2]!;
 const sessions = "/home/job/omp-sessions";
 const saved = join(sessions, "saved.jsonl");
 const fresh = scenario.startsWith("fresh-");
+const handoff = scenario.startsWith("fresh-handoff-");
+const editedHandoff = "EDITED-USER-HANDOFF-BUFFER";
+const continuedHandoff = "CONTINUED-SAME-HANDOFF-SESSION";
+const restoredHandoff = "RESTORED-USER-EDITED-DRAFT";
 const material = scenario.startsWith("material-");
 const oneShot = scenario.startsWith("print-");
 const toolProof = scenario.startsWith("tools-");
@@ -33,8 +37,15 @@ let gateway: Bun.Server<undefined> | undefined;
 let failure: string | undefined;
 let requests = 0;
 let discoveries = 0;
+let allPosts = 0;
+let titlePosts = 0;
+let explicitSends = 0;
+let preSendPosts = 0;
+let discoveriesBeforeSend = 0;
+let firstSendUserStreams = 0;
 let cancelled = false;
 let terminal = "";
+let handoffRecording = "";
 let stderr = "";
 let serverError: string | undefined;
 let completed = false;
@@ -238,6 +249,20 @@ try {
       try { createSessionFile(root, launch!.sessionId, "/home/job/workspace"); }
       finally { closeSync(root); }
     }
+    if (scenario === "fresh-handoff-restored") {
+      // Stage a normal local saved draft with the public SDK. Remove only this
+      // fixture's empty header so the real native launcher still creates it
+      // exclusively; the saved local draft is deliberately left in place.
+      const root = openSessionsRoot();
+      let name: string;
+      try { name = createSessionFile(root, launch!.sessionId, "/home/job/workspace"); }
+      finally { closeSync(root); }
+      const path = join(sessions, name);
+      const manager = await SessionManager.open(path, sessions, undefined, { throwIfMissing: true });
+      await manager.saveDraft(restoredHandoff);
+      await manager.close();
+      await unlink(path);
+    }
   }
   if (resumed && scenario !== "missing") {
     await copyFile("/proof-state/baseline.jsonl", saved);
@@ -280,6 +305,12 @@ try {
   const expectedThinking = scenario === "auto" ? "auto" : native ? "low" : ["model-suffix", "thinking-only", "both", "disabled", "cancel"].includes(scenario) ? "off" : "high";
   gateway = Bun.serve({ hostname: "127.0.0.1", port: 38457, idleTimeout: 0, async fetch(request) {
     try {
+      // Account for ALL POSTs, including tiny-title and malformed routes, before
+      // any classification. A title call before Send is still an inference leak.
+      if (request.method === "POST") {
+        allPosts++;
+        if (handoff && explicitSends === 0) { preSendPosts++; check(false, "handoff-post-before-send"); }
+      }
       check(request.headers.get("authorization") === `Bearer ${["SYNTHETIC", "LOCAL", "FIXTURE", "NOT", "A", "CREDENTIAL"].join("-")}`, "synthetic-capability");
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === "/v1/models") {
@@ -301,10 +332,28 @@ try {
       // The CLI may title a new session separately. This reply cannot satisfy
       // the primary-turn completion or ordinary tool-registry proof.
       if (native && !material && names.length === 0) {
-        message.content = [{ type: "text", text: "Fixture session title" }];
+        if (handoff) check(JSON.stringify(parsed.context.systemPrompt).includes("<title>"), "handoff-unclassified-auxiliary-post");
+        titlePosts++;
+        message.content = [{ type: "text", text: handoff ? "<title>Fixture session title</title>" : "Fixture session title" }];
         return response(message);
       }
       requests++;
+      if (handoff) {
+        check(explicitSends === requests && requests <= 2, "handoff-extra-user-stream");
+        check(parsed.modelId === expectedModel && names.includes("read"), "handoff-sdk-registry");
+        const users = parsed.context.messages.filter(message => message.role === "user");
+        // The stock SDK prepends a separate date/cwd context block on the wire.
+        // Check the exact user-authored block, not a concatenation with SDK context.
+        const text = (content: typeof users[number]["content"]) => typeof content === "string" ? content
+          : content.findLast(block => block.type === "text")?.text ?? "";
+        check(users.length === requests && text(users[0]!.content) === editedHandoff &&
+          (requests === 1 || text(users[1]!.content) === continuedHandoff), "handoff-edited-buffer-not-exact");
+        check(!JSON.stringify(parsed.context).includes("UNSENT-HANDOFF-PREFILL-CANARY") &&
+          !JSON.stringify(parsed.context).includes(restoredHandoff), "handoff-original-draft-submitted");
+        message.content = [{ type: "text", text: requests === 1 ? "HANDOFF-FIRST-SEND-COMPLETE" : "SDK-PROOF-COMPLETE" }];
+        completed = true;
+        return response(message);
+      }
       if (toolProof) {
         check(!rejectedTools, "rejected-tools-reached-model");
         check(parsed.modelId === expectedModel, "tool-model-selection");
@@ -431,6 +480,7 @@ try {
       terminal: { cols: 120, rows: 40, name: "xterm-256color", data(pty, data) {
       const text = new TextDecoder().decode(data);
       terminal = (terminal + text).slice(-256_000);
+      if (handoff) handoffRecording = (handoffRecording + text).slice(-256_000);
       // Standard terminal queries only; the stock renderer and editor are real.
       if (text.includes("\x1b[6n")) pty.write("\x1b[1;1R");
       if (text.includes("\x1b[c")) pty.write("\x1b[?1;2c");
@@ -542,6 +592,44 @@ try {
     await until(() => rpcResponses.has("after"), "rpc-stats-after-turn");
     check(rpcResponses.get("after")?.success && rpcResponses.get("after")?.data?.sessionId === launch!.sessionId, "rpc-identity-changed");
     child.kill("SIGTERM");
+  } else if (handoff) {
+    const expectedDraft = scenario === "fresh-handoff-empty" ? ""
+      : scenario === "fresh-handoff-restored" ? restoredHandoff : "UNSENT-HANDOFF-PREFILL-CANARY";
+    if (expectedDraft) await until(() => terminal.includes(expectedDraft), "handoff-prefill-not-rendered");
+    await inspectSdkChild();
+    check(Number(allPosts) === 0 && Number(requests) === 0, "handoff-inferred-at-init");
+    if (scenario === "fresh-handoff-restored")
+      check(!terminal.includes("UNSENT-HANDOFF-PREFILL-CANARY"), "handoff-overwrote-local-draft");
+    await writeFile(`/proof-state/${scenario}-prefill.ansi`, handoffRecording, { mode: 0o600 });
+    // These are explicit human gestures in the proof only. Production seeds via
+    // editor.setText and never writes terminal input.
+    terminal = "";
+    if (expectedDraft) {
+      child.terminal!.write("\x15");
+      await until(() => terminal.length > 0, "handoff-clear-not-rendered");
+      terminal = "";
+    }
+    child.terminal!.write(`\x1b[200~${editedHandoff}\x1b[201~`);
+    await until(() => terminal.includes(editedHandoff), "handoff-edit-not-rendered");
+    check(Number(allPosts) === 0 && Number(requests) === 0, "handoff-inferred-on-edit");
+    discoveriesBeforeSend = discoveries;
+    await writeFile(`/proof-state/${scenario}-edited.ansi`, handoffRecording, { mode: 0o600 });
+    explicitSends = 1;
+    child.terminal!.write("\r");
+    await until(() => completed && terminal.includes("HANDOFF-FIRST-SEND-COMPLETE"), "handoff-first-send-not-rendered");
+    check(Number(requests) === 1, "handoff-first-send-duplicated");
+    firstSendUserStreams = requests;
+    completed = false;
+    terminal = "";
+    child.terminal!.write(`\x1b[200~${continuedHandoff}\x1b[201~`);
+    await until(() => terminal.includes(continuedHandoff), "handoff-second-edit-not-rendered");
+    check(Number(requests) === 1, "handoff-second-edit-submitted");
+    explicitSends = 2;
+    child.terminal!.write("\r");
+    await until(() => completed && terminal.includes("SDK-PROOF-COMPLETE"), "handoff-continuation-not-rendered");
+    check(Number(requests) === 2, "handoff-continuation-duplicated");
+    await writeFile(`/proof-state/${scenario}-continued.ansi`, handoffRecording, { mode: 0o600 });
+    child.kill("SIGTERM");
   } else if (fresh) {
     await until(() => completed && terminal.includes("SDK-PROOF-COMPLETE"), "fresh-result-not-rendered");
     child.kill("SIGTERM");
@@ -634,7 +722,20 @@ try {
     check(context.messages.some(message => message.role === "assistant" && JSON.stringify(message.content).includes(resumed && scenario !== "auto" ? "SDK-PROOF-RESUMED-COMPLETE" : "SDK-PROOF-COMPLETE")), "durable-completion");
     check(context.models[manager.getLastModelChangeRole() ?? "default"] === expectedModel, "durable-model");
     check((context.configuredThinkingLevel ?? context.thinkingLevel) === expectedThinking, "durable-thinking");
-    if (native) check(context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-PROMPT")), "fresh-durable-prompt");
+    if (handoff) {
+      const users = context.messages.filter(message => message.role === "user");
+      const userText = (content: typeof users[number]["content"]) => typeof content === "string" ? content
+        : content.length === 1 && content[0]?.type === "text" ? content[0].text : "";
+      check(users.length === 2 && userText(users[0]!.content) === editedHandoff &&
+        userText(users[1]!.content) === continuedHandoff, "handoff-durable-edits");
+      check(!JSON.stringify(context.messages).includes("UNSENT-HANDOFF-PREFILL-CANARY") &&
+        !JSON.stringify(context.messages).includes(restoredHandoff), "handoff-durable-unsent-leak");
+      await writeFile(`/proof-state/${scenario}.json`, JSON.stringify({
+        scenario, sessionId: manager.getSessionId(), preSendPosts, discoveriesBeforeSend, discoveries,
+        explicitSends, firstSendUserStreams, userStreams: requests, titlePosts, allPosts,
+        credentialLookup: "SDK initialization before editor; unchanged",
+      }), { mode: 0o600 });
+    } else if (native) check(context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-PROMPT")), "fresh-durable-prompt");
     if (material) check(context.messages.some(message => message.role === "user" &&
       JSON.stringify(message.content).includes("MATERIAL-SOURCE-WITNESS")), "material-durable-source-missing");
     if (resumed && scenario !== "auto") check(context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-RESUMED-TURN")), "durable-resumed-turn");
