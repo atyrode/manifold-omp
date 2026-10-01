@@ -623,6 +623,16 @@ try {
       if (error instanceof NativeToolProofFailure) throw new VerificationFailure(`native-tools-${error.code}`);
       throw error;
     }
+    phase = "native-interactive-handoff";
+    // SDK modules must load only after this child validates its private environment.
+    const { verifyNativeHandoff, NativeHandoffProofFailure } = await import("./verify-native-handoff.ts");
+    try {
+      await verifyNativeHandoff({ root, server, target, hub, expectedDefaultsRevision: changed.revision,
+        broker: { origin: `http://${clientAccess.bind}`, bearer: clientBearer }, call });
+    } catch (error) {
+      if (error instanceof NativeHandoffProofFailure) throw new VerificationFailure(`native-handoff-${error.code}`);
+      throw error;
+    }
     if (!process.env.OMP_VERIFY_CONSUMER_MODULE)
       check(!(await roster(hub)).some(row => row.manifest.id === "atyrode.code" || row.manifest.id.startsWith("atyrode.code.")),
         "positive-worker-introduced-code-dependency");

@@ -13,7 +13,7 @@ import { OmpRpcActivity, OmpSendInputSchema, rpcFrames, RPC_FRAME_BYTES } from "
 import { ADMISSION_CONTEXT_BYTES, writeAdmissionContext, type AdmissionContextFile } from "./admission.ts";
 import { dispatchOmpModelRequest, OmpModelToolInputSchema } from "./model.ts";
 import { validateSkillInputs } from "./skills.ts";
-import { readAutomation } from "./sdk-inputs.ts";
+import { readAutomation, readSessionInput } from "./sdk-inputs.ts";
 import { forwardOmpOutput, type ReportOmpProgress } from "./progress.ts";
 import { createAgentToolRelay } from "./agent-tools.ts";
 
@@ -109,6 +109,9 @@ export async function runOmpNative(context: WorkerContext): Promise<boolean> {
   const options = process.argv.slice(3, separator < 0 ? undefined : separator);
   const print = options.includes("-p");
   const materialOnly = options.includes("--material-only");
+  const handoff = options.includes("--interactive-handoff-v1");
+  if (handoff && (print || materialOnly || options.length !== 1 || separator >= 0 ||
+    readSessionInput("prompt", 0) !== "")) throw new Error("omp_handoff_mode_unsupported");
   if (materialOnly && (!print || skills.mode !== "disabled" || options.includes("--plan-yolo")))
     throw new Error("omp_material_policy_invalid");
   const automation = readAutomation();
@@ -116,6 +119,7 @@ export async function runOmpNative(context: WorkerContext): Promise<boolean> {
   if (options.includes("--agent-tools") !== (agentTools !== undefined) ||
     (agentTools && (!print || options.includes("--plan-yolo"))))
     throw new Error("omp_agent_tools_mode_unsupported");
+  if (handoff && agentTools) throw new Error("omp_handoff_mode_unsupported");
   let sessionFile: string | undefined;
   if (!print || agentTools) {
     const id = agentTools?.sessionId ?? SessionIdSchema.parse(inputText("sessionId", 36));
@@ -123,10 +127,10 @@ export async function runOmpNative(context: WorkerContext): Promise<boolean> {
     try { sessionFile = prepareSessionFile(root, id, "/home/job/workspace", false); }
     finally { closeSync(root); }
   }
-  if (materialOnly || agentTools || automation.mode === "restricted" || skills.mode !== "preserve") {
+  if (handoff || materialOnly || agentTools || automation.mode === "restricted" || skills.mode !== "preserve") {
     if (options.includes("--plan-yolo")) throw new Error("omp_skills_plan_unsupported");
     const child = spawn("/runtime/bin/bun", ["--no-env-file", "--no-install", "--config=/dev/null", "/runtime/bin/sdkHost",
-      materialOnly ? "material-print" : print ? "print" : "interactive", ...(sessionFile ? [sessionFile] : [])], {
+      handoff ? "interactive-handoff-v1" : materialOnly ? "material-print" : print ? "print" : "interactive", ...(sessionFile ? [sessionFile] : [])], {
       cwd: "/inputs", env: ompEnvironment,
       stdio: agentTools ? ["inherit", "pipe", "inherit", "ipc"] : print ? ["inherit", "pipe", "inherit"] : "inherit",
     });

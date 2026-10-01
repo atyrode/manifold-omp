@@ -33,7 +33,7 @@ if (source === undefined) {
   ]);
   if (packCode !== 0)
     throw new Error(`consumer package failed: ${packError.trim()}`);
-  source = `file:${join(root, "atyrode-manifold-omp-0.1.0.tgz")}`;
+  source = `file:${join(root, "atyrode-manifold-omp-0.2.0.tgz")}`;
 }
 try {
   await writeFile(
@@ -65,7 +65,8 @@ try {
   );
   await writeFile(
     join(root, "consumer.ts"),
-    `import { OMP_PLUGIN_ID, PreparedSessionSchema, createOmpClient } from "@atyrode/manifold-omp";
+    `import { OMP_PLUGIN_ID, PreparedSessionSchema, createOmpClient, type InteractiveHandoffInput,
+  type PreparedInteractiveHandoff, type InteractiveHandoffReport } from "@atyrode/manifold-omp";
 const machineId = "consumer-machine";
 const parsed = PreparedSessionSchema.parse({
   destination: { containerId: "consumer-container", machineId },
@@ -82,6 +83,28 @@ const parsed = PreparedSessionSchema.parse({
 });
 const client = createOmpClient(async () => ({}));
 if (parsed.runtime.machineId !== machineId || typeof client.call !== "function") throw new Error("invalid public API");
+const input: InteractiveHandoffInput = {
+  containerId: "consumer-container", machineId, expectedDefaultsRevision: 0, accountPool: {},
+  overlay: {}, planYolo: false, prompt: "", handoffVersion: 1,
+  handoffKey: "consumer-claim", sourceDigest: "d".repeat(64), initialDraft: "private editable draft",
+};
+async function prepare() {
+  const review = await client.call("reviewInteractiveHandoff", input);
+  if ("refused" in review) return review;
+  const prepared = await client.call("prepareInteractiveHandoff", { ...input, reviewDigest: review.reviewDigest });
+  if ("refused" in prepared) return prepared;
+  return correlate(prepared);
+}
+function correlate(prepared: PreparedInteractiveHandoff) {
+  if (prepared.state === "claimed") return prepared.runtime;
+  if (prepared.state === "clientReported") {
+    const report: InteractiveHandoffReport = { state: "clientReported", claimId: prepared.claimId, terminalId: prepared.terminalId };
+    return { session: prepared.session, report, verification: prepared.verification };
+  }
+  return { state: prepared.state, session: prepared.session };
+}
+// Compiles in a DOM-only consumer: private requests are not executed by this packaging check.
+void prepare;
 console.log(OMP_PLUGIN_ID);
 `,
   );

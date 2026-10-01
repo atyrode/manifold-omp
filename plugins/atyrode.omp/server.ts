@@ -27,6 +27,8 @@ import {
   readBenchmark,
   reviewSession,
   prepareSession,
+  reviewInteractiveHandoff,
+  prepareInteractiveHandoff,
   runSession,
   adoptSession,
   readSession,
@@ -54,6 +56,8 @@ const implementations: RootHandlers = {
   readBenchmark,
   reviewSession,
   prepareSession,
+  reviewInteractiveHandoff,
+  prepareInteractiveHandoff,
   runSession,
   adoptSession,
   readSession,
@@ -104,6 +108,8 @@ const delegates: Record<RootAction, readonly Cap[]> = {
   readBenchmark: nativeObservationCaps,
   reviewSession: observedRuntimeCaps,
   prepareSession: observedRuntimeCaps,
+  reviewInteractiveHandoff: observedRuntimeCaps,
+  prepareInteractiveHandoff: observedRuntimeCaps,
   // Posting the one-shot job discharges that operation's own declared rights, not only
   // the observation `prepareSession` needs to hand a terminal its descriptor.
   runSession: [...observedRuntimeCaps, "network:host", "locations:write"],
@@ -121,6 +127,7 @@ const writes: Partial<Record<RootAction, true>> = {
   writeSkillCatalog: true,
   prepareWorkspace: true,
   prepareSession: true,
+  prepareInteractiveHandoff: true,
   runSession: true,
   // A retire settles a posting key by writing its retired marker.
   adoptSession: true,
@@ -141,6 +148,11 @@ export const handlers = Object.fromEntries(
         ) => Promise<unknown>;
         return rootActionSchemas[name].result.parse(await handler(ctx, args));
       } catch (error) {
+        // Handoff input is private. Unexpected host/storage errors may include
+        // request bytes; never copy those into diagnostics, even on response loss.
+        if ((name === "reviewInteractiveHandoff" || name === "prepareInteractiveHandoff") &&
+          !(error instanceof OmpRefusal) && !(error instanceof z.ZodError))
+          return { refused: "omp_handoff_unavailable" };
         return refusal(error);
       }
     },

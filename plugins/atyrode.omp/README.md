@@ -1,6 +1,166 @@
-# OMP session resumption
+# OMP interactive sessions
 
 The `atyrode.omp` plugin owns OMP transcript discovery and terminal resumption. An operator does not need an Agent or an Agent Run credential to resume a conversation.
+
+## Reviewed editable-unsent handoff v1
+
+The dedicated `reviewInteractiveHandoff` and `prepareInteractiveHandoff` doors implement
+[OMP #102](https://github.com/atyrode/manifold-omp/issues/102) for
+[Code #229](https://github.com/atyrode/code/issues/229). This is not `prepareSession` with a
+startup prompt: it reserves one fresh interactive session and seeds its editable buffer,
+without submitting a user message. Code owns provenance/profile review and
+`host.authoring.createTerminal`; Babel consumes Code's public launcher, not this private
+runtime composition. Direct authorized humans and SDK callers may use the same OMP doors.
+
+### Public request and review
+
+`InteractiveHandoffInput` is the existing fresh interactive target/default/account/overlay,
+`planYolo`, optional `skills` and optional `automation` input, plus:
+
+```typescript
+{
+  handoffVersion: 1,
+  handoffKey: string,  // 1–128 ASCII letters/digits/._:-; first character alphanumeric
+  sourceDigest: string, // exactly 64 lowercase hex characters, supplied by Code
+  initialDraft: string, // at most 45,056 UTF-8 bytes, including the empty string
+  prompt: "",          // never a draft alias or an instruction to submit
+}
+```
+
+The whole composed native input, including its generated session UUID and JSON escaping,
+still must fit 65,536 bytes (`omp_input_too_large`). `planYolo: true` refuses
+`omp_handoff_plan_unsupported`; the SDK route cannot silently discard those semantics.
+`isolation`, `agentTools`, `inferenceLimits`, `autoSend` and headless selectors are not fields
+on this strict contract. Ordinary, one-shot/material and Agent profile/task doors still reject
+`initialDraft`. Source provenance and source-reading authority belong to Code; a digest is
+not an authorization grant.
+
+Review returns the existing effective session composition/resource review plus
+`handoffVersion: 1`, `sourceDigest`, `draftDigest` (SHA-256 of exact UTF-8 draft bytes),
+`compositionDigest` and `reviewDigest`. It never echoes the draft. The review binds the
+stable principal kind/id, host-attested caller-plugin namespace (explicit `null` for direct
+entry), logical key, target, defaults, account selection, skills/policy, installed native
+declaration and exact native pins. Handoff composition excludes transient deployment progress
+and observation history, so an unchanged-pin reviewed redeployment preserves the claim.
+Current readiness, native consent and caller authority are still checked on every prepare;
+ordinary launch/resume review binding is unchanged.
+An old host without carried caller attribution refuses `omp_handoff_caller_unavailable`;
+ordinary launches do not start requiring that host field.
+
+### Single-winner placement and correlation
+
+Prepare takes that same private input plus `reviewDigest` and optional `report`. Every call,
+including a retry/report, rechecks current container write, terminal spawn, accounts,
+composition and native authority. Its common result is
+`{ handoffVersion: 1, destination, session: { harness: "atyrode.omp", machineId, sessionId },
+claimId, reviewDigest }`, with exactly one of:
+
+- `state: "claimed", runtime`: the atomic storage winner alone receives this fresh
+  placement-authorizing descriptor. This says nothing about a terminal having been created.
+- `state: "unknown"`: the same stable claim/session, **no runtime**. This includes a lost
+  first prepare response, uncertain terminal creation and restart before a report.
+- `state: "clientReported", terminalId, verification: "unverified"`: a client-supplied
+  identifier, **not** an observed placed/live terminal or a grant.
+- `state: "unavailable", terminalId?`: terminal placement is unavailable; no replacement
+  descriptor is issued. A previously reported terminal ID is retained.
+
+`report` is `{ claimId, state: "clientReported", terminalId }` or
+`{ claimId, state: "unavailable" }`. It cannot create an absent claim. Exact report retries
+are idempotent; changed claim IDs refuse `omp_handoff_claim_changed`, changed terminal
+IDs or attempts to revive an unavailable claim refuse `omp_handoff_conflict`.
+There is no confirmed-placed state because OMP has no same-credential public TerminalInfo
+reader in its GuestCtx. A report is never host evidence.
+
+Code must spend a claimed runtime on **at most one** create attempt, retain the safe
+claim/session association, and never retry creation after an uncertain response. On every
+open, use current authorized public TerminalInfo and placement evidence with the same
+credential: verify exact machine, harness, session UUID, live status and the target/home
+relationship. A canvas can mint a new terminal home composition, so its target container
+is not necessarily TerminalInfo.containerId; verify that authorized public association,
+not an invented equality. Missing, ambiguous, closed or mismatched evidence means precise
+unknown/unavailable, not a root terminal proxy, transcript-path lookup or operator cold resume.
+
+The metadata slot is keyed by stable principal + caller origin + key digest; its immutable
+target also guards against using the same logical key to mint an association elsewhere.
+Changed draft/source/profile/target/review/native pins conflict or refuse stale. Current
+caps/root/scope are rechecked authority, never identity or retained grants. Slots contain
+only identifiers, digests, native pins and truthful placement state. They have **no expiry,
+reclamation or replay transition**. A timeout, restart or lost CAS response does not mint a
+fresh UUID or return another runtime. Explicit plugin storage purge destroys this metadata;
+it is not a recovery/retry mechanism.
+
+### Native editor, inference and retention
+
+The separate `atyrode.omp.interactive-handoff-v1` operation shares the real native launcher.
+Its private input is the ordinary reviewed composition plus `sessionId`, literal empty
+`prompt`, `hasPrompt: false`, `planYolo: false`, and **`payload: initialDraft`**.
+`inputFiles.initialDraft = { input: "payload" }` delivers an owner-sealed
+`/inputs/initialDraft`; neither raw text nor a file path is placed in argv. `payload` is the
+host's existing sensitive-workload field: core terminal create/open traces are redacted,
+not opaque, and a new unrecognized native `initialDraft` field would leak into those traces.
+The public OMP request remains `initialDraft` and its actions remain opaque.
+
+The fixed `--interactive-handoff-v1` launcher flag always selects the supported fresh
+**18.2.7 SDK interactive editor**, even for an empty draft or preserve-skills profile.
+Missing/incompatible support refuses `omp_handoff_runtime_unsupported`; no blank CLI,
+headless, auto-send or keystroke fallback exists. The sealed reader checks immutable,
+regular, single-link, bounded fatal-UTF-8 input and stable held-file identity. After
+`await mode.init()`, the host uses public `editor.setText`, border update and normal render.
+It never calls prompt/submit/input injection in this path. An already-restored edited
+local draft takes precedence. Fresh native UUID creation remains exclusive, not a hidden
+Agent harness or a general resume. Ordinary 18.1.14 runtime/auth and cold resume are unchanged.
+
+The boundary is **no model turn before explicit Send**, not no initialization traffic.
+Normal model inventory GETs and credential/key lookup can precede editor rendering.
+The proof counts **every POST** before Send (must be zero); after an edit and explicit
+Send it counts exactly one edited-user stream separately from the SDK's existing tiny-title
+traffic. A second explicit Send continues the same session. Production title behavior is
+not disabled to make a counter pass.
+
+Manifold `runtime.input` and terminal `launch_recipe` are **durable private engine
+records**, not ephemeral: at Manifold `ba21463a250978dd382ff74271a9bdad4c328270`,
+job-service:5068–5160/job-store:181–192 and terminal-broker:1310–1342/stores:3944–3961
+persist them. Authorized terminal rendering and normal private session/local-draft records
+may contain text. Public Job/TerminalInfo/list/trace/error projections, OMP handoff metadata,
+Code shared configuration, navigation and public issue payloads must not. No new payload
+store or deferred-auth API disguises that existing retention.
+
+### Version, migration and upgrade order
+
+The public package and root plugin advance to **0.2.0**, root `dataVersion` **1.1**.
+`handoffs/v1/` is additive metadata. Existing `defaults/v1`, `skills/v1` and job provenance
+are left untouched; there is no data rewrite or no-op migration callback. Same-major
+native migration stamps the minor version while preserving unknown/client-reported claims
+through disable/enable and restart. Accounts/gateway versions and both SDK graphs are unchanged.
+
+Source regressions cover races, response loss, stable namespaces, refusal/staleness, reports,
+private metadata and byte ceilings. The real native verifier exercises hardened public doors,
+SQLite CAS, an actual native terminal, same-credential correlation and raw public projection
+canaries against a synthetic gateway. Its claim-reopen canary disables gateway, accounts and
+OMP in dependency-safe order, then enables the parent before its dependents. Because disabling
+also revokes native installations, it re-reviews/applies the same accounts and OMP installation
+pins without adding consents. The running broker job is captured before disable; after native
+reapproval restores governed-job visibility, the canary reads that exact job's final public
+receipt and waits for the unchanged broker configuration to become ready. A hidden or empty
+job list is never completion evidence.
+Only then does it retry the same unknown claim, requiring the same association and no second
+runtime. The packaged SDK PTY proof additionally covers editable
+prefill, empty-draft forced SDK and restored-draft precedence. All three wait for the stock
+terminal to enable bracketed paste before inspecting the SDK child or editing; readiness
+does not depend on a model label. Its optional
+`verifySdkHost({ ..., evidenceDirectory })` retains synthetic ANSI frames and JSON counters
+for completed cases.
+These are verification scenarios, not a claim of having run them on a published revision.
+
+Publication/native consumer pins remain gated by
+[#94](https://github.com/atyrode/manifold-omp/issues/94),
+[#99](https://github.com/atyrode/manifold-omp/issues/99) and
+[#100](https://github.com/atyrode/manifold-omp/issues/100), exact package/consumer evidence
+and independent review. No equality or native admission gate is weakened. Upgrade the
+compatible host/owner and exact OMP native deployment first, then Code's exact source pin,
+then Babel through Code. Keep Code #229 and Babel #249 open until real browser-to-native
+acceptance and published pin delivery; a source-only PTY proof is not that acceptance.
+
 
 ## Operator doors
 
@@ -197,6 +357,18 @@ OMP_VERIFY_SYSTEMD_MODE=user bun run verify
 ```
 
 `system.json` is an explicit native runtime-tool library declaration for the host. Verify creates its own disposable delegated systemd cgroup and, following Manifold's runtime gate, a private user/mount namespace with a 1 MiB, 4,096-inode tmpfs for governed output leases. `unshare` must be available; the reusable CI fixture already supplies static BusyBox. No host-root mount, fleet daemon or real credential value is involved. A failing native gate is not equivalent to successful packaging.
+
+The native tool receipt gate still requires one sealed journal, its exact Run/session
+association and exactly one result for every expected tool call. A cardinality failure
+reports only `native-tools-journal-<scenario>-<fixture-call>-results-<count>` in the final
+JSON receipt. Preserve that receipt to distinguish policy from cancellation and missing
+from replayed results; it contains no journal body, tool payload or credential. Disposable
+native state is still removed after confirmed cleanup, not retained as a diagnostic archive.
+The public handoff canary likewise reports fixed phase names instead of raw exception
+text. Editor failures include capped discovery/POST/user-stream counts (`d`, `p`, `u`,
+each capped at 9) and whether any terminal output was observed (`o`), or the worker's
+existing fixed `omp_*` refusal code. This diagnoses the failing boundary without
+retaining or disclosing the private editor/session contents.
 
 ## Published SDK packaging
 

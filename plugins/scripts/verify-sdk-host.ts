@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { JobOwnerConfigSchema, PluginBundleSchema, type JobOwnerConfig, type MachineArtifact } from "@manifold/protocol";
 import { deliveredArtifact, extractArtifact, verifyBundledArtifacts } from "../../../manifold/packages/plugin-kit/src/artifacts.ts";
@@ -11,6 +11,8 @@ export interface VerifySdkHostOptions {
   bubblewrap: string;
   systemBindings: JobOwnerConfig["runtimeTools"][string];
   bundlePath: string;
+  /** Optional synthetic ANSI frames and request counts for human inspection. */
+  evidenceDirectory?: string;
 }
 
 export class SdkHostVerificationFailure extends Error {
@@ -26,7 +28,7 @@ const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("h
  * server authorization. Artifact acquisition precedes the isolated network
  * namespace and uses public hash-pinned bytes, never an owner's installation.
  */
-export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePath }: VerifySdkHostOptions): Promise<void> {
+export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePath, evidenceDirectory }: VerifySdkHostOptions): Promise<void> {
   let phase = "prepare";
   const work = join(root, "sdk-host-proof");
   let active: Bun.Subprocess<"ignore", "pipe", "ignore"> | undefined;
@@ -83,6 +85,7 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
     await mkdir(join(work, "state"), { mode: 0o700 });
     const cases = ["selected", "disabled", "preserve", "auto", "model-only", "model-suffix", "thinking-only", "both", "missing-model", "missing-thinking", "incompatible", "changed", "missing", "rpc-restricted", "cancel",
       "fresh-cli-preserve", "fresh-sdk-selected", "fresh-sdk-disabled", "fresh-sdk-filtered", "fresh-rpc-selected",
+      "fresh-handoff-prefill", "fresh-handoff-empty", "fresh-handoff-restored",
       "print-cli-preserve", "print-sdk-selected",
       "material-valid", "material-tools", "material-extra", "material-digest", "material-utf8", "material-oversized",
       "tools-selected", "tools-omitted", "tools-description", "tools-schema", "tools-reserved-collision",
@@ -96,6 +99,7 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
       for (const path of [home, inputs, outputs, join(outputs, "session"), join(home, "workspace"), join(home, "tmp"), join(home, "omp-sessions"), join(home, ".omp/agent")])
         await mkdir(path, { recursive: true, mode: 0o700 });
       const fresh = scenario.startsWith("fresh-");
+      const handoff = scenario.startsWith("fresh-handoff-");
       const material = scenario.startsWith("material-");
       const oneShot = scenario.startsWith("print-");
       const toolProof = scenario.startsWith("tools-");
@@ -103,7 +107,7 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
       const agentTools = toolProof && scenario !== "tools-omitted";
       const sessionId = "9309cd84-61c4-4df8-a0ad-44489873a902";
       const selected = scenario === "selected" || scenario === "fresh-sdk-selected" || scenario === "fresh-sdk-filtered" || scenario === "fresh-rpc-selected" || scenario === "print-sdk-selected";
-      const preserve = scenario === "fresh-cli-preserve" || scenario === "print-cli-preserve";
+      const preserve = handoff || scenario === "fresh-cli-preserve" || scenario === "print-cli-preserve";
       const config = {
         extensions: [], disabledProviders: [], extendedContext: false, startup: { setupWizard: false },
         modelRoles: { default: native || scenario === "selected" || scenario === "disabled" || scenario === "cancel" ? "fixture/openai/gpt-5" : "fixture/openai/gpt-4.1" },
@@ -135,13 +139,15 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
       if (native) {
         // Materialize the shipped operation contract, including homePath placement,
         // rather than hand-maintaining another set of worker arguments or mounts.
-        const operation = bundle.manifest.machine!.operations[material ? "atyrode.omp.material-session" : oneShot || toolProof ? "atyrode.omp.session" : "atyrode.omp.launch"]!;
+        const operation = bundle.manifest.machine!.operations[handoff ? "atyrode.omp.interactive-handoff-v1"
+          : material ? "atyrode.omp.material-session" : oneShot || toolProof ? "atyrode.omp.session" : "atyrode.omp.launch"]!;
         check(operation.executable && "runtimeTool" in operation.executable && operation.executable.runtimeTool === "bun", "operation-executable");
         const input: Record<string, string | boolean> = {
           sessionId, config: JSON.stringify(config), models: JSON.stringify(models), accountPool: "{}",
-          prompt: "SDK-PROOF-PROMPT", hasPrompt: true, planYolo: false, disableSkills: !selected && !preserve,
+          prompt: handoff ? "" : "SDK-PROOF-PROMPT", hasPrompt: !handoff, planYolo: false, disableSkills: !selected && !preserve,
           automation: JSON.stringify(automation), skillRuntime: JSON.stringify(skillRuntime), resumeOverrides: "{}",
           ...(agentTools ? { agentTools: true } : {}),
+          ...(handoff ? { payload: scenario === "fresh-handoff-empty" ? "" : "UNSENT-HANDOFF-PREFILL-CANARY" } : {}),
         };
         if (material) {
           const content = scenario === "material-utf8" ? Buffer.from([0xff])
@@ -233,6 +239,17 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
       try { status = await active.exited; exited = true; } finally { clearTimeout(timer); }
       const result = (await output).trim();
       check(status === 0 && result === "sdk-host-proof-ok", /^sdk-host-proof:[a-z0-9-]{1,80}$/.test(result) ? `${scenario}-${result.slice(15)}` : `${scenario}-exit-${status}-bytes-${Buffer.byteLength(result)}`);
+      if (handoff) {
+        const evidence = JSON.parse(await readFile(join(work, "state", `${scenario}.json`), "utf8"));
+        check(evidence.preSendPosts === 0 && evidence.firstSendUserStreams === 1 && evidence.userStreams === 2 &&
+          evidence.explicitSends === 2 && evidence.allPosts === evidence.userStreams + evidence.titlePosts &&
+          evidence.discoveriesBeforeSend > 0, "handoff-accounting");
+        if (evidenceDirectory) {
+          await mkdir(evidenceDirectory, { recursive: true, mode: 0o700 });
+          for (const suffix of [".json", "-prefill.ansi", "-edited.ansi", "-continued.ansi"])
+            await copyFile(join(work, "state", `${scenario}${suffix}`), join(evidenceDirectory, `${scenario}${suffix}`));
+        }
+      }
       active = undefined;
     }
   } catch (error) {

@@ -11,14 +11,20 @@ const nativeAutomation = z.union([
   AutomationReviewSchema.options[1],
 ]);
 
-export function readSessionInput(name: "automation" | "resumeOverrides" | "prompt" | "sessionId" | "isolation", limit = 65536): string {
+export function readSessionInput(name: "automation" | "resumeOverrides" | "prompt" | "sessionId" | "isolation" | "initialDraft", limit = 65536): string {
   const fd = openSync(`/inputs/${name}`, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.size > limit || (stat.mode & 0o222) !== 0) throw new Error("omp_sdk_input_invalid");
+    if (!stat.isFile() || stat.size > limit || (stat.mode & 0o222) !== 0 ||
+      (name === "initialDraft" && stat.nlink !== 1)) throw new Error("omp_sdk_input_invalid");
     const bytes = Buffer.alloc(stat.size + 1);
     const count = readSync(fd, bytes, 0, bytes.length, 0);
     if (count !== stat.size) throw new Error("omp_sdk_input_changed");
+    if (name === "initialDraft") {
+      const held = fstatSync(fd);
+      if (held.size !== stat.size || held.mtimeMs !== stat.mtimeMs || held.ctimeMs !== stat.ctimeMs || held.nlink !== 1)
+        throw new Error("omp_sdk_input_changed");
+    }
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, count));
   } finally { closeSync(fd); }
 }

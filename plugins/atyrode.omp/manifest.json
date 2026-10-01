@@ -1,6 +1,6 @@
 {
   "id": "atyrode.omp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "title": "omp",
   "description": "Independent OMP execution over governed native Manifold resources. Restricted automation uses the supported OMP18.2.7 SDK registry with explicit tool names and no delegation. Operator resume preserves persisted exact model/thinking unless explicitly overridden; missing or incompatible state refuses before inference. Placement independently authorizes its container and terminal.",
   "capabilities": [
@@ -23,7 +23,7 @@
   ],
   "dataVersion": {
     "major": 1,
-    "minor": 0
+    "minor": 1
   },
   "purges": [
     "storage"
@@ -764,6 +764,71 @@
           "optionalSkill12",
           "optionalSkill13",
           "optionalSkill14"
+        ]
+      },
+      "atyrode.omp.interactive-handoff-v1": {
+        "argv": [
+          { "literal": "--no-env-file" },
+          { "literal": "--no-install" },
+          { "literal": "--config=/dev/null" },
+          { "literal": "/runtime/bin/harness" },
+          { "literal": "native" },
+          { "literal": "--interactive-handoff-v1" }
+        ],
+        "input": {
+          "sessionId": { "type": "string", "required": true, "maxLength": 36 },
+          "models": { "type": "string", "required": true, "maxLength": 65536 },
+          "config": { "type": "string", "required": true, "maxLength": 65536 },
+          "accountPool": { "type": "string", "required": true, "maxLength": 65536 },
+          "hasPrompt": { "type": "boolean", "required": true, "enum": [false] },
+          "prompt": { "type": "string", "required": true, "enum": [""] },
+          "payload": { "type": "string", "required": true, "maxLength": 45056 },
+          "planYolo": { "type": "boolean", "required": true, "enum": [false] },
+          "skillRuntime": { "type": "string", "required": true, "maxLength": 4096 },
+          "disableSkills": { "type": "boolean", "required": true },
+          "automation": { "type": "string", "required": true, "maxLength": 4096 },
+          "resumeOverrides": { "type": "string", "required": true, "maxLength": 4096 }
+        },
+        "environment": {
+          "SSL_CERT_FILE": "/runtime/bin/ca-certificates",
+          "GIT_SSL_CAINFO": "/runtime/bin/ca-certificates"
+        },
+        "runtimeTools": [
+          "bun", "ca-certificates", "system", "development", "harness", "sdkHost", "sdk-pi-natives"
+        ],
+        "executable": { "runtimeTool": "bun" },
+        "inputFiles": {
+          "models": {
+            "input": "models",
+            "homePath": [".omp", "agent", "models.yml"],
+            "jsonValues": [
+              { "path": ["providers", "*", "baseUrl"], "serviceId": "omp", "value": "url" },
+              { "path": ["providers", "*", "apiKey"], "serviceId": "omp", "value": "bearer" }
+            ]
+          },
+          "config": { "input": "config", "homePath": [".omp", "agent", "config.yml"] },
+          "skillRuntime": { "input": "skillRuntime" },
+          "automation": { "input": "automation" },
+          "resumeOverrides": { "input": "resumeOverrides" },
+          "sessionId": { "input": "sessionId" },
+          "prompt": { "input": "prompt" },
+          "initialDraft": { "input": "payload" }
+        },
+        "services": [{ "serviceId": "omp", "revision": "1", "operationIds": ["models", "stream"] }],
+        "locations": [
+          { "locationId": "atyrode.omp.workspace", "access": "write" },
+          { "locationId": "atyrode.omp.sessions", "access": "write" }
+        ],
+        "outputs": [],
+        "network": "host",
+        "limits": {
+          "timeoutMs": 86400000, "memoryBytes": 8589934592, "processes": 512, "outputBytes": 1073741824
+        },
+        "stdin": true,
+        "inputs": [
+          "optionalSkill0", "optionalSkill1", "optionalSkill2", "optionalSkill3", "optionalSkill4",
+          "optionalSkill5", "optionalSkill6", "optionalSkill7", "optionalSkill8", "optionalSkill9",
+          "optionalSkill10", "optionalSkill11", "optionalSkill12", "optionalSkill13", "optionalSkill14"
         ]
       },
       "atyrode.omp.session": {

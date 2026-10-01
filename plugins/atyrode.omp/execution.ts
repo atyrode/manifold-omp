@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { ThinkingConfig } from "@oh-my-pi/pi-catalog";
 import { z } from "zod";
 import {
@@ -27,6 +27,11 @@ import {
   SESSION_OPERATION_ID,
   MATERIAL_SESSION_OPERATION_ID,
   MaterialOnlyIsolationSchema,
+  INTERACTIVE_HANDOFF_OPERATION_ID,
+  InteractiveHandoffReviewSchema,
+  PreparedInteractiveHandoffSchema,
+  PROMPT_MAX_BYTES,
+  digest,
   RESUME_OPERATION_ID,
   SESSION_OUTPUT_NAME,
   RUNS_LOCATION_ID,
@@ -116,6 +121,41 @@ const provenanceSchema = z.strictObject({
   isolation: MaterialOnlyIsolationSchema.optional(),
 });
 type Provenance = z.infer<typeof provenanceSchema>;
+const handoffIdentitySchema = z.strictObject({
+  requester: z.strictObject({ kind: z.string().min(1).max(128), id: z.string().min(1).max(128) }),
+  callerPlugin: z.string().min(1).max(128).nullable(),
+});
+const handoffStateSchema = z.discriminatedUnion("state", [
+  z.strictObject({ state: z.literal("unknown") }),
+  z.strictObject({ state: z.literal("clientReported"), terminalId: z.string().min(1).max(128) }),
+  z.strictObject({ state: z.literal("unavailable"), terminalId: z.string().min(1).max(128).optional() }),
+]);
+/** No input, configuration, authority snapshot or replay recipe lives here. The
+ * slot is also the cross-target key guard; an uncertain claim never expires. */
+const handoffRecordSchema = handoffIdentitySchema.extend({
+  handoffVersion: z.literal(1),
+  handoffKeyDigest: digest,
+  destination: TargetSchema,
+  sourceDigest: digest,
+  draftDigest: digest,
+  compositionDigest: digest,
+  reviewDigest: digest,
+  pins: ResourcePinsSchema,
+  session: OmpSessionRefSchema,
+  claimId: z.uuid(),
+  placement: handoffStateSchema,
+});
+type HandoffRecord = z.infer<typeof handoffRecordSchema>;
+function handoffIdentity(ctx: OmpContext): z.infer<typeof handoffIdentitySchema> {
+  try {
+    // Missing carried attribution throws on older hosts. Only an explicit null
+    // means a direct human/SDK caller; a plugin name is a namespace, not a grant.
+    return handoffIdentitySchema.parse({
+      requester: { kind: ctx.auth.principal.kind, id: ctx.auth.principal.id },
+      callerPlugin: ctx.callerPlugin,
+    });
+  } catch { throw new OmpRefusal("handoff_caller_unavailable"); }
+}
 /**
  * The part of a retained job's own `config` input this plugin reads back: the model the
  * session was configured with, and whether substituting one was permitted.
@@ -690,6 +730,18 @@ function supportsSdkRuntime(machine: MachineHalf | undefined, operationId: strin
 function requireSdkRuntime(machine: MachineHalf | undefined, operationId: string) {
   if (!supportsSdkRuntime(machine, operationId)) throw new OmpRefusal("sdk_runtime_unsupported");
 }
+function requireHandoffRuntime(machine: MachineHalf | undefined) {
+  const operation = machine?.operations[INTERACTIVE_HANDOFF_OPERATION_ID];
+  if (!supportsSdkRuntime(machine, INTERACTIVE_HANDOFF_OPERATION_ID) ||
+    operation?.input.payload?.type !== "string" || !operation.input.payload.required ||
+    operation.input.payload.maxLength !== PROMPT_MAX_BYTES ||
+    digestOf(operation.inputFiles?.initialDraft ?? null) !== digestOf({ input: "payload" }) ||
+    operation.input.prompt?.type !== "string" || digestOf(operation.input.prompt.enum ?? null) !== digestOf([""]) ||
+    !operation.stdin || !operation.runtimeTools?.includes("harness") ||
+    !operation.argv.some(arg => "literal" in arg && arg.literal === "--interactive-handoff-v1" && !arg.when) ||
+    operation.argv.some(arg => "input" in arg && (arg.input === "payload" || arg.input === "prompt")))
+    throw new OmpRefusal("handoff_runtime_unsupported");
+}
 function requireMaterialRuntime(machine: MachineHalf | undefined) {
   const operation = machine?.operations[MATERIAL_SESSION_OPERATION_ID];
   requireSdkRuntime(machine, MATERIAL_SESSION_OPERATION_ID);
@@ -733,20 +785,23 @@ async function sessionRuntimePreparation(
   if (args.automation && operationId === `${OMP_PLUGIN_ID}.harness`)
     throw new OmpRefusal("restricted_harness_unsupported");
   if (resume && args.planYolo) throw new OmpRefusal("resume_plan_unsupported");
+  if (operationId === INTERACTIVE_HANDOFF_OPERATION_ID && args.planYolo)
+    throw new OmpRefusal("handoff_plan_unsupported");
   const requestedPool = args.accountPool ?? await enabledAccountPool(ctx,
     configuredModels(overlay).map(ref => ref.slice(0, ref.indexOf("/"))));
   const { pool, reference } = await checkedAccountPool(ctx, requestedPool);
   const models = checkOverlay(overlay, pool);
   const gateway = await currentGateway(ctx, args.machineId, undefined,
     args.inferenceLimits === undefined ? undefined : { limits: args.inferenceLimits, models });
-  const current = await currentOperation(
-    ctx,
-    args.machineId,
-    operationId,
-  );
+  const current = await currentOperation(ctx, args.machineId, operationId).catch(error => {
+    if (operationId === INTERACTIVE_HANDOFF_OPERATION_ID && error instanceof OmpRefusal &&
+      error.code === "operation_unsupported") throw new OmpRefusal("handoff_runtime_unsupported");
+    throw error;
+  });
   const automation = args.isolation
     ? { mode: "restricted" as const, toolNames: [], delegation: "disabled" as const }
     : args.automation ?? { mode: "ordinary" as const };
+  if (operationId === INTERACTIVE_HANDOFF_OPERATION_ID) requireHandoffRuntime(current.deployment.installation?.machine);
   if (args.isolation) requireMaterialRuntime(current.deployment.installation?.machine);
   else if (args.automation || resume) requireSdkRuntime(current.deployment.installation?.machine, operationId);
   if (args.agentTools) requireAgentToolsRuntime(current.deployment.installation?.machine, operationId);
@@ -783,13 +838,18 @@ async function sessionPreparation(
   args: ActionInput<"reviewSession">,
   sessionId?: string,
   resume = false,
+  handoff?: ActionInput<"reviewInteractiveHandoff">,
 ) {
   await authorizeTarget(ctx, args);
   if (args.isolation && (sessionId || resume)) throw new OmpRefusal("material_isolation_unsupported");
-  const operationId = args.isolation ? MATERIAL_SESSION_OPERATION_ID : sessionId ? `${OMP_PLUGIN_ID}.harness`
+  const operationId = handoff ? INTERACTIVE_HANDOFF_OPERATION_ID : args.isolation ? MATERIAL_SESSION_OPERATION_ID : sessionId ? `${OMP_PLUGIN_ID}.harness`
     : args.agentTools ? SESSION_OPERATION_ID : `${OMP_PLUGIN_ID}.launch`;
-  const { defaults, overlay, pool, reference, gateway, current, input, config, skills, inputs, automation } =
+  const { defaults, overlay, pool, reference, gateway, current, input: composedInput, config, skills, inputs, automation } =
     await sessionRuntimePreparation(ctx, args, operationId, sessionId, resume);
+  // `payload` is the host's existing sensitive-workload field. Native terminal
+  // create/open traces are redacted, not opaque; a free-form `initialDraft` key
+  // there would leak into the ledger. The owner mounts it as /inputs/initialDraft.
+  const input = handoff ? boundedInput({ ...composedInput, payload: handoff.initialDraft }) : composedInput;
   const destination = {
     containerId: args.containerId,
     machineId: args.machineId,
@@ -807,15 +867,17 @@ async function sessionPreparation(
     ...(args.inferenceLimits === undefined ? {} : { inferenceLimits: args.inferenceLimits }),
     ...(args.agentTools === undefined ? {} : { agentTools: args.agentTools }),
     reviewDigest: digestOf({
-      actor: actor(ctx),
+      actor: handoff ? handoffIdentity(ctx) : actor(ctx),
       destination,
       defaults,
       overlay,
       pool,
       broker: reference,
       gateway,
-      current,
-      input,
+      // Handoffs survive unchanged-pin redeployment. Progress/history and live
+      // admission are re-observed above, not a durable composition identity.
+      current: handoff ? { pins: current.pins, installation: current.deployment.installation } : current,
+      input: composedInput,
       skills,
       inputs,
       inferenceLimits: args.inferenceLimits ?? null,
@@ -823,6 +885,96 @@ async function sessionPreparation(
     }),
   };
   return { review, input, config, inputs, broker: reference, gateway, current };
+}
+async function handoffPreparation(ctx: OmpContext, args: ActionInput<"reviewInteractiveHandoff">) {
+  const identity = handoffIdentity(ctx);
+  const handoffKeyDigest = digestOf(args.handoffKey);
+  const prepared = await sessionPreparation(ctx, args, undefined, false, args);
+  const binding = {
+    handoffVersion: args.handoffVersion,
+    sourceDigest: args.sourceDigest,
+    draftDigest: createHash("sha256").update(args.initialDraft, "utf8").digest("hex"),
+    compositionDigest: prepared.review.reviewDigest,
+  };
+  const review = InteractiveHandoffReviewSchema.parse({
+    ...prepared.review, ...binding,
+    reviewDigest: digestOf({ ...binding, ...identity, handoffKeyDigest }),
+  });
+  return { ...prepared, review, identity, handoffKeyDigest };
+}
+export async function reviewInteractiveHandoff(
+  ctx: OmpContext, args: ActionInput<"reviewInteractiveHandoff">,
+): Promise<ActionResult<"reviewInteractiveHandoff">> {
+  return (await handoffPreparation(ctx, args)).review;
+}
+export async function prepareInteractiveHandoff(
+  ctx: OmpContext, args: ActionInput<"prepareInteractiveHandoff">,
+): Promise<ActionResult<"prepareInteractiveHandoff">> {
+  await authorizeTarget(ctx, args, true);
+  await authorizeTerminalSpawn(ctx, args.containerId);
+  const first = await handoffPreparation(ctx, args);
+  if (first.review.reviewDigest !== args.reviewDigest) throw new OmpRefusal("review_changed");
+  const latest = await handoffPreparation(ctx, args);
+  if (latest.review.reviewDigest !== first.review.reviewDigest) throw new OmpRefusal("resources_changed");
+  await authorizeTarget(ctx, args, true);
+  await authorizeTerminalSpawn(ctx, args.containerId);
+  const { review, identity, handoffKeyDigest } = latest;
+  // Deliberately omit target from the key: the stored target is an immutable
+  // guard against quietly allocating a second association for the same key.
+  const key = `handoffs/v1/${digestOf({ ...identity, handoffKeyDigest })}`;
+  const binding = {
+    ...identity, handoffKeyDigest, handoffVersion: 1 as const,
+    destination: review.destination, sourceDigest: review.sourceDigest,
+    draftDigest: review.draftDigest, compositionDigest: review.compositionDigest,
+    reviewDigest: review.reviewDigest, pins: review.pins,
+  };
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const raw = await ctx.storage.get(key);
+    if (raw === null) {
+      if (args.report) throw new OmpRefusal("handoff_unknown");
+      const session: OmpSessionRef = { harness: OMP_PLUGIN_ID, machineId: args.machineId, sessionId: randomUUID() };
+      const record: HandoffRecord = { ...binding, session, claimId: randomUUID(), placement: { state: "unknown" } };
+      // Validate the entire runtime, including the final UUID's encoded bytes,
+      // before reserving the slot. The reservation itself contains no runtime.
+      const claimed = PreparedInteractiveHandoffSchema.parse({
+        handoffVersion: 1, destination: review.destination, session, claimId: record.claimId,
+        reviewDigest: review.reviewDigest, state: "claimed",
+        runtime: {
+          machineId: args.machineId, pluginId: OMP_PLUGIN_ID, operationId: INTERACTIVE_HANDOFF_OPERATION_ID,
+          ...review.pins, session, input: boundedInput({ ...latest.input, sessionId: session.sessionId }),
+          ...(latest.inputs.length > 0 ? { inputs: latest.inputs } : {}),
+        },
+      });
+      // A lost CAS or response leaves unknown, never an invitation to recreate.
+      if (await ctx.storage.compareAndSet(key, null, JSON.stringify(record))) return claimed;
+      continue;
+    }
+    let record: HandoffRecord;
+    try { record = handoffRecordSchema.parse(JSON.parse(raw)); }
+    catch { throw new OmpRefusal("handoff_unavailable"); }
+    const { session, claimId, placement, ...storedBinding } = record;
+    if (digestOf(storedBinding) !== digestOf(binding) || session.machineId !== args.machineId)
+      throw new OmpRefusal("handoff_conflict");
+    let next = placement;
+    if (args.report) {
+      if (args.report.claimId !== claimId) throw new OmpRefusal("handoff_claim_changed");
+      if (args.report.state === "clientReported") {
+        if (placement.state === "unavailable" ||
+          (placement.state === "clientReported" && placement.terminalId !== args.report.terminalId))
+          throw new OmpRefusal("handoff_conflict");
+        next = { state: "clientReported", terminalId: args.report.terminalId };
+      } else {
+        next = { state: "unavailable", ...("terminalId" in placement ? { terminalId: placement.terminalId } : {}) };
+      }
+      if (digestOf(next) !== digestOf(placement) &&
+        !await ctx.storage.compareAndSet(key, raw, JSON.stringify({ ...record, placement: next }))) continue;
+    }
+    return PreparedInteractiveHandoffSchema.parse({
+      handoffVersion: 1, destination: record.destination, session, claimId, reviewDigest: record.reviewDigest,
+      ...next, ...(next.state === "clientReported" ? { verification: "unverified" } : {}),
+    });
+  }
+  throw new OmpRefusal("handoff_unavailable");
 }
 export async function reviewSession(
   ctx: OmpContext,

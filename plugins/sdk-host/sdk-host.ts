@@ -34,7 +34,11 @@ let toolAdapter: AgentToolAdapter | undefined;
 let code = 1;
 try {
   if (Object.keys(process.env).some(name => name.startsWith("MANIFOLD_"))) throw new Error("omp_sdk_environment_invalid");
-  const kind = z.enum(["interactive", "print", "material-print", "resume", "rpc", "rpc-resume"]).parse(process.argv[2]);
+  const kind = z.enum(["interactive", "interactive-handoff-v1", "print", "material-print", "resume", "rpc", "rpc-resume"]).parse(process.argv[2]);
+  const handoff = kind === "interactive-handoff-v1";
+  if (handoff && (process.argv.length !== 4 || readSessionInput("prompt", 0) !== ""))
+    throw new Error("omp_sdk_input_invalid");
+  const initialDraft = handoff ? readSessionInput("initialDraft", PROMPT_MAX_BYTES) : undefined;
   const resume = kind === "resume" || kind === "rpc-resume";
   const rpc = kind === "rpc" || kind === "rpc-resume";
   const sessionRoot = kind === "print" || materialOnly ? "/outputs/session" : SESSIONS_ROOT;
@@ -148,7 +152,7 @@ try {
   created = await createAgentSession({
     cwd, agentDir: PROBE_AGENT, settings, authStorage: auth, modelRegistry: registry,
     sessionManager: manager, agentRegistry: new AgentRegistry(), ...admitted,
-    hasUI: kind === "interactive" || kind === "resume",
+    hasUI: handoff || kind === "interactive" || kind === "resume",
     ...(restricted || skillsRuntime.mode === "disabled" ? { skills } : {}),
     ...(rpc ? { appendSystemPrompt: readFileSync(process.argv[4]!, "utf8") } : {}),
     ...(restricted ? {
@@ -192,7 +196,15 @@ try {
         created.lspServers, created.mcpManager, created.eventBus);
       await mode.init();
       if (resume) await mode.renderInitialMessages();
-      if (!resume) {
+      if (initialDraft !== undefined) {
+        // The supported editor API restores text without creating a user message
+        // or model turn. init may already have restored an edited local draft.
+        if (!mode.editor.getText()) {
+          mode.editor.setText(initialDraft);
+          mode.updateEditorBorderColor();
+          mode.ui.requestRender();
+        }
+      } else if (!resume) {
         const prompt = readSessionInput("prompt");
         if (prompt) await created.session.prompt(prompt);
       }
