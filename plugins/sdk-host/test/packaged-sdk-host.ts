@@ -595,6 +595,10 @@ try {
   } else if (handoff) {
     const expectedDraft = scenario === "fresh-handoff-empty" ? ""
       : scenario === "fresh-handoff-restored" ? restoredHandoff : "UNSENT-HANDOFF-PREFILL-CANARY";
+    // In the empty case there is no draft text to wait for. Observe the stock
+    // terminal entering bracketed-paste mode before inspecting its child or
+    // sending an edit; spawn() alone does not mean the editor owns stdin.
+    await until(() => terminal.includes("\x1b[?2004h"), "handoff-editor-not-started");
     if (expectedDraft) await until(() => terminal.includes(expectedDraft), "handoff-prefill-not-rendered");
     await inspectSdkChild();
     check(Number(allPosts) === 0 && Number(requests) === 0, "handoff-inferred-at-init");

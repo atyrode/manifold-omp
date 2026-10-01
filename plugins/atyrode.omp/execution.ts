@@ -874,7 +874,9 @@ async function sessionPreparation(
       pool,
       broker: reference,
       gateway,
-      current,
+      // Handoffs survive unchanged-pin redeployment. Progress/history and live
+      // admission are re-observed above, not a durable composition identity.
+      current: handoff ? { pins: current.pins, installation: current.deployment.installation } : current,
       input: composedInput,
       skills,
       inputs,

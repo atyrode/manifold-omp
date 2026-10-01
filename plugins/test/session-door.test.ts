@@ -531,6 +531,44 @@ test("concurrent handoff prepares have one placement winner and retain only stab
   expect(f.posted).toEqual([]);
 });
 
+test("unchanged-pin redeployment preserves handoff claims while current native admission and resource pins remain binding", async () => {
+  const f = fixture({ sdk: true });
+  const native = structuredClone(await f.ctx.jobs.describe({ machineId: target.machineId, pluginId: OMP_PLUGIN_ID }));
+  const deployment = structuredClone(await f.ctx.jobs.describeDeployment({ machineId: target.machineId, pluginId: OMP_PLUGIN_ID }));
+  deployment.deployment = { deploymentId: "original-deployment", machineId: target.machineId,
+    pluginId: OMP_PLUGIN_ID, revision: 1, state: "ready", reason: null };
+  f.ctx.jobs.describe = async () => native;
+  f.ctx.jobs.describeDeployment = async () => deployment;
+  const request = await handoffRequest(f);
+  const claimed = await f.client.call("prepareInteractiveHandoff", request);
+  if ("refused" in claimed || claimed.state !== "claimed") throw new Error("missing handoff winner");
+  const retained = { handoffVersion: 1, destination: target, session: claimed.session,
+    claimId: claimed.claimId, reviewDigest: request.reviewDigest, state: "unknown" } as const;
+
+  deployment.deployment = { ...deployment.deployment, deploymentId: "replacement-deployment", revision: 2 };
+  expect(await f.client.call("prepareInteractiveHandoff", request)).toEqual(retained);
+  native.installation!.ready = false;
+  expect(await f.client.call("prepareInteractiveHandoff", request)).toEqual({ refused: "omp_resources_incomplete" });
+  native.installation!.ready = true;
+  const consent = native.consents.find(value => value.cap === "machines:run" &&
+    value.node === `manifold://machine/${target.machineId}/operation/${INTERACTIVE_HANDOFF_OPERATION_ID}`)!;
+  consent.enabled = false;
+  expect(await f.client.call("prepareInteractiveHandoff", request)).toEqual({ refused: "omp_native_consent_required" });
+  consent.enabled = true;
+  const report = { state: "clientReported" as const, claimId: claimed.claimId, terminalId: "reported-terminal" };
+  const reported = { ...retained, state: "clientReported", terminalId: report.terminalId, verification: "unverified" } as const;
+  expect(await f.client.call("prepareInteractiveHandoff", { ...request, report })).toEqual(reported);
+  deployment.deployment = { ...deployment.deployment, deploymentId: "later-deployment", revision: 3 };
+  expect(await f.client.call("prepareInteractiveHandoff", request)).toEqual(reported);
+
+  const stored = [...f.storage.entries()];
+  native.operations![INTERACTIVE_HANDOFF_OPERATION_ID]!.resourceBindingDigest = "d".repeat(64);
+  expect(await f.client.call("prepareInteractiveHandoff", request)).toEqual({ refused: "omp_review_changed" });
+  expect(await f.client.call("prepareInteractiveHandoff", await handoffRequest(f))).toEqual({ refused: "omp_handoff_conflict" });
+  expect([...f.storage.entries()]).toEqual(stored);
+  expect(f.posted).toEqual([]);
+});
+
 test("lost prepare and report acknowledgements never return another runtime or certify client terminal ids", async () => {
   const f = fixture({ sdk: true });
   const request = await handoffRequest(f);

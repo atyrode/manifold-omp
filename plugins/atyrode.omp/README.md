@@ -39,7 +39,11 @@ Review returns the existing effective session composition/resource review plus
 `handoffVersion: 1`, `sourceDigest`, `draftDigest` (SHA-256 of exact UTF-8 draft bytes),
 `compositionDigest` and `reviewDigest`. It never echoes the draft. The review binds the
 stable principal kind/id, host-attested caller-plugin namespace (explicit `null` for direct
-entry), logical key, target, defaults, account selection, skills/policy and exact native pins.
+entry), logical key, target, defaults, account selection, skills/policy, installed native
+declaration and exact native pins. Handoff composition excludes transient deployment progress
+and observation history, so an unchanged-pin reviewed redeployment preserves the claim.
+Current readiness, native consent and caller authority are still checked on every prepare;
+ordinary launch/resume review binding is unchanged.
 An old host without carried caller attribution refuses `omp_handoff_caller_unavailable`;
 ordinary launches do not start requiring that host field.
 
@@ -132,9 +136,20 @@ through disable/enable and restart. Accounts/gateway versions and both SDK graph
 Source regressions cover races, response loss, stable namespaces, refusal/staleness, reports,
 private metadata and byte ceilings. The real native verifier exercises hardened public doors,
 SQLite CAS, an actual native terminal, same-credential correlation and raw public projection
-canaries against a synthetic gateway. The packaged SDK PTY proof additionally covers editable
-prefill, empty-draft forced SDK and restored-draft precedence; its optional
-`verifySdkHost({ ..., evidenceDirectory })` retains synthetic ANSI frames and JSON counters.
+canaries against a synthetic gateway. Its claim-reopen canary disables gateway, accounts and
+OMP in dependency-safe order, then enables the parent before its dependents. Because disabling
+also revokes native installations, it re-reviews/applies the same accounts and OMP installation
+pins without adding consents. The running broker job is captured before disable; after native
+reapproval restores governed-job visibility, the canary reads that exact job's final public
+receipt and waits for the unchanged broker configuration to become ready. A hidden or empty
+job list is never completion evidence.
+Only then does it retry the same unknown claim, requiring the same association and no second
+runtime. The packaged SDK PTY proof additionally covers editable
+prefill, empty-draft forced SDK and restored-draft precedence. All three wait for the stock
+terminal to enable bracketed paste before inspecting the SDK child or editing; readiness
+does not depend on a model label. Its optional
+`verifySdkHost({ ..., evidenceDirectory })` retains synthetic ANSI frames and JSON counters
+for completed cases.
 These are verification scenarios, not a claim of having run them on a published revision.
 
 Publication/native consumer pins remain gated by
@@ -342,6 +357,18 @@ OMP_VERIFY_SYSTEMD_MODE=user bun run verify
 ```
 
 `system.json` is an explicit native runtime-tool library declaration for the host. Verify creates its own disposable delegated systemd cgroup and, following Manifold's runtime gate, a private user/mount namespace with a 1 MiB, 4,096-inode tmpfs for governed output leases. `unshare` must be available; the reusable CI fixture already supplies static BusyBox. No host-root mount, fleet daemon or real credential value is involved. A failing native gate is not equivalent to successful packaging.
+
+The native tool receipt gate still requires one sealed journal, its exact Run/session
+association and exactly one result for every expected tool call. A cardinality failure
+reports only `native-tools-journal-<scenario>-<fixture-call>-results-<count>` in the final
+JSON receipt. Preserve that receipt to distinguish policy from cancellation and missing
+from replayed results; it contains no journal body, tool payload or credential. Disposable
+native state is still removed after confirmed cleanup, not retained as a diagnostic archive.
+The public handoff canary likewise reports fixed phase names instead of raw exception
+text. Editor failures include capped discovery/POST/user-stream counts (`d`, `p`, `u`,
+each capped at 9) and whether any terminal output was observed (`o`), or the worker's
+existing fixed `omp_*` refusal code. This diagnoses the failing boundary without
+retaining or disclosing the private editor/session contents.
 
 ## Published SDK packaging
 

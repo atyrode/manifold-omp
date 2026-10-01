@@ -470,7 +470,9 @@ export async function verifyNativeTools(options: Options): Promise<void> {
         "sealed-journal-run-session-mismatch");
       for (const id of ids) {
         const results = journal.entries.filter(entry => entry.type === "message" && entry.message?.role === "toolResult" && entry.message.toolCallId === id);
-        check(results.length === 1, "journal-tool-result-missing-or-replayed");
+        // Only fixture-owned scenario/call names and cardinality leave the
+        // verifier. Keep the sealed transcript and tool payloads private.
+        check(results.length === 1, `journal-${scenario}-${id}-results-${results.length}`);
         if ((id === "unselected" || id === "invalid") && results[0]!.message!.isError) continue;
         const result = AgentToolReplySchema.parse(results[0]!.message!.details);
         if (id === "uncertain") check(result.type === "unknown", "cancelled-uncertain-effect-claimed-certain");
