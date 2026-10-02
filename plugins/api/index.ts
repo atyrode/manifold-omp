@@ -22,6 +22,7 @@ import {
   BenchmarkInputSchema,
   InventoryReceiptSchema,
   BenchmarkReceiptSchema,
+  InventoryModelSchema,
 } from "./probe.ts";
 import { PermittedUsageSnapshotSchema } from "./usage.ts";
 import { SessionReceiptSchema, SessionSilenceSchema } from "./session.ts";
@@ -82,6 +83,22 @@ export const revision = z
   .nonnegative()
   .max(Number.MAX_SAFE_INTEGER);
 export const digest = z.string().regex(/^[a-f0-9]{64}$/);
+export const MODEL_CATALOG_PROVIDER_LIMIT = 64;
+export const MODEL_CATALOG_MODEL_LIMIT = 16_384;
+/** The SDK's static quota classification, not an account's quota balance or availability. */
+export const ModelCatalogModelSchema = InventoryModelSchema.extend({
+  quotaTier: z.string().min(1).max(128).nullable(),
+});
+export type ModelCatalogModel = z.infer<typeof ModelCatalogModelSchema>;
+/** Bundled metadata only: neither runtime inventory nor availability or measured performance. */
+export const ModelCatalogSnapshotSchema = z.strictObject({
+  schemaVersion: z.literal(1),
+  source: z.literal("bundled"),
+  ompVersion: z.string().min(1).max(64),
+  revision: digest,
+  models: z.array(ModelCatalogModelSchema).max(MODEL_CATALOG_MODEL_LIMIT),
+});
+export type ModelCatalogSnapshot = z.infer<typeof ModelCatalogSnapshotSchema>;
 const id = z.string().min(1).max(128);
 const empty = z.strictObject({});
 export const TargetSchema = z.strictObject({ containerId: id, machineId: id });
@@ -436,6 +453,10 @@ const accountControl = z.strictObject({
 });
 
 export const rootActionSchemas = {
+  readModelCatalog: {
+    input: z.strictObject({ providers: z.array(identifier).max(MODEL_CATALOG_PROVIDER_LIMIT) }),
+    result: ModelCatalogSnapshotSchema,
+  },
   readDefaults: { input: empty, result: DefaultsSchema },
   writeDefaults: {
     input: z.strictObject({

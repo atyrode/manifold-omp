@@ -33,6 +33,9 @@ import {
   followSession,
   cancelSession,
 } from "./execution.ts";
+import { bundledModelCatalog } from "./sdk-metadata.macro.ts" with { type: "macro" };
+
+const modelCatalog = bundledModelCatalog();
 
 type RootHandlers = {
   [K in RootAction]: (
@@ -41,6 +44,10 @@ type RootHandlers = {
   ) => Promise<ActionResult<K>>;
 };
 const implementations: RootHandlers = {
+  async readModelCatalog(_ctx, { providers }) {
+    const requested = new Set(providers);
+    return { ...modelCatalog, models: modelCatalog.models.filter(model => requested.has(model.provider)) };
+  },
   readDefaults,
   writeDefaults,
   readSkillCatalog,
@@ -91,6 +98,7 @@ const observedRuntimeCaps: readonly Cap[] = [
   "services:invoke",
 ];
 const delegates: Record<RootAction, readonly Cap[]> = {
+  readModelCatalog: [],
   readDefaults: [],
   writeDefaults: [],
   readSkillCatalog: ["machines:run", "jobs:read"],
