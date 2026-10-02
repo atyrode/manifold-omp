@@ -1,3 +1,6 @@
+diff --git a/node_modules/@oh-my-pi/pi-ai/.bun-tag-660c4f2cbd02dcd b/.bun-tag-660c4f2cbd02dcd
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/@oh-my-pi/pi-ai/.bun-tag-fe90b8e7522c222 b/.bun-tag-fe90b8e7522c222
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
@@ -160,7 +163,7 @@ index 3b6b4b8f7fd3f3adf6e5a8abc1b5e97984bea9bd..42e785a9e72c49cf61d6f4d5bb0b19af
  	const onAbort = (): void => abort.reject(new AIError.AbortError(message));
  	signal.addEventListener("abort", onAbort, { once: true });
 diff --git a/src/auth/refresh.ts b/src/auth/refresh.ts
-index 538f3e1421b73560d3ea280674be6067c427d091..344f1644dba8f95084fa98eac66331f5a6f15d2e 100644
+index 538f3e1421b73560d3ea280674be6067c427d091..3fd652a1e0d82295fc1e5e7722269d4d633ba75e 100644
 --- a/src/auth/refresh.ts
 +++ b/src/auth/refresh.ts
 @@ -107,6 +107,11 @@ export class OAuthRefresher {
@@ -175,6 +178,18 @@ index 538f3e1421b73560d3ea280674be6067c427d091..344f1644dba8f95084fa98eac66331f5
  	/**
  	 * Return the stored row while it still holds a usable token this refresher
  	 * minted within {@link OAUTH_REMINT_COOLDOWN_MS}.
+@@ -458,7 +463,10 @@ export class OAuthRefresher {
+ 		if (credentialId === undefined) {
+ 			return this.#refreshOAuthCredentialUnshared(provider, credential, undefined, signal, reason);
+ 		}
+-		const promise = this.#refreshOAuthCredentialUnshared(provider, credential, credentialId, signal, reason)
++		// The shared rotation belongs to every waiter and to the stored row, not to the first
++		// caller: a usage probe's deadline must detach from it, never abort a provider rotation
++		// mid-flight. Each caller still stops waiting on its own signal below.
++		const promise = this.#refreshOAuthCredentialUnshared(provider, credential, credentialId, undefined, reason)
+ 			.then(refreshed => {
+ 				// A delegated refresh may have returned a broker-cached token rather
+ 				// than minting one. Only direct local requests can establish mint time.
 diff --git a/src/auth/usage.ts b/src/auth/usage.ts
 index 8a25b6249bb575e0a0b594f1c3461ec3c7b2f514..85e08424e139e43715523a82ac5c4be0ea09acfd 100644
 --- a/src/auth/usage.ts
