@@ -82,7 +82,7 @@ test("synthetic broker preserves multi-account identity and a disabled concrete 
     for (const account of selected.filter(account => account.type === "oauth")) {
       const row = rows.find(row => row.id === account.id)!;
       if (row.credential.type !== "oauth") throw new Error("Synthetic OAuth account missing");
-      expect((await storage.getApiKey(account.provider, "synthetic-sticky-session")) === row.credential.access).toBe(true);
+      expect(((await storage.keys.getWithCredential(account.provider, "synthetic-sticky-session"))?.apiKey) === row.credential.access).toBe(true);
     }
 
     expect((await client.disableCredential(revoked.id, "synthetic integration revocation", signal)).ok).toBe(true);
@@ -94,8 +94,8 @@ test("synthetic broker preserves multi-account identity and a disabled concrete 
     // all unselected Anthropic peers remain available at the broker, not the pool.
     await eventually(() => !storage!.remote.listAuthCredentials().some(row => row.id === revoked.id), signal);
     expect(new Set(storage.remote.listAuthCredentials().map(row => row.id))).toEqual(new Set(selected.filter(account => account.id !== revoked.id).map(account => account.id)));
-    expect((await storage.getApiKey(revoked.provider, "synthetic-sticky-session")) === undefined).toBe(true);
-    expect((await storage.getApiKey(revoked.provider, "synthetic-new-session")) === undefined).toBe(true);
+    expect(((await storage.keys.getWithCredential(revoked.provider, "synthetic-sticky-session"))?.apiKey) === undefined).toBe(true);
+    expect(((await storage.keys.getWithCredential(revoked.provider, "synthetic-new-session"))?.apiKey) === undefined).toBe(true);
   } finally {
     controller.abort();
     try { storage?.close(); }

@@ -59,7 +59,7 @@ try {
     refreshOAuthCredential: (provider, _id, credential, signal) => refreshOAuthToken(provider as OAuthProvider, credential, signal),
   });
   shutdown.signal.throwIfAborted();
-  await storage.reload();
+  await storage.credentials.reload();
   shutdown.signal.throwIfAborted();
   // OMP owns credential algorithms and data endpoints; the native boundary
   // controls ingress authority and completion-based shutdown.

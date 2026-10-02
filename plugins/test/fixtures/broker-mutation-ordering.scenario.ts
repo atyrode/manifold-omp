@@ -61,7 +61,7 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
         let pending: Promise<unknown> | undefined;
         const observer: { accesses?: string[] } = {};
         try {
-          storage.upsertCredential(provider, credential("synthetic-initial"));
+          await storage.credentials.upsert(provider, credential("synthetic-initial"));
           broker = startNativeBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [bearer], disableRefresher: true });
           const fixtureFetch = ctx.fetchTo(broker.url);
           const fetchImpl: typeof fetch = Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
@@ -89,16 +89,16 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
           const mutation = operation === "refresh"
             ? remote.refreshOAuthCredential(provider, row.id, credential("synthetic-initial"))
             : operation === "suspect" ? remote.markCredentialSuspect(row.id)
-            : operation === "upload" ? remote.upsertAuthCredentialRemote(provider, credential("synthetic-old-upload-reply"))
-            : operation === "replace" ? remote.replaceAuthCredentialsRemote(provider, [credential("synthetic-old-upload-reply")])
-            : operation === "delete-one" ? remote.deleteAuthCredentialRemote(row.id, "synthetic-disable")
-            : remote.deleteAuthCredentialsRemote(provider, "synthetic-disable");
+            : operation === "upload" ? remote.upsertAuthCredential(provider, credential("synthetic-old-upload-reply"))
+            : operation === "replace" ? remote.replaceAuthCredentials(provider, [credential("synthetic-old-upload-reply")])
+            : operation === "delete-one" ? remote.deleteAuthCredential(row.id, "synthetic-disable")
+            : remote.deleteAuthCredentials(provider, "synthetic-disable");
           // Capture errors immediately so intentional rejection cannot be unhandled.
           const outcome = mutation.then(value => ({ ok: true as const, value }), () => ({ ok: false as const }));
           pending = outcome;
           await replyReady.promise;
-          if (later === "removed") await storage.remove(provider);
-          else storage.upsertCredential(provider, credential("synthetic-canonical-replacement"));
+          if (later === "removed") await storage.credentials.remove(provider);
+          else await storage.credentials.upsert(provider, credential("synthetic-canonical-replacement"));
           await remote.refreshSnapshot();
           const canonical = remote.listAuthCredentials(provider);
           ctx.check(later === "removed" ? canonical.length === 0
@@ -138,7 +138,7 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
           await eventually(() => later === "removed" ? observer.accesses?.length === 0
             : observer.accesses?.length === 1 && observer.accesses[0] === "synthetic-canonical-replacement",
           "canonical-hook-not-published");
-          storage.upsertCredential(provider, credential("synthetic-stream-replacement"));
+          await storage.credentials.upsert(provider, credential("synthetic-stream-replacement"));
           await eventually(() => {
             const current = remote!.listAuthCredentials(provider)[0]?.credential;
             return current?.type === "oauth" && current.access === "synthetic-stream-replacement";
@@ -146,7 +146,7 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
           const streamed = observer.accesses;
           ctx.check(streamed?.length === 1 && streamed[0] === "synthetic-stream-replacement",
             "entry-delta-missing-canonical-hook");
-          await storage.remove(provider);
+          await storage.credentials.remove(provider);
           await eventually(() => remote!.listAuthCredentials(provider).length === 0, "removal-delta-not-published");
           ctx.check(observer.accesses?.length === 0, "removal-delta-missing-canonical-hook");
         } finally {

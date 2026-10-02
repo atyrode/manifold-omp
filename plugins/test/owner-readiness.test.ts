@@ -888,3 +888,22 @@ test("broker recovery preserves the declared service contract revision", async (
     enabled: true,
   });
 });
+
+test("the broker policy admits every route the 18.4 gateway client sends, and nothing wider", () => {
+  const policy = buildSharedBrokerPolicy({
+    scope: "instance", pluginId: ACCOUNTS_PLUGIN_ID, operationId: BROKER_OPERATION_ID, ...pins,
+    input: { clientAccess: { literal: "{}" } },
+  });
+  // An auth-recovery refresh carries `?reason=auth-recovery`; the proxy refuses undeclared queries.
+  expect(policy.operations["gateway-refresh"]).toMatchObject({
+    method: "POST", path: "/v1/credential/{credentialId}/refresh",
+    query: { reason: { type: "string", required: false, enum: ["auth-recovery"] } },
+  });
+  // A healed block is cleared by exact scope, separately from clearing every block.
+  expect(policy.operations["gateway-clear-block"]).toMatchObject({
+    method: "DELETE", path: "/v1/credential/{credentialId}/block", request: { kind: "json" },
+  });
+  // The gateway binds exactly the operations the policy declares for it.
+  const bound = gatewayManifest.machine.operations["atyrode.omp.gateway.serve"].services[0]!.operationIds;
+  expect([...bound].sort()).toEqual(Object.keys(policy.operations).filter(id => id.startsWith("gateway-")).sort());
+});

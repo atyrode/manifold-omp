@@ -4,15 +4,13 @@ import { DEFAULT_SERVER_IDLE_TIMEOUT_S } from "@oh-my-pi/pi-ai/auth-broker/types
 import { parseBind } from "@oh-my-pi/pi-ai/utils/parse-bind";
 import type { NativeBrokerStorage } from "./storage.ts";
 
-export interface NativeBrokerOptions extends Omit<AuthBrokerServerOptions, "storage" | "bearerTokenHashes" | "controlBearerToken"> {
+export interface NativeBrokerOptions extends Omit<AuthBrokerServerOptions, "storage"> {
   storage: NativeBrokerStorage;
   bearerTokenHashes?: readonly string[];
   controlBearerToken?: string;
 }
 
-export interface NativeBrokerHandle extends Omit<AuthBrokerServerHandle, "quiesce"> {
-  quiesce(): Promise<void>;
-}
+export type NativeBrokerHandle = AuthBrokerServerHandle;
 
 /** Native authority/lifecycle boundary around the retained SDK broker. */
 export function startNativeBroker(options: NativeBrokerOptions): NativeBrokerHandle {

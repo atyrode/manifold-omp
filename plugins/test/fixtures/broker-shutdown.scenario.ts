@@ -47,14 +47,14 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
     const streamAbort = new AbortController();
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {
-      storage.upsertCredential(provider, {
+      await storage.credentials.upsert(provider, {
         type: "oauth",
         email: "shutdown@accounts.invalid",
         refresh: "SYNTHETIC-SHUTDOWN-ORIGINAL-REFRESH",
         access: "SYNTHETIC-SHUTDOWN-ORIGINAL-ACCESS",
         expires: mode === "automatic" ? Date.now() - 1_000 : Date.now() + 3_600_000,
       });
-      const entry = storage.listStoredCredentials().find(row => row.provider === provider);
+      const entry = storage.credentials.list().find(row => row.provider === provider);
       ctx.check(entry !== undefined, "shutdown-credential-missing");
       broker = startNativeBroker({
         storage,
@@ -98,8 +98,8 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
 
       const reopened = await NativeBrokerStorage.create(database, { refreshOAuthCredential: ctx.refreshOAuthCredential });
       try {
-        await reopened.reload();
-        const persisted = reopened.listStoredCredentials().find(row => row.provider === provider)?.credential;
+        await reopened.credentials.reload();
+        const persisted = reopened.credentials.list().find(row => row.provider === provider)?.credential;
         ctx.check(persisted?.type === "oauth" && persisted.refresh === rotatedRefresh
           && persisted.access === rotatedAccess, "shutdown-rotation-not-persisted");
       } finally {
@@ -110,7 +110,7 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
       // On the unfixed SDK, join its real single-flight before releasing the
       // provider so failure cleanup does not race storage closure as well.
       const drain = refreshStarted && !released && storageOpen
-        ? storage.refreshCredentialById(storage.listStoredCredentials().find(row => row.provider === provider)!.id)
+        ? storage.oauth.refresh(storage.credentials.list().find(row => row.provider === provider)!.id)
         : undefined;
       release.resolve();
       await drain?.catch(() => {});
@@ -151,12 +151,12 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
       type: "oauth" as const, email: "handoff@accounts.invalid", expires: 0,
       access: "SYNTHETIC-HANDOFF-ORIGINAL", refresh: "SYNTHETIC-HANDOFF-REFRESH",
     };
-    storage.upsertCredential(provider, credential);
+    await storage.credentials.upsert(provider, credential);
     broker = startNativeBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [bearer],
       controlBearerToken: bearer, refreshIntervalMs: 10 });
     await entered.promise;
     const persistedDeadline = Date.now() + 3_000;
-    const rotated = () => storage.listStoredCredentials().some(row =>
+    const rotated = () => storage.credentials.list().some(row =>
       row.provider === provider && row.credential.type === "oauth"
       && row.credential.access === "SYNTHETIC-HANDOFF-ROTATED");
     while (!rotated() && Date.now() < persistedDeadline) await Bun.sleep(5);
@@ -191,7 +191,7 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
       if (state === "active") await Bun.sleep(5);
     }
     ctx.check(state === "draining" && !completed, "handoff-forward-not-retired");
-    storage.upsertCredential(provider, credential);
+    await storage.credentials.upsert(provider, credential);
     await Bun.sleep(50);
     ctx.check(refreshCalls === 1, "handoff-started-post-quiesce-refresh");
     upload.end(body);
@@ -199,7 +199,7 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
     const response = await draining;
     const result = await response.json() as { state: string };
     ctx.check(response.status === 200 && result.state === "drained", "handoff-drain-failed");
-    ctx.check(!storage.listStoredCredentials().some(row => row.provider === "synthetic-late-upload"),
+    ctx.check(!storage.credentials.list().some(row => row.provider === "synthetic-late-upload"),
       "handoff-refused-write-was-applied");
   } finally {
     upload?.destroy();

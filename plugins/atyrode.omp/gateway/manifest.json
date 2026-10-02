@@ -99,6 +99,7 @@
               "gateway-refresh",
               "gateway-block",
               "gateway-clear-blocks",
+              "gateway-clear-block",
               "gateway-disable",
               "gateway-usage",
               "gateway-usage-stale",

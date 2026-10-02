@@ -3,12 +3,13 @@ import { z } from "zod";
 import { AuthBrokerClient, type AuthBrokerClientOptions, type FetchSnapshotOptions, type FetchSnapshotResult } from "@oh-my-pi/pi-ai/auth-broker/client";
 import { RemoteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-broker/remote-store";
 import type { SnapshotResponse, SnapshotStreamEvent } from "@oh-my-pi/pi-ai/auth-broker/types";
-import { AuthStorage, type AuthCredentialSnapshotEntry } from "@oh-my-pi/pi-ai/auth-storage";
+import { AuthStorage, type AuthCredentialSnapshotEntry, type KeysApi, type OAuthRefreshReason } from "@oh-my-pi/pi-ai/auth-storage";
 import { getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import type { RuntimeAccountPool } from "../../api/contracts.ts";
 import { unavailable } from "./inputs.ts";
 import { OPENROUTER_LISTING_TEMPLATE } from "./template.ts";
+import { NamespaceViews } from "../sdk-namespace.ts";
 
 /** The SDK's identity-only pool leaves API keys and missing providers unrestricted.
  * Enforce the native launch's concrete provider/id/identity tuples at every ingress
@@ -58,9 +59,9 @@ export class PoolBrokerClient extends AuthBrokerClient {
       }
     }
   }
-  override async refreshCredential(id: number, signal?: AbortSignal) {
+  override async refreshCredential(id: number, signal?: AbortSignal, reason?: OAuthRefreshReason) {
     if (!this.#activeIds.has(id) || this.#slots.get(id)?.identityKey === null) throw unavailable();
-    const result = await super.refreshCredential(id, signal);
+    const result = await super.refreshCredential(id, signal, reason);
     if (!this.#activeIds.has(id) || result.entry.id !== id || !this.admits(result.entry)) {
       throw unavailable();
     }
@@ -73,9 +74,12 @@ class PoolRemoteStore extends RemoteAuthCredentialStore {
 }
 
 /** Reload the SDK's in-memory selection view at request entry. A revocation while
- * SDK ranking/refresh awaits also prevents returning an already-selected bearer. */
+ * SDK ranking/refresh awaits also prevents returning an already-selected bearer.
+ * The stock gateway resolves bearers through `keys.getWithCredential`, so the guard
+ * sits on the `keys` namespace: every key it hands out passes the same check. */
 export class PoolAuthStorage extends AuthStorage {
   readonly #providers: Set<string>;
+  readonly #views = new NamespaceViews();
   constructor(readonly remote: PoolRemoteStore, pool: RuntimeAccountPool, readonly signal: AbortSignal) {
     super(remote, {
       sourceLabel: "native account pool",
@@ -86,18 +90,24 @@ export class PoolAuthStorage extends AuthStorage {
     });
     this.#providers = new Set(Object.keys(pool).filter(provider => pool[provider]!.length > 0));
   }
-  override async getApiKey(...args: Parameters<AuthStorage["getApiKey"]>): Promise<string | undefined> {
+  override get keys(): KeysApi {
+    return this.#views.view(super.keys, source => ({
+      get: (provider, ...rest) => this.#guarded(provider, () => source.get(provider, ...rest)),
+      getWithCredential: (provider, ...rest) => this.#guarded(provider, () => source.getWithCredential(provider, ...rest)),
+    }));
+  }
+  async #guarded<T>(provider: string, resolve: () => Promise<T | undefined>): Promise<T | undefined> {
     this.signal.throwIfAborted();
-    if (!this.#providers.has(args[0])) return undefined;
+    if (!this.#providers.has(provider)) return undefined;
     const revocation = this.remote.revocation;
     try {
       await this.remote.refreshSnapshot();
-      await this.reload();
+      await this.credentials.reload();
     } catch {
       throw unavailable();
     }
-    if (this.remote.listAuthCredentials(args[0]).length === 0) return undefined;
-    const key = await super.getApiKey(...args);
+    if (this.remote.listAuthCredentials(provider).length === 0) return undefined;
+    const key = await resolve();
     this.signal.throwIfAborted();
     return this.remote.revocation === revocation ? key : undefined;
   }
@@ -294,6 +304,6 @@ export async function openPoolStorage(broker: { url: string; token: string }, po
   // The constructor accepts its initial snapshot before registering onSnapshot.
   client.acceptSnapshot(remote.snapshot);
   const storage = new PoolAuthStorage(remote, pool, signal);
-  try { await storage.reload(); signal.throwIfAborted(); return storage; }
+  try { await storage.credentials.reload(); signal.throwIfAborted(); return storage; }
   catch { storage.close(); throw unavailable(); }
 }
