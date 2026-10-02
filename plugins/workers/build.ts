@@ -37,7 +37,7 @@ const graphs = {
     root, version: runtime.sdkVersion, nativeAlias: "pi-natives", native: runtime.tools["pi-natives"],
     lockSha256: "67e9aefe90f674e6bbb0ef8f17066bdbef0a89642cf601e90010f84a986a9e92",
     loaderSha256: "b55d10b960f47d749d0b19a2b0eeeb64d778807dfb19fbc8d0ea7866b963b6be",
-    patch: { file: "patches/@oh-my-pi%2Fpi-ai@18.4.12.patch", sha256: "4082fd41d76c5afc9e47ce043a4d3a583cf52a25bd3ae33be5129c997588406c" },
+    patch: { file: "patches/@oh-my-pi%2Fpi-ai@18.4.12.patch", sha256: "f087bbebc0fe3f34e62726054fe40db6e8e231b0d365efefc3b891867d2e6562" },
   },
   sdkHost: {
     root: join(root, "sdk-host"), version: sdkRuntime.sdkVersion, nativeAlias: "sdk-pi-natives", native: sdkRuntime.tools["pi-natives"],
