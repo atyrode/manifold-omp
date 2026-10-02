@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { setTransports } from "@oh-my-pi/pi-utils/logger";
+import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import type {
   Api,
   Context,
@@ -624,7 +625,9 @@ describe("bounded native provider admission", () => {
     const pool = {
       openai: [{ scope: "fixture-scope", credentialId: 2, identityKey: null }],
     };
-    const model = [...poolModels(pool).values()][0]!;
+    // A chat model: since 18.4 the chat routes answer 400 for an image or other non-chat model
+    // before any credential lookup, and OpenAI's catalog now opens with `chatgpt-image-latest`.
+    const model = [...poolModels(pool).values()].find((candidate) => modelKind(candidate) === "chat")!;
     try {
       for (const policy of [limits, null]) {
         const fixture = await gatewayFixture(provider, policy, pool);
