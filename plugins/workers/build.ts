@@ -35,14 +35,14 @@ const dependencyMarker = ".omp-prepared-dependencies.json";
 const graphs = {
   baseline: {
     root, version: runtime.sdkVersion, nativeAlias: "pi-natives", native: runtime.tools["pi-natives"],
-    lockSha256: "ad91009fa29101b83f5311ad863d652e2b0c79173ebca2cbd57075ff83878b3d",
-    loaderSha256: "6d46cb5c28e1ed40ae94c6019c90399b9b326f4d2b5bf944a802542147356bf8",
-    patch: { file: "patches/@oh-my-pi%2Fpi-ai@18.1.14.patch", sha256: "ef3aaf1d847e1cc2729819b695e28c96ac697561987a49f4951c566141c8c40d" },
+    lockSha256: "67e9aefe90f674e6bbb0ef8f17066bdbef0a89642cf601e90010f84a986a9e92",
+    loaderSha256: "b55d10b960f47d749d0b19a2b0eeeb64d778807dfb19fbc8d0ea7866b963b6be",
+    patch: { file: "patches/@oh-my-pi%2Fpi-ai@18.4.12.patch", sha256: "4082fd41d76c5afc9e47ce043a4d3a583cf52a25bd3ae33be5129c997588406c" },
   },
   sdkHost: {
     root: join(root, "sdk-host"), version: sdkRuntime.sdkVersion, nativeAlias: "sdk-pi-natives", native: sdkRuntime.tools["pi-natives"],
-    lockSha256: "65a8a3c3c73c29e18081a696bdaf924a7086b9c3cfc9f1853927b8394b4c8610",
-    loaderSha256: "de59cfd780bfb4ff4411a542396ba2f7c512add3ad2d474cd2e30220c69e3930",
+    lockSha256: "350ffa4d406d68edf81e04e1fb2f1c14c6463af0b8d0e17498cc6b17fbd0379d",
+    loaderSha256: "b55d10b960f47d749d0b19a2b0eeeb64d778807dfb19fbc8d0ea7866b963b6be",
     patch: undefined,
   },
 } as const;
@@ -109,7 +109,7 @@ async function dependencyInputs(name: GraphName, directory = graphs[name].root) 
   if (hash(lock) !== graph.lockSha256) throw new Error(`Unreviewed bun.lock bytes: ${name}`);
   if (graph.patch) {
     if (hash(await readFile(join(directory, graph.patch.file))) !== graph.patch.sha256) throw new Error("Unreviewed pi-ai patch bytes");
-    if (JSON.stringify(manifest.patchedDependencies) !== JSON.stringify({ "@oh-my-pi/pi-ai@18.1.14": graph.patch.file })) throw new Error("Unreviewed SDK patch declaration");
+    if (JSON.stringify(manifest.patchedDependencies) !== JSON.stringify({ [`@oh-my-pi/pi-ai@${graph.version}`]: graph.patch.file })) throw new Error("Unreviewed SDK patch declaration");
   } else if (manifest.patchedDependencies !== undefined) throw new Error("Private SDK host patches are not supported");
   const dependencies = {
     dependencies: manifest.dependencies, devDependencies: manifest.devDependencies,

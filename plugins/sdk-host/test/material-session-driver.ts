@@ -27,7 +27,7 @@ try {
   const created = await createAgentSession({
     cwd, agentDir, settings, authStorage: auth, modelRegistry: registry,
     sessionManager: SessionManager.create(cwd, join(input.root, "session")), agentRegistry: new AgentRegistry(),
-    ...admitSdkSession(registry, undefined, config, undefined), hasUI: false, skills: [],
+    ...admitSdkSession(registry, undefined, config, undefined), hasUI: false, cacheWarming: false, skills: [],
     systemPrompt: [MATERIAL_SYSTEM_PROMPT], toolNames: [], restrictToolNames: true, allowRestrictedCustomTools: false,
     customTools: [], extensions: [], additionalExtensionPaths: [], disableExtensionDiscovery: true,
     rules: [], contextFiles: [], slashCommands: [],
