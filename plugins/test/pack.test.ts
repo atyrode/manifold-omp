@@ -548,3 +548,45 @@ test("existing case-insensitive source leaf aliases are refused without mutation
     expect(await readFile(sentinel)).toEqual(bytes);
   }
 });
+
+/** Root workers run with no baseline addon mounted. Builds them from the private copy in a
+ * fresh process, so an edited copy of the build script is the one evaluated. */
+async function buildRootWorkers(): Promise<string> {
+  const script = `
+    const { buildWorkerArtifacts } = await import(process.env.OMP_FIXTURE_BUILD);
+    try { await buildWorkerArtifacts("root"); process.stdout.write("built"); }
+    catch (error) { process.stdout.write(error instanceof Error ? error.message : String(error)); }
+  `;
+  const child = Bun.spawn([process.execPath, "--no-install", "--eval", script], {
+    cwd: fixture, stdin: "ignore", stdout: "pipe", stderr: "pipe",
+    env: { ...process.env, OMP_FIXTURE_BUILD: join(fixture, "workers", "build.ts") },
+  });
+  const [, stdout] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+  return stdout;
+}
+
+test("a root worker reaching any pi-natives module beyond the win32-only path helper is refused", async () => {
+  const entry = join(fixture, "workers", "harness", "entry.ts");
+  const entryBytes = await readFile(entry);
+  try {
+    await writeFile(entry, Buffer.concat([entryBytes, Buffer.from('\nexport { Process as nativeProbe } from "@oh-my-pi/pi-natives";\n')]));
+    expect(await buildRootWorkers()).toBe("Worker unexpectedly needs native addon: harness");
+  } finally {
+    await writeFile(entry, entryBytes);
+  }
+}, 180_000);
+
+test("the win32-only path helper is refused once its bytes stop matching the reviewed pin", async () => {
+  // Changed installed bytes already fail the prepared-tree receipt before bundling, so the
+  // pin moves instead: the helper the harness reaches no longer matches what was reviewed.
+  const build = join(fixture, "workers", "build.ts");
+  const buildBytes = await readFile(build);
+  try {
+    const source = buildBytes.toString("utf8");
+    const pinned = /const windowsOnlyNativeSha256 = "([a-f0-9]{64})";/.exec(source)![1]!;
+    await writeFile(build, source.replace(pinned, "0".repeat(64)));
+    expect(await buildRootWorkers()).toBe("Worker unexpectedly needs native addon: harness");
+  } finally {
+    await writeFile(build, buildBytes);
+  }
+}, 180_000);
