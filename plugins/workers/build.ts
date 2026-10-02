@@ -458,6 +458,7 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
     const docs = codingAgent ? await readFile(join(codingAgent, "dist/docs-index.generated.txt"), "utf8") : "";
     const quickjs = codingAgent ? await packageRoot(graph, "quickjs-wasi", "2.2.0") : undefined;
     const quickjsModule = quickjs ? await realpath(join(quickjs, "dist/index.js")) : undefined;
+    const htmlExport = codingAgent ? await realpath(join(codingAgent, "src/export/html/index.ts")) : undefined;
     const nativePackage = await packageRoot(graph, "@oh-my-pi/pi-natives");
     const nativeLoader = await realpath(join(nativePackage, "native/loader-state.js"));
     if (hash(await readFile(nativeLoader)) !== graph.loaderSha256) throw new Error(`Unreviewed native SDK loader bytes: ${graphName}`);
@@ -501,6 +502,17 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
             const contents = replacePublishedSource(await readFile(path, "utf8"),
               "new URL('../quickjs.wasm', import.meta.url)", `new URL(${JSON.stringify(`./${asset}`)}, import.meta.url)`);
             return { contents, loader: "js" };
+          }
+          if (htmlExport && path === htmlExport) {
+            // The export template inlines its vendored scripts as text either way. Importing them
+            // as text keeps the archive within the protocol's eight declared files per artifact.
+            let contents = await readFile(path, "utf8");
+            for (const [binding, file] of [["highlightJs", "highlight.min.js"], ["markedJs", "marked.min.js"]]) {
+              contents = replacePublishedSource(contents, `import ${binding}Path from "./vendor/${file}" with { type: "file" };`,
+                `import ${binding} from "./vendor/${file}" with { type: "text" };`);
+              contents = replacePublishedSource(contents, `const ${binding} = fs.readFileSync(resolveBundledHtmlAssetPath(${binding}Path), "utf8");`, "");
+            }
+            return { contents, loader: "ts" };
           }
           return undefined;
         });
