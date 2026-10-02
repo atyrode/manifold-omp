@@ -35,6 +35,7 @@ import {
 import rootManifest from "../atyrode.omp/manifest.json";
 import accountsManifest from "../atyrode.omp/accounts/manifest.json";
 import gatewayManifest from "../atyrode.omp/gateway/manifest.json";
+import runtimeArtifacts from "../runtime-artifacts.json";
 
 const target = { containerId: "fixture-room", machineId: "fixture-machine" };
 const pins = {
@@ -50,7 +51,10 @@ function fixture(pluginId: string) {
       : pluginId === GATEWAY_PLUGIN_ID
         ? gatewayManifest
         : rootManifest;
-  const machine = MachineHalfSchema.parse(manifest.machine);
+  // A packed accounts installation carries the reviewed runtime tools the broker runs with.
+  const machine = MachineHalfSchema.parse(pluginId === ACCOUNTS_PLUGIN_ID
+    ? { ...manifest.machine, tools: { "pi-natives": runtimeArtifacts.tools["pi-natives"], omp: runtimeArtifacts.tools.omp } }
+    : manifest.machine);
   const consents: {
     node: string;
     cap: Cap;
@@ -906,4 +910,51 @@ test("the broker policy admits every route the 18.4 gateway client sends, and no
   // The gateway binds exactly the operations the policy declares for it.
   const bound = gatewayManifest.machine.operations["atyrode.omp.gateway.serve"].services[0]!.operationIds;
   expect([...bound].sort()).toEqual(Object.keys(policy.operations).filter(id => id.startsWith("gateway-")).sort());
+});
+
+test("promotion refuses an accounts installation retained from an older runtime and admits the reviewed one", async () => {
+  const f = fixture(ACCOUNTS_PLUGIN_ID);
+  const expectedBrokerRevision = f.broker.configuration.revision;
+  const addon = f.machine.tools!["pi-natives"]!["linux-x64"]!;
+  const reviewed = addon.sha256;
+  // An 18.1 accounts installation still ready on the owner carries its own addon.
+  addon.sha256 = "0".repeat(64);
+  expect(await f.client.call("reviewAccountRuntime", { expectedBrokerRevision }))
+    .toEqual({ refused: "omp_account_runtime_outdated" });
+  expect(await f.client.call("promoteAccountRuntime", {
+    containerId: target.containerId, expectedBrokerRevision, reviewDigest: "a".repeat(64),
+  })).toEqual({ refused: "omp_account_runtime_outdated" });
+  expect(f.effects).toEqual([]);
+
+  addon.sha256 = reviewed;
+  f.ctx.services.configureInstance = async () => ({
+    ...f.broker, configuration: { ...f.broker.configuration, revision: "promoted-broker" },
+  });
+  const review = await f.client.call("reviewAccountRuntime", { expectedBrokerRevision });
+  if ("refused" in review) throw new Error(review.refused);
+  expect(await f.client.call("promoteAccountRuntime", {
+    containerId: target.containerId, expectedBrokerRevision, reviewDigest: review.reviewDigest,
+  })).toEqual({ revision: "promoted-broker" });
+});
+
+test("a gateway is not admitted against a broker policy promoted by an older version", async () => {
+  const f = fixture(GATEWAY_PLUGIN_ID);
+  const promoted = buildSharedBrokerPolicy({
+    scope: "instance", pluginId: ACCOUNTS_PLUGIN_ID, operationId: BROKER_OPERATION_ID, ...pins,
+    input: { clientAccess: { literal: "{}" } },
+  });
+  // The 18.1 policy predates the exact-scope clear and the named auth-recovery refresh.
+  const { "gateway-clear-block": _, ...older } = promoted.operations;
+  f.ctx.services.readInstanceConfiguration = async () => ({
+    description: f.broker, policy: { ...promoted, operations: older },
+  });
+  const input = { ...target, expectedServiceRevision: f.configuration.configuration.revision };
+  expect(await f.client.call("reviewGateway", input)).toEqual({ refused: "omp_account_runtime_outdated" });
+  expect(await f.client.call("configureGateway", { ...input, reviewDigest: "a".repeat(64) }))
+    .toEqual({ refused: "omp_account_runtime_outdated" });
+  expect(f.effects).toEqual([]);
+
+  f.ctx.services.readInstanceConfiguration = async () => ({ description: f.broker, policy: promoted });
+  const review = await f.client.call("reviewGateway", input);
+  if ("refused" in review) throw new Error(review.refused);
 });

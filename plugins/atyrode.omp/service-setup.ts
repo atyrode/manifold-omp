@@ -4,6 +4,7 @@ import {
   ServiceConfigurationSchema,
   ServiceRuntimeSchema,
   TerminalRuntimeSchema,
+  type MachineHalf,
   type ServicePolicy,
 } from "@manifold/protocol";
 import {
@@ -36,10 +37,33 @@ import {
   buildGatewayPolicy,
   buildSharedBrokerPolicy,
 } from "./service-policies.ts";
+import runtimeArtifacts from "../runtime-artifacts.json";
 
 const signInConfig = JSON.stringify({ startup: { setupWizard: false } });
 function expectBrokerRevision(actual: string | null, expected: string | null) {
   if (actual !== expected) throw new OmpRefusal("broker_revision_changed");
+}
+/**
+ * An accounts installation retained from an older SDK serves an older broker API than this
+ * plugin's policy declares: an 18.1 broker has no exact-scope block clear, so a promoted 18.4
+ * policy would route the gateway to a 404. Only the reviewed runtime of this version qualifies.
+ */
+function currentAccountRuntime(machine: MachineHalf | undefined): boolean {
+  for (const alias of ["pi-natives", "omp"] as const)
+    for (const platform of ["linux-x64", "linux-arm64"] as const) {
+      const installed = machine?.tools?.[alias]?.[platform];
+      const reviewed = runtimeArtifacts.tools[alias][platform];
+      if (installed?.sha256 !== reviewed.sha256 || installed.entrySha256 !== reviewed.entrySha256) return false;
+    }
+  return true;
+}
+/** Promotion builds exactly this version's policy, and only for a current accounts runtime;
+ * any other installed broker policy came from an older plugin or broker. */
+function promotedByCurrentRuntime(policy: ServicePolicy | null): boolean {
+  if (!policy?.runtime) return false;
+  let expected: ServicePolicy;
+  try { expected = buildSharedBrokerPolicy(policy.runtime); } catch { return false; }
+  return digestOf({ ...policy, revision: expected.revision }) === digestOf(expected);
 }
 export async function accountRuntimeReview(
   ctx: OmpContext,
@@ -104,6 +128,8 @@ export async function accountRuntimeReview(
     broker.pins.artifactSha256 !== signIn.pins.artifactSha256
   )
     throw new OmpRefusal("resources_changed");
+  if (!currentAccountRuntime(broker.deployment.installation?.machine))
+    throw new OmpRefusal("account_runtime_outdated");
   const runtime = ServiceRuntimeSchema.parse({
     scope: "instance",
     pluginId: ACCOUNTS_PLUGIN_ID,
@@ -230,6 +256,10 @@ async function gatewayReview(
   if (!current.connected) throw new OmpRefusal("machine_offline");
   if (candidates.length !== 1 || !candidates[0]?.ready)
     throw new OmpRefusal("gateway_resources_incomplete");
+  // The gateway's broker calls run under the promoted broker policy, which must be this
+  // version's; native admission alone would only refuse later and without a reason.
+  const broker = await ctx.services.readInstanceConfiguration({ serviceId: BROKER_SERVICE_ID });
+  if (!promotedByCurrentRuntime(broker.policy)) throw new OmpRefusal("account_runtime_outdated");
   const installedPolicy = current.configuration.policies.find(policy => policy.serviceId === "omp");
   const storedRequestLimits = installedPolicy?.runtime?.input.requestLimits;
   let installedRequestLimits: GatewayRequestLimits | null = null;
