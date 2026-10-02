@@ -389,13 +389,23 @@ async function notices(importedFiles: Set<string>, codingAgent?: string): Promis
     }
   }
   const sections: string[] = [];
+  // Every @oh-my-pi package ships the same megabyte of aggregate notices, which repeated per
+  // package outgrew the plugin's 16 MiB artifact budget. Identical text is stated once.
+  const firstLabels = new Map<string, string>();
+  const section = (label: string, text: string): string => {
+    const digest = hash(Buffer.from(text));
+    const first = firstLabels.get(digest);
+    if (first !== undefined) return `${label}\nIdentical to ${first} above.`;
+    firstLabels.set(digest, label);
+    return `${label}\n${text}`;
+  };
   const publisherNotices = codingAgent ? await readFile(join(codingAgent, "THIRD-PARTY-NOTICES.txt"), "utf8") : "";
   let needsPublisherNotices = false;
   for (const [name, directory] of [...packages].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
     const entries = (await readdir(directory, { withFileTypes: true }))
       .filter(entry => entry.isFile() && /^(?:licen[cs]e|copying|notice|third-party-notices)(?:[.-].*)?$/i.test(entry.name))
       .map(entry => entry.name).sort();
-    for (const filename of entries) sections.push(`${name} / ${filename}\n${await readFile(join(directory, filename), "utf8")}`);
+    for (const filename of entries) sections.push(section(`${name} / ${filename}`, await readFile(join(directory, filename), "utf8")));
     if (entries.length === 0 && directory.includes("node_modules")) {
       if (name === "quickjs-wasi@2.2.0") sections.push(quickjsNotice);
       else if (name === "@puppeteer/browsers@3.0.6" || name === "puppeteer-core@25.3.0") {
@@ -406,7 +416,7 @@ async function notices(importedFiles: Set<string>, codingAgent?: string): Promis
     }
   }
   if (needsPublisherNotices && !packages.has(`@oh-my-pi/pi-coding-agent@${sdkRuntime.sdkVersion}`))
-    sections.push(`@oh-my-pi/pi-coding-agent@${sdkRuntime.sdkVersion} / THIRD-PARTY-NOTICES.txt\n${publisherNotices}`);
+    sections.push(section(`@oh-my-pi/pi-coding-agent@${sdkRuntime.sdkVersion} / THIRD-PARTY-NOTICES.txt`, publisherNotices));
   return Buffer.from(sections.join("\n\n------------------------------------------------------------\n\n") + "\n");
 }
 
