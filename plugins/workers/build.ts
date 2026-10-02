@@ -242,6 +242,9 @@ export function missingNativeExportMessage(symbolName) {
   return "@oh-my-pi/pi-natives export " + symbolName + " is missing from " + path;
 }
 `;
+/** Reviewed `pi-natives/native/path.js` bytes: pi-utils' path normalization imports it, and it
+ * loads the addon only when `process.platform === "win32"`, a platform no worker targets. */
+const windowsOnlyNativeSha256 = "716fe783105dc03fc5deaab32a4f0470ba366e663ae77de42c5760144855bf99";
 
 export interface WorkerArtifacts {
   /** Assign these two fields to the selected installation's generated machine half. */
@@ -536,7 +539,14 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
       if (item.path === "bun" || item.path.startsWith("bun:") || item.path.startsWith("node:") || builtinModules.includes(item.path)) continue;
       throw new Error(`Unbundled worker import: ${name}: ${item.path}`);
     }
-    if (usesNative && target === "root" && graphName === "baseline") throw new Error(`Worker unexpectedly needs native addon: ${name}`);
+    if (usesNative && target === "root" && graphName === "baseline") {
+      // Only pi-natives' own modules can import its loader. A worker that reaches it solely
+      // through the reviewed win32-only path helper never loads an addon on its Linux platforms.
+      const pathHelper = join(nativePackage, "native", "path.js");
+      const nativeModules = [...importedFiles].filter(path => containsPath(nativePackage, path) && path !== nativeLoader);
+      if (nativeModules.length !== 1 || nativeModules[0] !== pathHelper || hash(await readFile(pathHelper)) !== windowsOnlyNativeSha256)
+        throw new Error(`Worker unexpectedly needs native addon: ${name}`);
+    }
     const licenses = await notices(importedFiles, codingAgent);
     let bytes: Buffer;
     let declaration: MachineArtifact;
