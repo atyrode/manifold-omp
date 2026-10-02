@@ -85,18 +85,14 @@ export const revision = z
 export const digest = z.string().regex(/^[a-f0-9]{64}$/);
 export const MODEL_CATALOG_PROVIDER_LIMIT = 64;
 export const MODEL_CATALOG_MODEL_LIMIT = 16_384;
-/** The SDK's static quota classification, not an account's quota balance or availability. */
-export const ModelCatalogModelSchema = InventoryModelSchema.extend({
-  quotaTier: z.string().min(1).max(128).nullable(),
-});
-export type ModelCatalogModel = z.infer<typeof ModelCatalogModelSchema>;
-/** Bundled metadata only: neither runtime inventory nor availability or measured performance. */
+/** Bundled metadata only: neither runtime inventory nor availability or measured performance.
+ * Rows carry the same `InventoryModel` facts inventory reports, including `quotaTier`. */
 export const ModelCatalogSnapshotSchema = z.strictObject({
   schemaVersion: z.literal(1),
   source: z.literal("bundled"),
   ompVersion: z.string().min(1).max(64),
   revision: digest,
-  models: z.array(ModelCatalogModelSchema).max(MODEL_CATALOG_MODEL_LIMIT),
+  models: z.array(InventoryModelSchema).max(MODEL_CATALOG_MODEL_LIMIT),
 });
 export type ModelCatalogSnapshot = z.infer<typeof ModelCatalogSnapshotSchema>;
 const id = z.string().min(1).max(128);

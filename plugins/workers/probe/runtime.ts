@@ -1,5 +1,9 @@
 import { ProbeError, parseBenchmarkObservation, parseInventoryObservation, parseOmpVersion, probeAddress, type BenchmarkInput, type BenchmarkReceipt, type InventoryReceipt, type ProbeIdentity } from "../../api/probe.ts";
 import { PROBE_HOME, probeChildEnvironment } from "./inputs.ts";
+import { bundledQuotaTiers } from "../../atyrode.omp/sdk-metadata.macro.ts" with { type: "macro" };
+
+// Literal build-time data from the same pinned SDK classification as the metadata projection.
+const quotaTiers: Readonly<Record<string, string>> = bundledQuotaTiers();
 
 export const PROBE_OUTPUT_LIMIT = 4 * 1024 * 1024;
 const fixedBenchmarkArgs = ["--json", "--runs", "1", "--max-tokens", "4", "--profile", "chat", "--prompt", "Reply with the single word: ok"];
@@ -53,7 +57,10 @@ function json(raw: string): unknown {
 export async function inventoryTarget(identities: ProbeIdentity[], signal: AbortSignal): Promise<InventoryReceipt> {
   const version = parseOmpVersion(await capture("version", signal));
   const raw = await capture("inventory", signal);
-  return parseInventoryObservation(json(raw), identities, Date.now(), version);
+  return parseInventoryObservation(json(raw), identities, Date.now(), version, identity => {
+    const address = probeAddress(identity);
+    return Object.hasOwn(quotaTiers, address) ? quotaTiers[address]! : null;
+  });
 }
 export async function benchmarkTarget(input: BenchmarkInput, signal: AbortSignal): Promise<BenchmarkReceipt> {
   parseOmpVersion(await capture("version", signal));
