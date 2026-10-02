@@ -55,7 +55,7 @@ export const InventoryReceiptSchema = z.strictObject({
   observedAt: epochMilliseconds, models: z.array(InventoryModelSchema).max(PROBE_MODEL_LIMIT),
 });
 export type InventoryReceipt = z.infer<typeof InventoryReceiptSchema>;
-type InventoryModel = z.infer<typeof InventoryModelSchema>;
+export type InventoryModel = z.infer<typeof InventoryModelSchema>;
 export const ProbeCandidateSchema = ProbeIdentitySchema.extend({ key: identifier });
 export type ProbeCandidate = z.infer<typeof ProbeCandidateSchema>;
 export const BenchmarkInputSchema = z.strictObject({

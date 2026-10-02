@@ -2,6 +2,43 @@
 
 The `atyrode.omp` plugin owns OMP transcript discovery and terminal resumption. An operator does not need an Agent or an Agent Run credential to resume a conversation.
 
+## Passive bundled model metadata
+
+`atyrode.omp.readModelCatalog({ providers })` is a container-read action with no delegated native authority. The required `providers` array contains at most 64 exact provider identifiers; an empty array selects no rows. Repeated providers are harmless, request order does not affect output, and unsupported or differently cased providers return no rows rather than aliasing another provider. Reserved object-property identifiers are rejected by the shared identifier schema.
+
+The exported `ModelCatalogSnapshotSchema` / `ModelCatalogSnapshot` describes the reply:
+
+```typescript
+{
+  schemaVersion: 1,
+  source: "bundled",
+  ompVersion: string,
+  revision: string, // lowercase SHA-256 of the complete unfiltered snapshot
+  models: ModelCatalogModel[]
+}
+```
+
+`InventoryModel` and `InventoryModelSchema` are the same public model metadata used by inventory: exact `provider`, `id`, and `api`; `inputCostPerMillion` and `outputCostPerMillion`; nullable `contextWindow` and `maxTokens`; `reasoning`; ordered `thinkingLevels`; and `images`. Prices are the SDK's base per-million-token input/output rates, not a billing quote or a representation of cache prices or long-context tiers. Thinking levels come only from the SDK's baked supported-effort metadata: a reasoning model without a controllable effort surface has an empty ladder. Image support comes from its input modalities. Unknown limits remain null.
+
+`ModelCatalogModelSchema` / `ModelCatalogModel` extends that inventory metadata with required `quotaTier: string | null`, projected by the pinned SDK's `quotaTierFor(provider, id)` policy. It is a static quota-scope/display classification, not an account balance, entitlement, reset window or availability claim. For example, `openai-codex/gpt-5.3-codex-spark` has tier `spark`, while ordinary Codex chat models have tier `chat`; a provider/model without an SDK classification has null, never an inferred ordinary tier. Consumers can keep special lanes out of ordinary policy ladders without inspecting model-name substrings. Inventory and benchmark job receipt schemas remain unchanged.
+
+The build-time macro projects the actual package-pinned `@oh-my-pi/pi-catalog` 18.1.14 registry, using the ordinary inventory baseline `OMP_VERSION`, not the separately packaged SDK-host version. Only rows representable by `ModelCatalogModelSchema`, including its reused `InventoryModelSchema` fields, cross this boundary: unrepresentable SDK routing aliases, sentinel/unknown prices and invalid limits are omitted, never relabeled, assigned guessed limits or made free. OMP model resolution folds case, so every member of a duplicate/case-colliding provider/model address group is also omitted, including API aliases; source order never chooses a winner. Such an omission does not establish that a provider or model is unsupported at runtime. Duplicate thinking levels fail packaging.
+
+Rows are sorted by exact `provider/id` using code-unit order. `revision` is SHA-256 over native canonical JSON (sorted object keys, order-preserving arrays) of `{ schemaVersion, source, ompVersion, models }` for the complete projected registry before filtering, including every row's `quotaTier`. It changes with those metadata facts or the OMP version, not with provider selection, accounts or defaults. The action returns at most 16,384 models. Packaging refuses a complete snapshot over that bound or half the native isolate frame budget (currently 4 MiB); it never truncates. Every filtered reply is consequently bounded too.
+
+```typescript
+import { createOmpClient } from "@atyrode/manifold-omp";
+
+const omp = createOmpClient(dispatch); // ordinary authorized container dispatch
+const metadata = await omp.call("readModelCatalog", {
+  providers: ["openai-codex", "anthropic", "deepseek"],
+});
+if ("refused" in metadata) throw new Error(metadata.refused);
+// metadata.models is policy-preview input, not permission or evidence to execute.
+```
+
+This read needs no destination, accounts, configured broker/gateway, native installation or owner approval. The server filters embedded literal data only: no SDK runtime, secret, storage, file, network or job access occurs. The response is not an inventory receipt and has no observation timestamp, availability, reachability, account quota balance or benchmark claim. Explicit inventory/benchmark jobs and ordinary reviewed session admission remain separate requirements for runtime facts and execution.
+
 ## Operator doors
 
 - **`atyrode.omp.listSessions`** — `{ machineId }` returns an array of `{ id, title, cwd, updatedAt }`. The UUID and cwd come from the transcript header, the title comes from OMP's title slot or legacy header, and `updatedAt` is the file's modification time in epoch milliseconds. No message body or filesystem transcript path is returned.
