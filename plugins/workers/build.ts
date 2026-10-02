@@ -219,17 +219,27 @@ async function prepareDependencies(name: GraphName): Promise<void> {
 /** Deliberately replaces only the pinned SDK's host/cache-searching loader, not its API.
  * The owner mounts the verified native artifact at this fixed private path. No package
  * resolution, CPU probing, extraction, cache fallback, source checkout or host PATH.
+ * That artifact is the reviewed release for this exact SDK, never a stale workspace
+ * build, so `missingNativeExport` keeps an absent export `undefined` for the SDK's
+ * `typeof` probes, as the stock loader does for a current addon.
  */
 const pinnedLoader = (graph: DependencyGraph) => `
+const path = ${JSON.stringify(`/runtime/bin/${graph.nativeAlias}`)};
 let bindings;
 export function loadNative() {
   if (bindings) return bindings;
   const module = { exports: {} };
-  process.dlopen(module, ${JSON.stringify(`/runtime/bin/${graph.nativeAlias}`)});
+  process.dlopen(module, path);
   const install = module.exports.__ompInstallTokioRuntime;
   if (typeof install === "function") install();
   bindings = module.exports;
   return bindings;
+}
+export function missingNativeExport() {
+  return undefined;
+}
+export function missingNativeExportMessage(symbolName) {
+  return "@oh-my-pi/pi-natives export " + symbolName + " is missing from " + path;
 }
 `;
 

@@ -73,8 +73,8 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
       target: "bun", format: "esm", packages: "bundle", minify: false,
       plugins: [{ name: "fixture-pinned-native", setup(build) {
         build.onLoad({ filter: /\/pi-natives\/native\/loader-state\.js$/ }, async args => {
-          check(hash(await readFile(args.path)) === "de59cfd780bfb4ff4411a542396ba2f7c512add3ad2d474cd2e30220c69e3930", "fixture-native-loader");
-          return { loader: "js", contents: `let bindings; export function loadNative() { if (bindings) return bindings; const module = { exports: {} }; process.dlopen(module, "/runtime/bin/sdk-pi-natives"); module.exports.__ompInstallTokioRuntime?.(); return bindings = module.exports; }` };
+          check(hash(await readFile(args.path)) === "b55d10b960f47d749d0b19a2b0eeeb64d778807dfb19fbc8d0ea7866b963b6be", "fixture-native-loader");
+          return { loader: "js", contents: `const path = "/runtime/bin/sdk-pi-natives"; let bindings; export function loadNative() { if (bindings) return bindings; const module = { exports: {} }; process.dlopen(module, path); module.exports.__ompInstallTokioRuntime?.(); return bindings = module.exports; } export function missingNativeExport() { return undefined; } export function missingNativeExportMessage(symbolName) { return "@oh-my-pi/pi-natives export " + symbolName + " is missing from " + path; }` };
         });
       } }],
     });
