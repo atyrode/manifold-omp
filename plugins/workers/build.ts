@@ -287,7 +287,7 @@ function replacePublishedSource(source: string, before: string, after: string): 
  */
 async function legacyPiPlugin(graph: DependencyGraph, codingAgent: string): Promise<BunPlugin> {
   const packages = {
-    agent: "@oh-my-pi/pi-agent-core", ai: "@oh-my-pi/pi-ai",
+    agent: "@oh-my-pi/pi-agent-core", ai: "@oh-my-pi/pi-ai", catalog: "@oh-my-pi/pi-catalog",
     "coding-agent": "@oh-my-pi/pi-coding-agent", natives: "@oh-my-pi/pi-natives",
     tui: "@oh-my-pi/pi-tui", utils: "@oh-my-pi/pi-utils",
   };
