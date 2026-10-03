@@ -50,11 +50,11 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     const streamAbort = new AbortController();
     try {
-      storage.upsertCredential(provider, {
+      await storage.credentials.upsert(provider, {
         type: "oauth", email: "quiesce@accounts.invalid", expires: Date.now() - 1_000,
         access: "synthetic-original-access", refresh: "synthetic-original-refresh",
       });
-      const initial = storage.listStoredCredentials().find(row => row.provider === provider);
+      const initial = storage.credentials.list().find(row => row.provider === provider);
       ctx.check(initial, "quiesce-credential-missing");
       if (outcome === "persist") {
         for (const invalid of [null, "", oldBearer, oldHash]) {
@@ -130,8 +130,8 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
         ctx.check(result.status === 200 && handleSucceeded && await controlState() === "drained", "quiesce-success-not-drained");
         const reopened = await NativeBrokerStorage.create(database, { refreshOAuthCredential: ctx.refreshOAuthCredential });
         try {
-          await reopened.reload();
-          const persisted = reopened.listStoredCredentials().find(row => row.id === initial.id)?.credential;
+          await reopened.credentials.reload();
+          const persisted = reopened.credentials.list().find(row => row.id === initial.id)?.credential;
           ctx.check(persisted?.type === "oauth" && persisted.refresh === "synthetic-rotated-refresh"
             && persisted.access === "synthetic-rotated-access", "quiesce-reported-drained-before-persistence");
         } finally { reopened.close(); }
@@ -175,11 +175,11 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
     let broker: NativeBrokerHandle | undefined;
     let draining: Promise<Response> | undefined;
     try {
-      storage.upsertCredential(provider, {
+      await storage.credentials.upsert(provider, {
         type: "oauth", email: "prior@accounts.invalid", expires: Date.now() - 1_000,
         access: "synthetic-prior-access", refresh: "synthetic-prior-refresh",
       });
-      const row = storage.listStoredCredentials().find(entry => entry.provider === provider);
+      const row = storage.credentials.list().find(entry => entry.provider === provider);
       ctx.check(row, "quiesce-prior-credential-missing");
       broker = startNativeBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [nativeBearer],
         controlBearerToken: nativeBearer, disableRefresher: true });
@@ -244,9 +244,9 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
     usageProviderResolver: id => id === usageProvider ? {
       id,
       async fetchUsage() {
-        const row = storage.listStoredCredentials().find(entry => entry.provider === nestedProvider);
+        const row = storage.credentials.list().find(entry => entry.provider === nestedProvider);
         ctx.check(row, "quiesce-nested-credential-missing");
-        try { await storage.refreshCredentialById(row.id); }
+        try { await storage.oauth.refresh(row.id); }
         catch { nestedFailureHandled = true; }
         entered.resolve();
         await release.promise;
@@ -258,12 +258,12 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
   let usage: Promise<Response> | undefined;
   let draining: Promise<Response> | undefined;
   try {
-    for (const provider of [failedProvider, nestedProvider, usageProvider]) storage.upsertCredential(provider, {
+    for (const provider of [failedProvider, nestedProvider, usageProvider]) await storage.credentials.upsert(provider, {
       type: "oauth", email: `${provider}@accounts.invalid`,
       expires: provider === usageProvider ? Date.now() + 3_600_000 : 0,
       access: "synthetic-overlap-access", refresh: "synthetic-overlap-refresh",
     });
-    const row = storage.listStoredCredentials().find(entry => entry.provider === failedProvider);
+    const row = storage.credentials.list().find(entry => entry.provider === failedProvider);
     ctx.check(row, "quiesce-overlap-credential-missing");
     broker = startNativeBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [nativeBearer],
       controlBearerToken: nativeBearer, disableRefresher: true });

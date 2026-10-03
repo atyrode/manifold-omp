@@ -101,7 +101,7 @@ boot = (async () => {
     for (let index = 1; index <= 2; index++) {
       const label = `${prefix}-${index}`;
       const email = `${label}@accounts.invalid`;
-      const entries = storage.upsertCredential(provider, {
+      const entries = await storage.credentials.upsert(provider, {
         type: "oauth", email, expires,
         access: `SYNTHETIC-NOT-A-REAL-ACCESS-TOKEN-${label}`,
         refresh: `SYNTHETIC-NOT-A-REAL-REFRESH-TOKEN-${label}`,
@@ -115,7 +115,7 @@ boot = (async () => {
   }
   for (let index = 1; index <= 2; index++) {
     const label = `deepseek-${index}`;
-    const entries = storage.upsertCredential("deepseek", {
+    const entries = await storage.credentials.upsert("deepseek", {
       type: "api_key", key: `SYNTHETIC-NOT-A-REAL-API-KEY-${label}`,
     });
     const entry = entries.find(candidate => candidate.credential.type === "api_key"
@@ -123,7 +123,7 @@ boot = (async () => {
     if (!entry || entry.identityKey !== null) throw new Error("Synthetic API key was not persisted");
     accounts.push({ id: entry.id, provider: "deepseek", identityKey: null, type: "api_key", label });
   }
-  if (storage.exportSnapshot().credentials.length !== 6 || failed) throw new Error("Synthetic fixture seed failed");
+  if (storage.credentials.snapshot().credentials.length !== 6 || failed) throw new Error("Synthetic fixture seed failed");
 
   Bun.serve = new Proxy(originalServe, {
     apply(target, receiver, args) {

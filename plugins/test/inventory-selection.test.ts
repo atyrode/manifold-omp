@@ -4,12 +4,13 @@ import {
   PROBE_MODEL_LIMIT,
   parseBenchmarkInput,
   parseBenchmarkObservation,
+  parseInventoryObservation,
   ProbeIdentitiesSchema,
   type ProbeIdentity,
   type RuntimeAccountPool,
 } from "../api/index.ts";
 import { defaultInventoryIdentities } from "../atyrode.omp/execution.ts";
-import { bundledProbeModels } from "../atyrode.omp/sdk-metadata.macro.ts" with { type: "macro" };
+import { bundledProbeModels, bundledQuotaTiers } from "../atyrode.omp/sdk-metadata.macro.ts" with { type: "macro" };
 
 function models(provider: string, count: number): ProbeIdentity[] {
   return Array.from({ length: count }, (_, index) => ({
@@ -63,6 +64,32 @@ test("bundled inventory defaults satisfy the public identity contract", () => {
 
   expect(selected).toHaveLength(PROBE_MODEL_LIMIT);
   expect(ProbeIdentitiesSchema.safeParse(selected).success).toBe(true);
+});
+
+test("probe identities are chat models only, as `omp models --json` reports them", () => {
+  const catalog = bundledProbeModels();
+  // OMP 18.4 bundles an image runner under the same provider as Codex chat models.
+  expect(catalog["openai-codex"]!.some(model => model.id === "gpt-image-2")).toBe(false);
+  expect(catalog["openai-codex"]!.some(model => model.id === "gpt-6-luna")).toBe(true);
+  expect(catalog.openai!.some(model => model.id === "text-embedding-3-small")).toBe(false);
+});
+
+test("inventory rows carry the pinned SDK's static quota tier", () => {
+  const identities = [
+    { provider: "openai-codex", id: "gpt-6-luna", api: "openai-codex-responses" },
+    { provider: "fixture", id: "plain", api: "fixture" },
+  ];
+  const row = (provider: string, id: string) => ({ provider, id, selector: `${provider}/${id}`, contextWindow: 1000,
+    maxTokens: 100, reasoning: false, thinking: null, input: ["text"], cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } });
+  const tiers = bundledQuotaTiers();
+  const receipt = parseInventoryObservation({ models: [row("openai-codex", "gpt-6-luna"), row("fixture", "plain")] },
+    identities, 1_700_000_000_000, OMP_VERSION, identity => tiers[`${identity.provider}/${identity.id}`] ?? null);
+  expect(receipt.models.map(({ id, quotaTier }) => ({ id, quotaTier }))).toEqual([
+    { id: "plain", quotaTier: null },
+    { id: "gpt-6-luna", quotaTier: "chat" },
+  ]);
+  // The baked table is the SDK's own classification: Codex spark stays a special lane.
+  expect(tiers["openai-codex/gpt-6-luna"]).toBe("chat");
 });
 
 /**
@@ -119,4 +146,16 @@ test("an endpoint excluded by the account's data policy is settled, not inconclu
     expect(JSON.stringify(receipt)).not.toContain("guardrail");
     expect(JSON.stringify(receipt)).not.toContain("socket hang up");
   }
+});
+
+test("every provider wording for an unknown or unserved model is a settled answer", () => {
+  const status = (error: string) => {
+    const built = reportFor("vendor/model", error);
+    return parseBenchmarkObservation(built.raw, built.input, 1_700_000_000_001, 1_700_000_000_002).results[0]!.status;
+  };
+  for (const error of ["400 no such model: vendor/model", "Unknown model vendor/model", "The model `vendor/model` does not exist"])
+    expect(status(error)).toBe("not_found");
+  expect(status("Your plan does not support this model")).toBe("client_blocked");
+  expect(status("model_not_found")).toBe("not_found");
+  expect(status("upstream timed out")).toBe("unresolved");
 });

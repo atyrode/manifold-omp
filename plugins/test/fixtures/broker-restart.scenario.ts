@@ -42,9 +42,9 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
   };
   try {
     // Generation advances belong to this AuthStorage, not to the persistent DB.
-    for (let i = 0; i < 12; i++) storage.upsertCredential(selected, credential(`synthetic-before-${i}`));
-    storage.upsertCredential(removed, credential("synthetic-removed"));
-    storage.upsertCredential(marker, credential("synthetic-marker-before"));
+    for (let i = 0; i < 12; i++) await storage.credentials.upsert(selected, credential(`synthetic-before-${i}`));
+    await storage.credentials.upsert(removed, credential("synthetic-removed"));
+    await storage.credentials.upsert(marker, credential("synthetic-marker-before"));
     broker = startNativeBroker({ storage, bind: "127.0.0.1:0", bearerTokens: ["synthetic-original-service"],
       bearerTokenHashes: [bearerSha256], controlBearerToken: "synthetic-original-service", disableRefresher: true });
     const port = broker.port;
@@ -84,10 +84,10 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
     broker = undefined;
     storage.close();
     storage = await NativeBrokerStorage.create(dbPath, { refreshOAuthCredential: ctx.refreshOAuthCredential });
-    await storage.reload();
-    storage.upsertCredential(selected, credential("synthetic-after-restart"));
-    await storage.remove(removed);
-    ctx.check(storage.getGeneration() < oldGeneration, "restart-generation-not-lower");
+    await storage.credentials.reload();
+    await storage.credentials.upsert(selected, credential("synthetic-after-restart"));
+    await storage.credentials.remove(removed);
+    ctx.check(storage.credentials.generation < oldGeneration, "restart-generation-not-lower");
     broker = startNativeBroker({ storage, bind: `127.0.0.1:${port}`, bearerTokens: ["synthetic-replacement-service"],
       bearerTokenHashes: [bearerSha256], controlBearerToken: "synthetic-replacement-service", disableRefresher: true });
     ctx.check(broker.url === origin, "restart-origin-changed");
@@ -98,7 +98,7 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
     ctx.check(remote.snapshot.generation < oldGeneration, "consumer-generation-not-reset");
     const restartedSnapshot = remote.snapshot;
 
-    storage.upsertCredential(selected, credential("synthetic-after-stream-update"));
+    await storage.credentials.upsert(selected, credential("synthetic-after-stream-update"));
     await eventually(() => accessIs(selected, "synthetic-after-stream-update"), "post-restart-entry-not-consumed");
     ctx.check(remote.snapshot.generation > restartedSnapshot.generation, "post-restart-generation-not-advanced");
     const selectedEntry = remote.snapshot.credentials.find(row => row.provider === selected);
@@ -112,7 +112,7 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
     replay({ kind: "removed", ...stale, id: selectedEntry.id });
     // This real broker event is queued after the replayed bytes. Seeing it is a
     // processing barrier, rather than assuming a sleep allowed stale frames in.
-    storage.upsertCredential(marker, credential("synthetic-marker-after"));
+    await storage.credentials.upsert(marker, credential("synthetic-marker-after"));
     await eventually(() => accessIs(marker, "synthetic-marker-after"), "stream-replay-barrier-not-consumed");
     ctx.check(accessIs(selected, "synthetic-after-stream-update"), "stale-event-regressed-selected-credential");
     ctx.check(remote.listAuthCredentials(removed).length === 0, "stale-event-restored-removed-credential");
@@ -185,8 +185,8 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
   broker = undefined;
   remote = undefined;
   try {
-    storage.upsertCredential(selected, credential("synthetic-authority-before"));
-    storage.upsertCredential(removed, credential("synthetic-authority-removed"));
+    await storage.credentials.upsert(selected, credential("synthetic-authority-before"));
+    await storage.credentials.upsert(removed, credential("synthetic-authority-removed"));
     broker = startNativeBroker({ storage, bind: "127.0.0.1:0", bearerTokens: [token], disableRefresher: true });
     const fixtureFetch = ctx.fetchTo(broker.url);
     const fetchImpl: typeof fetch = Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
@@ -203,8 +203,8 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
       onSnapshot: () => { if (raceStreamCount >= 2) replacementApplied = true; },
     });
     await within(firstFrameReady.promise, "first-frame-not-parked");
-    storage.upsertCredential(selected, credential("synthetic-authority-current"));
-    await storage.remove(removed);
+    await storage.credentials.upsert(selected, credential("synthetic-authority-current"));
+    await storage.credentials.remove(removed);
     await within(remote.refreshSnapshot(), "direct-refresh-waited-for-obsolete-stream");
     ctx.check(accessIs(selected, "synthetic-authority-current")
       && remote.listAuthCredentials(removed).length === 0, "direct-refresh-not-published");
@@ -222,7 +222,7 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
     // A waiter queued behind another read must recognize that peer's fresh result,
     // rather than silently moving its baseline forward and waiting for another change.
     holdSnapshot = true;
-    storage.upsertCredential(selected, credential("synthetic-queue-current"));
+    await storage.credentials.upsert(selected, credential("synthetic-queue-current"));
     pendingRefresh = remote.refreshSnapshot();
     await within(snapshotRead.promise, "foreground-snapshot-not-parked");
     const waiterAbort = new AbortController();

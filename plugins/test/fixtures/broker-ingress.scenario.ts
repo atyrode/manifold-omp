@@ -27,11 +27,11 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
   const storage = await NativeBrokerStorage.create(join(ctx.root, "ingress.db"), { refreshOAuthCredential: ctx.refreshOAuthCredential });
   let broker: NativeBrokerHandle | undefined;
   try {
-    storage.upsertCredential(provider, {
+    await storage.credentials.upsert(provider, {
       type: "oauth", email: "ingress@accounts.invalid", expires: Date.now() - 1_000,
       access: "synthetic-original-access", refresh: "synthetic-original-refresh",
     });
-    const stored = storage.listStoredCredentials().find(row => row.provider === provider);
+    const stored = storage.credentials.list().find(row => row.provider === provider);
     ctx.check(stored, "ingress-credential-missing");
     const expectDenied = async (origin: string, authorization?: string, path = "/v1/snapshot", method = "GET") => {
       const response = await ctx.fetchTo(origin)(`${origin}${path}`, {

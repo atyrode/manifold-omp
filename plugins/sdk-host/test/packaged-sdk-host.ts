@@ -359,9 +359,13 @@ try {
         check(!context.includes("CONFIG-SECRET-SENTINEL") &&
           !context.includes(["SYNTHETIC", "LOCAL", "FIXTURE", "NOT", "A", "CREDENTIAL"].join("-")), "material-secret-disclosure");
       }
-      if (selected) check(instructions.includes("sealed-proof"), "selected-skill-not-advertised");
+      // Advertisement is what reaches the model. OMP 18.4 tool objects also carry their session, whose
+      // memoized settings name a project-ignored skill in its filter without offering it.
+      const advertised = JSON.stringify({ system: parsed.context.systemPrompt, tools: parsed.context.tools?.map(
+        ({ name, description, parameters, customFormat, customWireName }) => ({ name, description, parameters, customFormat, customWireName })) });
+      if (selected) check(advertised.includes("sealed-proof"), "selected-skill-not-advertised");
       else if (material || !native || scenario === "fresh-sdk-disabled") check(!instructions.includes("skill://"), "disabled-skill-advertised");
-      else check(!instructions.includes("sealed-proof"), filtered ? "filtered-skill-advertised" : "historical-skill-restored");
+      else check(!advertised.includes("sealed-proof"), filtered ? "filtered-skill-advertised" : "historical-skill-restored");
       if (native) {
         check(parsed.context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-PROMPT")), "fresh-prompt-missing");
         check(!JSON.stringify(parsed.context.messages).includes("SDK-PROOF-COMPLETE"), "historical-conversation-restored");

@@ -104,8 +104,8 @@ describe("native account-pool gateway", () => {
     const storage = await openPoolStorage(broker, inputs.accountPool, controller.signal, fixture.fetch);
     try {
       expect(storage.remote.listAuthCredentials().map(entry => entry.id)).toEqual([1]);
-      expect(await storage.getApiKey("openai-codex")).toBeUndefined();
-      expect(await storage.getApiKey("github-copilot")).toBeUndefined();
+      expect((await storage.keys.getWithCredential("openai-codex"))?.apiKey).toBeUndefined();
+      expect((await storage.keys.getWithCredential("github-copilot"))?.apiKey).toBeUndefined();
       const models = poolModels(inputs.accountPool);
       expect(models.get("anthropic/claude-sonnet-4-5")).toMatchObject({ provider: "anthropic", id: "claude-sonnet-4-5", api: "anthropic-messages" });
       expect([...models.values()].every(model => model.provider === "anthropic")).toBe(true);
@@ -122,16 +122,16 @@ describe("native account-pool gateway", () => {
     const storage = await openPoolStorage(broker, inputs.accountPool, controller.signal, fixture.fetch);
     try {
       await fixture.listening.promise;
-      expect(await storage.getApiKey("openai", "api-key-session")).toBe("fixture-selected-api-key");
-      expect(await storage.getApiKey("anthropic")).toBeUndefined();
+      expect((await storage.keys.getWithCredential("openai", "api-key-session"))?.apiKey).toBe("fixture-selected-api-key");
+      expect((await storage.keys.getWithCredential("anthropic"))?.apiKey).toBeUndefined();
       // Rotating bytes in the same authorized slot is allowed without widening it.
       fixture.publish({ ...selected, credential: { type: "api_key", key: "fixture-rotated-api-key" } });
       await eventually(() => storage.remote.listAuthCredentials("openai").some(entry => entry.credential.type === "api_key" && entry.credential.key === "fixture-rotated-api-key"));
-      expect(await storage.getApiKey("openai", "api-key-session")).toBe("fixture-rotated-api-key");
+      expect((await storage.keys.getWithCredential("openai", "api-key-session"))?.apiKey).toBe("fixture-rotated-api-key");
       // Null does not admit an OAuth identity newly assigned to the same row.
       fixture.publish(credential(7, "new-identity", "openai"));
       await eventually(() => storage.remote.listAuthCredentials("openai").length === 0);
-      expect(await storage.getApiKey("openai", "api-key-session")).toBeUndefined();
+      expect((await storage.keys.getWithCredential("openai", "api-key-session"))?.apiKey).toBeUndefined();
     } finally { controller.abort(); storage.close(); }
   });
   test("credential issuance fails closed when broker authority is unavailable", async () => {
@@ -140,9 +140,9 @@ describe("native account-pool gateway", () => {
     const controller = new AbortController();
     const storage = await openPoolStorage(broker, inputs.accountPool, controller.signal, fixture.fetch);
     try {
-      expect(await storage.getApiKey("anthropic", "authority-session")).toBe("fixture-access-1");
+      expect((await storage.keys.getWithCredential("anthropic", "authority-session"))?.apiKey).toBe("fixture-access-1");
       fixture.snapshotAvailable = false;
-      await expect(storage.getApiKey("anthropic", "authority-session")).rejects.toThrow(
+      await expect(storage.keys.getWithCredential("anthropic", "authority-session")).rejects.toThrow(
         "gateway_unavailable",
       );
     } finally {
@@ -174,12 +174,12 @@ describe("native account-pool gateway", () => {
     try {
       await fixture.listening.promise;
       await expect(storage.remote.markCredentialSuspect(3)).rejects.toThrow("gateway_unavailable");
-      storage.pinSessionOAuthAccount("anthropic", "refresh-mismatch-session", 1);
-      expect(await storage.getApiKey("anthropic", "refresh-mismatch-session")).toBe("fixture-access-1");
+      storage.sessions.pin("anthropic", "refresh-mismatch-session", 1);
+      expect((await storage.keys.getWithCredential("anthropic", "refresh-mismatch-session"))?.apiKey).toBe("fixture-access-1");
       fixture.refreshEntry = credential(2, "other");
       await expect(storage.remote.markCredentialSuspect(1)).rejects.toThrow("gateway_unavailable");
       expect(storage.remote.listAuthCredentials().map(entry => entry.id)).toEqual([1, 2]);
-      expect(await storage.getApiKey("anthropic", "refresh-mismatch-session")).toBe("fixture-access-1");
+      expect((await storage.keys.getWithCredential("anthropic", "refresh-mismatch-session"))?.apiKey).toBe("fixture-access-1");
     } finally { controller.abort(); storage.close(); }
   });
 
@@ -190,10 +190,10 @@ describe("native account-pool gateway", () => {
     const storage = await openPoolStorage(broker, inputs.accountPool, controller.signal, fixture.fetch);
     try {
       await fixture.listening.promise;
-      expect(await storage.getApiKey("anthropic", "fixture-session")).toBe("fixture-access-1");
+      expect((await storage.keys.getWithCredential("anthropic", "fixture-session"))?.apiKey).toBe("fixture-access-1");
       fixture.remove(1);
       await eventually(() => storage.remote.listAuthCredentials().length === 0);
-      expect(await storage.getApiKey("anthropic", "fixture-session")).toBeUndefined();
+      expect((await storage.keys.getWithCredential("anthropic", "fixture-session"))?.apiKey).toBeUndefined();
     } finally { controller.abort(); storage.close(); }
     await eventually(() => fixture.streams.size === 0);
   });
@@ -210,10 +210,10 @@ describe("native account-pool gateway", () => {
       await storage.remote.markCredentialSuspect(1);
       await eventually(() => storage.remote.listAuthCredentials("anthropic").some(current =>
         current.credential.type === "oauth" && current.credential.access === "fixture-rotated-access"));
-      expect(await storage.getApiKey("anthropic")).toBe("fixture-rotated-access");
+      expect((await storage.keys.getWithCredential("anthropic"))?.apiKey).toBe("fixture-rotated-access");
       fixture.refreshEntry = credential(1, "unlisted");
       await expect(storage.remote.markCredentialSuspect(1)).rejects.toThrow("gateway_unavailable");
-      expect(await storage.getApiKey("anthropic")).toBeUndefined();
+      expect((await storage.keys.getWithCredential("anthropic"))?.apiKey).toBeUndefined();
     } finally { controller.abort(); storage.close(); }
   });
 
@@ -224,11 +224,11 @@ describe("native account-pool gateway", () => {
     const storage = await openPoolStorage(broker, inputs.accountPool, controller.signal, fixture.fetch);
     try {
       await fixture.listening.promise;
-      expect(await storage.getApiKey("anthropic", "identity-session")).toBe("fixture-access-1");
+      expect((await storage.keys.getWithCredential("anthropic", "identity-session"))?.apiKey).toBe("fixture-access-1");
       await eventually(() => fixture.streams.size > 0);
       fixture.publish(credential(1, "unlisted"));
       await eventually(() => storage.remote.snapshot.generation === 2);
-      expect(await storage.getApiKey("anthropic", "identity-session")).toBeUndefined();
+      expect((await storage.keys.getWithCredential("anthropic", "identity-session"))?.apiKey).toBeUndefined();
     } finally { controller.abort(); storage.close(); }
   });
 
@@ -245,11 +245,11 @@ describe("native account-pool gateway", () => {
     const storage = await openPoolStorage(broker, inputs.accountPool, controller.signal, fixture.fetch);
     try {
       await fixture.listening.promise;
-      expect(await storage.getApiKey("anthropic", "stale-stream-session")).toBe("fixture-access-1");
+      expect((await storage.keys.getWithCredential("anthropic", "stale-stream-session"))?.apiKey).toBe("fixture-access-1");
       fixture.publish(credential(2, "current"));
       fixture.remove(1);
       await eventually(() => storage.remote.snapshot.generation === 3);
-      expect(await storage.getApiKey("anthropic", "stale-stream-session")).toBe("fixture-access-2");
+      expect((await storage.keys.getWithCredential("anthropic", "stale-stream-session"))?.apiKey).toBe("fixture-access-2");
 
       await eventually(() => fixture.streams.size > 0);
       fixture.send({ kind: "entry", entry: credential(1, "removed"), generation: 1,
@@ -264,8 +264,8 @@ describe("native account-pool gateway", () => {
       fixture.publish({ ...marker, credential: { type: "api_key", key: "fixture-stream-marker-after" } });
       await eventually(() => storage.remote.snapshot.generation === 4);
       expect(storage.remote.listAuthCredentials("anthropic").map(entry => entry.id)).toEqual([2]);
-      expect(await storage.getApiKey("anthropic", "stale-stream-session")).toBe("fixture-access-2");
-      expect(await storage.getApiKey("openai")).toBe("fixture-stream-marker-after");
+      expect((await storage.keys.getWithCredential("anthropic", "stale-stream-session"))?.apiKey).toBe("fixture-access-2");
+      expect((await storage.keys.getWithCredential("openai"))?.apiKey).toBe("fixture-stream-marker-after");
     } finally { controller.abort(); storage.close(); }
   });
 

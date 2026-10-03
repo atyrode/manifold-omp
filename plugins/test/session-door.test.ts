@@ -789,9 +789,11 @@ test("a one-shot pins its configured live-listed model, so discovery timing cann
     { id: 7, provider: "anthropic", identityKey: "fixture-identity", credential: { type: "oauth", email: "fixture@example.invalid" } },
     { id: 8, provider: "openrouter", identityKey: null, credential: { type: "api_key" } },
   ] } });
-  const configured = "openrouter/stealth/space-bunny-alpha:medium";
+  // A fixture id no catalog ships: the 18.4 SDK bundles `stealth/space-bunny-alpha`, which this
+  // test configured before, so a real live-only name can stop exercising the live-listed path.
+  const configured = "openrouter/stealth/manifold-fixture-alpha:medium";
   // The premise: the pinned SDK catalog does not carry it, only the gateway's live listing does.
-  expect(getBundledModels("openrouter").some(model => model.id === "stealth/space-bunny-alpha")).toBe(false);
+  expect(getBundledModels("openrouter").some(model => model.id === "stealth/manifold-fixture-alpha")).toBe(false);
   const live = { ...session,
     accountPool: { ...session.accountPool, openrouter: [{ scope, credentialId: 8, identityKey: null }] },
     overlay: { modelRoles: { default: configured }, retry: { enabled: true, modelFallback: false } } };
@@ -813,7 +815,7 @@ test("a one-shot pins its configured live-listed model, so discovery timing cann
   const template = OPENROUTER_LISTING_TEMPLATE?.thinking;
   expect(template?.efforts.map(String)).toContain("medium");
   for (const provider of pooled)
-    expect(provider).toMatchObject({ modelOverrides: { "openrouter/stealth/space-bunny-alpha": { reasoning: true, thinking: template } } });
+    expect(provider).toMatchObject({ modelOverrides: { "openrouter/stealth/manifold-fixture-alpha": { reasoning: true, thinking: template } } });
   // The owner fills in the endpoint and bearer; the native worker admits the rest as composed.
   const bearer = "fixture-native-service-bearer-0000000000000001";
   expect(ProbeModelsConfigSchema.safeParse({ providers: Object.fromEntries(Object.entries(models.providers).map(
@@ -884,7 +886,7 @@ test("a one-shot holds every model role its configuration leaves unset to the co
   const job = await f.client.call("runSession", { ...advised, reviewDigest });
   if ("refused" in job) throw new Error(job.refused);
   const roles: Record<string, string> = JSON.parse(String(f.posted[0]!.input.config)).modelRoles;
-  // The chat roles of OMP 18.1.14 and of the SDK host's 18.2.7, which adds `memory`.
+  // The chat roles of OMP 18.4.12, in the CLI and in the SDK host.
   for (const role of ["default", "slow", "vision", "plan", "commit", "tiny", "memory", "task", "advisor"])
     expect(roles[role]).toBe(configured);
   // A role the operator configured keeps its model.

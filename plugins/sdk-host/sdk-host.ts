@@ -73,7 +73,7 @@ try {
     // Seal auxiliary delegation settings alongside the SDK's spawn policy.
     "startup.setupWizard": false,
     ...(restricted ? {
-      "lsp.enabled": false, "irc.enabled": false, "advisor.enabled": false,
+      "lsp.enabled": false, "advisor.enabled": false,
       "prewalk.enabled": false, "retry.modelFallback": false,
       "task.agentAdvisor": { task: "off" }, "task.prewalk": false,
       "skills.enabled": skillsRuntime.mode === "selected",
@@ -149,6 +149,8 @@ try {
     cwd, agentDir: PROBE_AGENT, settings, authStorage: auth, modelRegistry: registry,
     sessionManager: manager, agentRegistry: new AgentRegistry(), ...admitted,
     hasUI: kind === "interactive" || kind === "resume",
+    // Prompt-cache warming spends provider requests no one is waiting on; one-shots never keep it.
+    cacheWarming: kind !== "print" && !materialOnly,
     ...(restricted || skillsRuntime.mode === "disabled" ? { skills } : {}),
     ...(rpc ? { appendSystemPrompt: readFileSync(process.argv[4]!, "utf8") } : {}),
     ...(restricted ? {
@@ -184,12 +186,18 @@ try {
       // The source-bearing message is retained verbatim by SessionManager and never prompt-processed.
       code = await runMaterialPrintMode(created.session, initialMaterial);
     } else if (kind === "print") {
-      code = await runPrintMode(created.session, { mode: "json", initialMessage: readSessionInput("prompt") });
+      code = await runPrintMode(created.session, {
+        mode: "json", initialMessage: readSessionInput("prompt"),
+        ...(created.mcpManager ? { mcpManager: created.mcpManager } : {}),
+      });
     } else if (rpc) {
-      await runRpcMode(created.session, created.setToolUIContext, created.eventBus);
+      await runRpcMode(created.session, {
+        setToolUIContext: created.setToolUIContext,
+        ...(created.subagentEventBus ? { subagentEventBus: created.subagentEventBus } : {}),
+      });
     } else {
-      mode = new InteractiveMode(created.session, "18.2.7", undefined, created.setToolUIContext,
-        created.lspServers, created.mcpManager, created.eventBus);
+      mode = new InteractiveMode(created.session, "18.4.12", undefined, created.setToolUIContext,
+        created.lspServers, created.mcpManager, created.eventBus, undefined, created.subagentEventBus);
       await mode.init();
       if (resume) await mode.renderInitialMessages();
       if (!resume) {

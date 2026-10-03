@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { setTransports } from "@oh-my-pi/pi-utils/logger";
+import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import type {
   Api,
   Context,
@@ -371,7 +372,10 @@ describe("bounded native provider admission", () => {
 
   test("actual gateway keeps canonical identity, progress and priced usage while capping thinking and output", async () => {
     const provider = new SyntheticProvider();
-    const fixture = await gatewayFixture(provider);
+    // Since 18.4.2 the SDK turns budget thinking off when the output ceiling cannot hold its
+    // 1024-token minimum plus a 4000-token answer buffer, so 4096 would leave no budget to cap.
+    const policy = { ...limits, maxOutputTokens: 8192 };
+    const fixture = await gatewayFixture(provider, policy);
     try {
       const response = await fixture.request({
         maxTokens: 100_000,
@@ -401,7 +405,7 @@ describe("bounded native provider admission", () => {
       expect(done.message.usage.cost.total).toBeGreaterThan(0);
       expect(provider.requests).toHaveLength(1);
       expect(provider.requests[0]!.max_tokens).toBeLessThanOrEqual(
-        limits.maxOutputTokens,
+        policy.maxOutputTokens,
       );
       expect(provider.requests[0]!.thinking!.budget_tokens).toBeLessThan(
         provider.requests[0]!.max_tokens,
@@ -621,7 +625,9 @@ describe("bounded native provider admission", () => {
     const pool = {
       openai: [{ scope: "fixture-scope", credentialId: 2, identityKey: null }],
     };
-    const model = [...poolModels(pool).values()][0]!;
+    // A chat model: since 18.4 the chat routes answer 400 for an image or other non-chat model
+    // before any credential lookup, and OpenAI's catalog now opens with `chatgpt-image-latest`.
+    const model = [...poolModels(pool).values()].find((candidate) => modelKind(candidate) === "chat")!;
     try {
       for (const policy of [limits, null]) {
         const fixture = await gatewayFixture(provider, policy, pool);

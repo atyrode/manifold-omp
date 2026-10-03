@@ -3,10 +3,11 @@ import {
   AuthStorage,
   SqliteAuthCredentialStore,
   type AuthStorageOptions,
-  type OAuthCredential,
-  type StoredOAuthRefreshOptions,
-  type StoredOAuthRefreshResult,
+  type CredentialsApi,
+  type OAuthApi,
+  type UsageApi,
 } from "@oh-my-pi/pi-ai/auth-storage";
+import { NamespaceViews } from "../sdk-namespace.ts";
 
 interface OperationScope {
   pending: number;
@@ -17,6 +18,7 @@ interface OperationScope {
 export class NativeBrokerStorage extends AuthStorage {
   readonly #pending = new Map<Promise<void>, OperationScope>();
   readonly #scope = new AsyncLocalStorage<OperationScope>();
+  readonly #views = new NamespaceViews();
   #failed = false;
   #refreshAdmission = true;
   #drainStarted = false;
@@ -70,30 +72,35 @@ export class NativeBrokerStorage extends AuthStorage {
     return wait.promise;
   }
 
-  override refreshStoredOAuthCredential<T extends OAuthCredential = OAuthCredential>(
-    provider: string,
-    options: StoredOAuthRefreshOptions<T>,
-  ): Promise<StoredOAuthRefreshResult<T>> {
-    // The SDK's durable path includes usage refresh detached by its caller's
-    // deadline. Resolution follows CAS persistence and lease release, not just
-    // provider completion.
-    return this.#own(() => super.refreshStoredOAuthCredential(provider, options));
+  // The stock broker server and refresher reach storage only through these
+  // namespaces. Their public operations are owned; the SDK's internal module
+  // calls stay inside those operations and the patched drain's refresh maps.
+  override get credentials(): CredentialsApi {
+    return this.#views.view(super.credentials, source => ({
+      reload: () => this.#own(() => source.reload()),
+      poll: () => this.#own(() => source.poll()),
+    }));
   }
 
-  override refreshCredentialById(id: number, signal?: AbortSignal) {
-    // A stock refresher tick already awaiting reload may arrive after stop().
-    // Reject it before starting a new refresh; admitted operations remain live.
-    if (!this.#refreshAdmission) return Promise.reject(new Error("Broker is draining"));
-    return this.#waitForCaller(this.#own(() => super.refreshCredentialById(id)), signal);
+  override get oauth(): OAuthApi {
+    return this.#views.view(super.oauth, source => ({
+      refresh: (id, signal, options) => {
+        // A stock refresher tick already awaiting reload may arrive after stop().
+        // Reject it before starting a new refresh; admitted operations remain live.
+        if (!this.#refreshAdmission) return Promise.reject(new Error("Broker is draining"));
+        return this.#waitForCaller(this.#own(() => source.refresh(id, undefined, options)), signal);
+      },
+    }));
   }
 
-  override fetchUsageReports(options?: Parameters<AuthStorage["fetchUsageReports"]>[0]) {
-    const { signal, ...operationOptions } = options ?? {};
-    return this.#waitForCaller(this.#own(() => super.fetchUsageReports(operationOptions)), signal);
+  override get usage(): UsageApi {
+    return this.#views.view(super.usage, source => ({
+      reports: options => {
+        const { signal, ...operationOptions } = options ?? {};
+        return this.#waitForCaller(this.#own(() => source.reports(operationOptions)), signal);
+      },
+    }));
   }
-
-  override reload(): Promise<void> { return this.#own(() => super.reload()); }
-  override pollExternalChanges(): Promise<boolean> { return this.#own(() => super.pollExternalChanges()); }
 
   startRefreshAdmission(): void {
     if (this.#pending.size === 0 && !this.#failed) this.#drainStarted = false;

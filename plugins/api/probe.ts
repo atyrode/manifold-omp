@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { modelId, ThinkingLevelSchema, epochMilliseconds, identifier } from "./contracts.ts";
 
-export const OMP_VERSION = "18.1.14" as const;
+export const OMP_VERSION = "18.4.12" as const;
 export const PROBE_MODEL_LIMIT = 256;
 /**
  * HOW LONG A SESSION WAITS FOR THE GATEWAY TO LIST ITS MODELS, per discovery attempt.
@@ -33,7 +33,7 @@ export function exactModelScope(reference: string): string {
  * hand-off, eval's `completion()`, compaction's role candidates. A role left unset is not the
  * default model there (`advisor` falls to OMP's reasoning priority list, `tiny` and `memory` to its
  * fast one), and a workspace's own `.omp/config.yml` may name any model for any role. These are
- * the chat roles of both runtimes a one-shot starts, OMP 18.1.14 and the SDK host's 18.2.7; the
+ * the chat roles of both runtimes a one-shot starts, the OMP 18.4.12 CLI and SDK host; the
  * model-kind roles select image, search, speech and judgment models, which a chat model is not.
  */
 export const ONE_SHOT_PINNED_ROLES = ["smol", "slow", "vision", "plan", "commit", "tiny", "memory", "task", "advisor"] as const;
@@ -49,7 +49,14 @@ export const ProbeIdentitiesSchema = z.array(ProbeIdentitySchema).min(1).max(PRO
 export const InventoryModelSchema = ProbeIdentitySchema.extend({
   inputCostPerMillion: number, outputCostPerMillion: number, contextWindow: limit, maxTokens: limit,
   reasoning: z.boolean(), thinkingLevels: z.array(ThinkingLevelSchema).max(6), images: z.boolean(),
+  /**
+   * The pinned SDK's static `quotaTierFor(provider, id)` classification, such as `spark` or
+   * `chat`; null when the SDK classifies nothing. Not an account balance or entitlement.
+   */
+  quotaTier: z.string().min(1).max(128).nullable(),
 });
+/** Classifies one inventory identity the way the bundled metadata projection does. */
+export type QuotaTierOf = (identity: ProbeIdentity) => string | null;
 export const InventoryReceiptSchema = z.strictObject({
   schemaVersion: z.literal(1), kind: z.literal("inventory"), ompVersion: z.literal(OMP_VERSION),
   observedAt: epochMilliseconds, models: z.array(InventoryModelSchema).max(PROBE_MODEL_LIMIT),
@@ -123,7 +130,7 @@ export function parseOmpVersion(raw: string): typeof OMP_VERSION {
   return OMP_VERSION;
 }
 
-// v18.1.14 models-cli.ts toModelJson does NOT emit api or version. API is joined
+// v18.4.12 models-cli.ts toModelJson does NOT emit api, version or quota tier. API is joined
 // only from exact, sealed native models configuration identities, never spelling.
 // Other providers may use opaque IDs or sentinel prices; neither defines a Code candidate.
 const RawInventoryModelSchema = z.object({
@@ -135,7 +142,7 @@ const RawInventoryModelSchema = z.object({
 const RawInventorySchema = z.object({
   models: z.array(RawInventoryModelSchema.pick({ provider: true, id: true, selector: true }).passthrough()).max(16384),
 });
-export function parseInventoryObservation(raw: unknown, identitiesValue: unknown, observedAt: number, version: string): InventoryReceipt {
+export function parseInventoryObservation(raw: unknown, identitiesValue: unknown, observedAt: number, version: string, quotaTierOf: QuotaTierOf): InventoryReceipt {
   if (version !== OMP_VERSION) throw new ProbeError("unsupported_version");
   const identities = unique(parse(ProbeIdentitiesSchema, identitiesValue, "invalid_input"));
   const rawModels = parse(RawInventorySchema, raw).models;
@@ -150,7 +157,7 @@ export function parseInventoryObservation(raw: unknown, identitiesValue: unknown
     models.push({ ...identity, inputCostPerMillion: model.cost.input, outputCostPerMillion: model.cost.output,
       contextWindow: model.contextWindow, maxTokens: model.maxTokens, reasoning: model.reasoning,
       thinkingLevels: [...(model.thinking ?? [])].sort((a, b) => ThinkingLevelSchema.options.indexOf(a) - ThinkingLevelSchema.options.indexOf(b)),
-      images: model.input.includes("image") });
+      images: model.input.includes("image"), quotaTier: quotaTierOf(identity) });
   }
   models.sort((a, b) => compare(probeAddress(a), probeAddress(b)));
   return parse(InventoryReceiptSchema, { schemaVersion: 1, kind: "inventory", ompVersion: OMP_VERSION, observedAt, models });
@@ -185,8 +192,11 @@ export function parseBenchmarkObservation(raw: unknown, inputValue: unknown, sta
     if (!run.ok) {
       if (row.stats !== null) throw new ProbeError("invalid_observation");
       // Raw error text is inspected privately and is never retained in receipts.
-      if (/claude_code_version_too_old/i.test(run.error)) return failure("client_blocked");
-      if (/\b(?:not_found_error|model_not_found|not_found)\b/i.test(run.error)) return failure("not_found");
+      if (/claude_code_version_too_old|does not support this model/i.test(run.error)) return failure("client_blocked");
+      // Providers name an unknown or unentitled model in several ways; every one is a definite
+      // answer about that model, and an `unresolved` one would stop the whole derived catalog.
+      if (/\b(?:not_found_error|model_not_found|not_found)\b|no such model|unknown model|does not exist/i.test(run.error))
+        return failure("not_found");
       /*
         A DATA-POLICY EXCLUSION IS A DEFINITE ANSWER, and reading it as an inconclusive one stops
         a whole catalog. An aggregator that will not serve an endpoint to THIS account answers

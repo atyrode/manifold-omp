@@ -76,7 +76,7 @@ export function isolateEnvironment(environment: NodeJS.ProcessEnv): void {
   for (const key of Object.keys(environment)) {
     if (!["PATH", "LANG", "LC_ALL", "TZ", "MANIFOLD_JOB_CONTEXT_FD"].includes(key)) delete environment[key];
   }
-  // getInstallId has no public memory-only setter in SDK18.1.14. Its supported
+  // getInstallId has no public memory-only setter in SDK 18.4.12. Its supported
   // read-only-filesystem path caches an ephemeral UUID in memory. The verified
   // sealed input root is empty apart from inputs and cannot acquire ~/.omp.
   environment.HOME = "/inputs";

@@ -35,14 +35,14 @@ const dependencyMarker = ".omp-prepared-dependencies.json";
 const graphs = {
   baseline: {
     root, version: runtime.sdkVersion, nativeAlias: "pi-natives", native: runtime.tools["pi-natives"],
-    lockSha256: "ad91009fa29101b83f5311ad863d652e2b0c79173ebca2cbd57075ff83878b3d",
-    loaderSha256: "6d46cb5c28e1ed40ae94c6019c90399b9b326f4d2b5bf944a802542147356bf8",
-    patch: { file: "patches/@oh-my-pi%2Fpi-ai@18.1.14.patch", sha256: "ef3aaf1d847e1cc2729819b695e28c96ac697561987a49f4951c566141c8c40d" },
+    lockSha256: "67e9aefe90f674e6bbb0ef8f17066bdbef0a89642cf601e90010f84a986a9e92",
+    loaderSha256: "b55d10b960f47d749d0b19a2b0eeeb64d778807dfb19fbc8d0ea7866b963b6be",
+    patch: { file: "patches/@oh-my-pi%2Fpi-ai@18.4.12.patch", sha256: "03a4e777694a2d86d9fb1b59349daaed8e2934b193a139734a952d448d8d8c56" },
   },
   sdkHost: {
     root: join(root, "sdk-host"), version: sdkRuntime.sdkVersion, nativeAlias: "sdk-pi-natives", native: sdkRuntime.tools["pi-natives"],
-    lockSha256: "65a8a3c3c73c29e18081a696bdaf924a7086b9c3cfc9f1853927b8394b4c8610",
-    loaderSha256: "de59cfd780bfb4ff4411a542396ba2f7c512add3ad2d474cd2e30220c69e3930",
+    lockSha256: "350ffa4d406d68edf81e04e1fb2f1c14c6463af0b8d0e17498cc6b17fbd0379d",
+    loaderSha256: "b55d10b960f47d749d0b19a2b0eeeb64d778807dfb19fbc8d0ea7866b963b6be",
     patch: undefined,
   },
 } as const;
@@ -109,7 +109,7 @@ async function dependencyInputs(name: GraphName, directory = graphs[name].root) 
   if (hash(lock) !== graph.lockSha256) throw new Error(`Unreviewed bun.lock bytes: ${name}`);
   if (graph.patch) {
     if (hash(await readFile(join(directory, graph.patch.file))) !== graph.patch.sha256) throw new Error("Unreviewed pi-ai patch bytes");
-    if (JSON.stringify(manifest.patchedDependencies) !== JSON.stringify({ "@oh-my-pi/pi-ai@18.1.14": graph.patch.file })) throw new Error("Unreviewed SDK patch declaration");
+    if (JSON.stringify(manifest.patchedDependencies) !== JSON.stringify({ [`@oh-my-pi/pi-ai@${graph.version}`]: graph.patch.file })) throw new Error("Unreviewed SDK patch declaration");
   } else if (manifest.patchedDependencies !== undefined) throw new Error("Private SDK host patches are not supported");
   const dependencies = {
     dependencies: manifest.dependencies, devDependencies: manifest.devDependencies,
@@ -219,19 +219,32 @@ async function prepareDependencies(name: GraphName): Promise<void> {
 /** Deliberately replaces only the pinned SDK's host/cache-searching loader, not its API.
  * The owner mounts the verified native artifact at this fixed private path. No package
  * resolution, CPU probing, extraction, cache fallback, source checkout or host PATH.
+ * That artifact is the reviewed release for this exact SDK, never a stale workspace
+ * build, so `missingNativeExport` keeps an absent export `undefined` for the SDK's
+ * `typeof` probes, as the stock loader does for a current addon.
  */
 const pinnedLoader = (graph: DependencyGraph) => `
+const path = ${JSON.stringify(`/runtime/bin/${graph.nativeAlias}`)};
 let bindings;
 export function loadNative() {
   if (bindings) return bindings;
   const module = { exports: {} };
-  process.dlopen(module, ${JSON.stringify(`/runtime/bin/${graph.nativeAlias}`)});
+  process.dlopen(module, path);
   const install = module.exports.__ompInstallTokioRuntime;
   if (typeof install === "function") install();
   bindings = module.exports;
   return bindings;
 }
+export function missingNativeExport() {
+  return undefined;
+}
+export function missingNativeExportMessage(symbolName) {
+  return "@oh-my-pi/pi-natives export " + symbolName + " is missing from " + path;
+}
 `;
+/** Reviewed `pi-natives/native/path.js` bytes: pi-utils' path normalization imports it, and it
+ * loads the addon only when `process.platform === "win32"`, a platform no worker targets. */
+const windowsOnlyNativeSha256 = "716fe783105dc03fc5deaab32a4f0470ba366e663ae77de42c5760144855bf99";
 
 export interface WorkerArtifacts {
   /** Assign these two fields to the selected installation's generated machine half. */
@@ -268,13 +281,25 @@ function replacePublishedSource(source: string, before: string, after: string): 
   return source.replace(before, after);
 }
 
+/** Whether `importer` imports the package specifier `specifier` as text. Every import of it must
+ * agree: one module cannot receive both a namespace and source text from the same resolution. */
+async function importsAsText(importer: string, specifier: string): Promise<boolean> {
+  const source = await readFile(importer, "utf8");
+  const quoted = `(["'])${specifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\1`;
+  const textImports = source.match(new RegExp(`${quoted}\\s*with\\s*\\{\\s*type\\s*:\\s*(["'])text\\2\\s*\\}`, "g"))?.length ?? 0;
+  if (textImports === 0) return false;
+  if (textImports !== source.match(new RegExp(quoted, "g"))!.length)
+    throw new Error(`Package imported both as text and as a module: ${specifier}`);
+  return true;
+}
+
 /** Execute the complete shipped helper, changing only its monorepo path mapping.
  * Its export expansion, exclusions, shims and lazy registry remain publisher code.
  * The private copy is temporary; installed packages and upstream checkouts are untouched.
  */
 async function legacyPiPlugin(graph: DependencyGraph, codingAgent: string): Promise<BunPlugin> {
   const packages = {
-    agent: "@oh-my-pi/pi-agent-core", ai: "@oh-my-pi/pi-ai",
+    agent: "@oh-my-pi/pi-agent-core", ai: "@oh-my-pi/pi-ai", catalog: "@oh-my-pi/pi-catalog",
     "coding-agent": "@oh-my-pi/pi-coding-agent", natives: "@oh-my-pi/pi-natives",
     tui: "@oh-my-pi/pi-tui", utils: "@oh-my-pi/pi-utils",
   };
@@ -376,13 +401,23 @@ async function notices(importedFiles: Set<string>, codingAgent?: string): Promis
     }
   }
   const sections: string[] = [];
+  // Every @oh-my-pi package ships the same megabyte of aggregate notices, which repeated per
+  // package outgrew the plugin's 16 MiB artifact budget. Identical text is stated once.
+  const firstLabels = new Map<string, string>();
+  const section = (label: string, text: string): string => {
+    const digest = hash(Buffer.from(text));
+    const first = firstLabels.get(digest);
+    if (first !== undefined) return `${label}\nIdentical to ${first} above.`;
+    firstLabels.set(digest, label);
+    return `${label}\n${text}`;
+  };
   const publisherNotices = codingAgent ? await readFile(join(codingAgent, "THIRD-PARTY-NOTICES.txt"), "utf8") : "";
   let needsPublisherNotices = false;
   for (const [name, directory] of [...packages].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
     const entries = (await readdir(directory, { withFileTypes: true }))
       .filter(entry => entry.isFile() && /^(?:licen[cs]e|copying|notice|third-party-notices)(?:[.-].*)?$/i.test(entry.name))
       .map(entry => entry.name).sort();
-    for (const filename of entries) sections.push(`${name} / ${filename}\n${await readFile(join(directory, filename), "utf8")}`);
+    for (const filename of entries) sections.push(section(`${name} / ${filename}`, await readFile(join(directory, filename), "utf8")));
     if (entries.length === 0 && directory.includes("node_modules")) {
       if (name === "quickjs-wasi@2.2.0") sections.push(quickjsNotice);
       else if (name === "@puppeteer/browsers@3.0.6" || name === "puppeteer-core@25.3.0") {
@@ -393,7 +428,7 @@ async function notices(importedFiles: Set<string>, codingAgent?: string): Promis
     }
   }
   if (needsPublisherNotices && !packages.has(`@oh-my-pi/pi-coding-agent@${sdkRuntime.sdkVersion}`))
-    sections.push(`@oh-my-pi/pi-coding-agent@${sdkRuntime.sdkVersion} / THIRD-PARTY-NOTICES.txt\n${publisherNotices}`);
+    sections.push(section(`@oh-my-pi/pi-coding-agent@${sdkRuntime.sdkVersion} / THIRD-PARTY-NOTICES.txt`, publisherNotices));
   return Buffer.from(sections.join("\n\n------------------------------------------------------------\n\n") + "\n");
 }
 
@@ -445,6 +480,7 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
     const docs = codingAgent ? await readFile(join(codingAgent, "dist/docs-index.generated.txt"), "utf8") : "";
     const quickjs = codingAgent ? await packageRoot(graph, "quickjs-wasi", "2.2.0") : undefined;
     const quickjsModule = quickjs ? await realpath(join(quickjs, "dist/index.js")) : undefined;
+    const htmlExport = codingAgent ? await realpath(join(codingAgent, "src/export/html/index.ts")) : undefined;
     const nativePackage = await packageRoot(graph, "@oh-my-pi/pi-natives");
     const nativeLoader = await realpath(join(nativePackage, "native/loader-state.js"));
     if (hash(await readFile(nativeLoader)) !== graph.loaderSha256) throw new Error(`Unreviewed native SDK loader bytes: ${graphName}`);
@@ -467,10 +503,18 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
             if (!containsPath(manifoldRoot, path)) throw new Error(`Manifold dependency escapes its checkout: ${args.path}`);
             return { path, namespace: "file" };
           }
-          const from = args.importer && containsPath(modules, args.importer) ? dirname(args.importer) : graph.root;
+          const packaged = args.importer !== undefined && args.importer !== "" && containsPath(modules, args.importer);
+          const from = packaged ? dirname(args.importer) : graph.root;
           const path = await realpath(Bun.resolveSync(args.path, from));
           if (!containsPath(modules, path)) throw new Error(`Worker dependency escapes ${graphName}: ${args.path}`);
-          return { path, namespace: "file" };
+          // A plugin's resolution drops the import's attributes, so Bun would bundle a package file
+          // imported `with { type: "text" }` as a module and hand the importer an object instead of
+          // its source (18.4's accessibility audit then fails to parse at SDK host startup).
+          return { path, namespace: packaged && await importsAsText(args.importer, args.path) ? "omp-text" : "file" };
+        });
+        build.onLoad({ filter: /.*/, namespace: "omp-text" }, async args => {
+          importedFiles.add(args.path);
+          return { contents: await readFile(args.path, "utf8"), loader: "text" };
         });
         build.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async args => {
           const path = await realpath(args.path);
@@ -488,6 +532,17 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
             const contents = replacePublishedSource(await readFile(path, "utf8"),
               "new URL('../quickjs.wasm', import.meta.url)", `new URL(${JSON.stringify(`./${asset}`)}, import.meta.url)`);
             return { contents, loader: "js" };
+          }
+          if (htmlExport && path === htmlExport) {
+            // The export template inlines its vendored scripts as text either way. Importing them
+            // as text keeps the archive within the protocol's eight declared files per artifact.
+            let contents = await readFile(path, "utf8");
+            for (const [binding, file] of [["highlightJs", "highlight.min.js"], ["markedJs", "marked.min.js"]]) {
+              contents = replacePublishedSource(contents, `import ${binding}Path from "./vendor/${file}" with { type: "file" };`,
+                `import ${binding} from "./vendor/${file}" with { type: "text" };`);
+              contents = replacePublishedSource(contents, `const ${binding} = fs.readFileSync(resolveBundledHtmlAssetPath(${binding}Path), "utf8");`, "");
+            }
+            return { contents, loader: "ts" };
           }
           return undefined;
         });
@@ -526,7 +581,14 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
       if (item.path === "bun" || item.path.startsWith("bun:") || item.path.startsWith("node:") || builtinModules.includes(item.path)) continue;
       throw new Error(`Unbundled worker import: ${name}: ${item.path}`);
     }
-    if (usesNative && target === "root" && graphName === "baseline") throw new Error(`Worker unexpectedly needs native addon: ${name}`);
+    if (usesNative && target === "root" && graphName === "baseline") {
+      // Only pi-natives' own modules can import its loader. A worker that reaches it solely
+      // through the reviewed win32-only path helper never loads an addon on its Linux platforms.
+      const pathHelper = join(nativePackage, "native", "path.js");
+      const nativeModules = [...importedFiles].filter(path => containsPath(nativePackage, path) && path !== nativeLoader);
+      if (nativeModules.length !== 1 || nativeModules[0] !== pathHelper || hash(await readFile(pathHelper)) !== windowsOnlyNativeSha256)
+        throw new Error(`Worker unexpectedly needs native addon: ${name}`);
+    }
     const licenses = await notices(importedFiles, codingAgent);
     let bytes: Buffer;
     let declaration: MachineArtifact;
