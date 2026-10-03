@@ -281,6 +281,18 @@ function replacePublishedSource(source: string, before: string, after: string): 
   return source.replace(before, after);
 }
 
+/** Whether `importer` imports the package specifier `specifier` as text. Every import of it must
+ * agree: one module cannot receive both a namespace and source text from the same resolution. */
+async function importsAsText(importer: string, specifier: string): Promise<boolean> {
+  const source = await readFile(importer, "utf8");
+  const quoted = `(["'])${specifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\1`;
+  const textImports = source.match(new RegExp(`${quoted}\\s*with\\s*\\{\\s*type\\s*:\\s*(["'])text\\2\\s*\\}`, "g"))?.length ?? 0;
+  if (textImports === 0) return false;
+  if (textImports !== source.match(new RegExp(quoted, "g"))!.length)
+    throw new Error(`Package imported both as text and as a module: ${specifier}`);
+  return true;
+}
+
 /** Execute the complete shipped helper, changing only its monorepo path mapping.
  * Its export expansion, exclusions, shims and lazy registry remain publisher code.
  * The private copy is temporary; installed packages and upstream checkouts are untouched.
@@ -491,10 +503,18 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
             if (!containsPath(manifoldRoot, path)) throw new Error(`Manifold dependency escapes its checkout: ${args.path}`);
             return { path, namespace: "file" };
           }
-          const from = args.importer && containsPath(modules, args.importer) ? dirname(args.importer) : graph.root;
+          const packaged = args.importer !== undefined && args.importer !== "" && containsPath(modules, args.importer);
+          const from = packaged ? dirname(args.importer) : graph.root;
           const path = await realpath(Bun.resolveSync(args.path, from));
           if (!containsPath(modules, path)) throw new Error(`Worker dependency escapes ${graphName}: ${args.path}`);
-          return { path, namespace: "file" };
+          // A plugin's resolution drops the import's attributes, so Bun would bundle a package file
+          // imported `with { type: "text" }` as a module and hand the importer an object instead of
+          // its source (18.4's accessibility audit then fails to parse at SDK host startup).
+          return { path, namespace: packaged && await importsAsText(args.importer, args.path) ? "omp-text" : "file" };
+        });
+        build.onLoad({ filter: /.*/, namespace: "omp-text" }, async args => {
+          importedFiles.add(args.path);
+          return { contents: await readFile(args.path, "utf8"), loader: "text" };
         });
         build.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async args => {
           const path = await realpath(args.path);
