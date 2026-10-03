@@ -73,7 +73,7 @@ try {
     // Seal auxiliary delegation settings alongside the SDK's spawn policy.
     "startup.setupWizard": false,
     ...(restricted ? {
-      "lsp.enabled": false, "irc.enabled": false, "advisor.enabled": false,
+      "lsp.enabled": false, "advisor.enabled": false,
       "prewalk.enabled": false, "retry.modelFallback": false,
       "task.agentAdvisor": { task: "off" }, "task.prewalk": false,
       "skills.enabled": skillsRuntime.mode === "selected",
