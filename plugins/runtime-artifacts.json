@@ -138,7 +138,7 @@
         ],
         "entrySha256": "ea0e07e182a595ae748d71d3ed514f3d0ac3f9ef55245626be8fd69e63d0d780",
         "maxBytes": 96915443,
-        "maxExpandedBytes": 381617644,
+        "maxExpandedBytes": 381623296,
         "maxMembers": 6,
         "files": {
           "pi-natives-license": {
@@ -175,7 +175,7 @@
         ],
         "entrySha256": "a126db2b1564fc0338302b28d5808a09dfea48a002d4dacb688826327d8d1c50",
         "maxBytes": 46545552,
-        "maxExpandedBytes": 183523173,
+        "maxExpandedBytes": 183527936,
         "maxMembers": 5,
         "files": {
           "pi-natives-license": {
