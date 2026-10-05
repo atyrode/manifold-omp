@@ -13,6 +13,8 @@ import type { OmpContext } from "../atyrode.omp/machine-server.ts";
 import { handlers } from "../atyrode.omp/server.ts";
 import { projectModelCatalog } from "../atyrode.omp/sdk-metadata.macro.ts";
 import { bundledModelCatalog } from "../atyrode.omp/sdk-metadata.macro.ts" with { type: "macro" };
+import packageJson from "../package.json";
+import runtime from "../runtime-artifacts.json";
 
 const bundled = bundledModelCatalog();
 const effort: Record<"low" | "medium" | "high", Effort> = {
@@ -136,7 +138,8 @@ test("typed root metadata reads are passive and return the actual pinned SDK fac
     maxTokens: source.maxTokens, reasoning: source.reasoning, images: source.input.includes("image"),
     quotaTier: quotaTierFor(source.provider, source.id) ?? null });
   expect(new Set(result.models.map(model => model.provider))).toEqual(new Set(["anthropic", "openai-codex", "deepseek"]));
-  expect(result.ompVersion).toBe(OMP_VERSION);
+  expect(runtime.sdkVersion).toBe(packageJson.dependencies["@oh-my-pi/pi-catalog"]);
+  expect(result.ompVersion).toBe(packageJson.dependencies["@oh-my-pi/pi-catalog"]);
   expect(result.source).toBe("bundled");
   expect(result.revision).toBe(bundled.revision);
   const { revision, ...snapshot } = bundled;
