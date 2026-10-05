@@ -6,10 +6,11 @@ import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import {
-  InventoryModelSchema, ModelCatalogSnapshotSchema, OMP_VERSION, ProbeIdentitySchema, ThinkingLevelSchema,
+  InventoryModelSchema, ModelCatalogSnapshotSchema, ProbeIdentitySchema, ThinkingLevelSchema,
   type InventoryModel, type ModelCatalogSnapshot, type ProbeIdentity,
 } from "../api/index.ts";
 import { OPENROUTER_LISTING_TEMPLATE } from "../workers/gateway/template.ts";
+import runtime from "../runtime-artifacts.json";
 
 /** Bun evaluates this against the package-pinned SDK in development and production.
  * Only schema-valid probe triples cross into the server; the SDK also carries
@@ -89,7 +90,7 @@ export function projectModelCatalog(
 /** The package-pinned static registry becomes literal data in the server bundle.
  * No SDK import, cache, credential, file or network read survives into the action. */
 export function bundledModelCatalog(): ModelCatalogSnapshot {
-  return projectModelCatalog(getBundledProviders().flatMap(provider => getBundledModels(provider)), OMP_VERSION);
+  return projectModelCatalog(getBundledProviders().flatMap(provider => getBundledModels(provider)), runtime.sdkVersion);
 }
 
 /** The thinking ladder the gateway gives a live-listed model that reasons, per provider whose

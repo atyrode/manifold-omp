@@ -1,9 +1,3 @@
-diff --git a/node_modules/@oh-my-pi/pi-ai/.bun-tag-660c4f2cbd02dcd b/.bun-tag-660c4f2cbd02dcd
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@oh-my-pi/pi-ai/.bun-tag-fe90b8e7522c222 b/.bun-tag-fe90b8e7522c222
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/dist/types/auth/refresh.d.ts b/dist/types/auth/refresh.d.ts
 index 0082dca10851a628647418aba588bf4566722c18..5ff60c30256c0bbe8e4acce70a5aecf0d743495c 100644
 --- a/dist/types/auth/refresh.d.ts
