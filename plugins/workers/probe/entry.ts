@@ -5,6 +5,14 @@ import { BenchmarkReceiptSchema, InventoryReceiptSchema, ProbeError, ProbeFailur
 import { isolateProbeEnvironment, prepareProbeInputs } from "./inputs.ts";
 import { benchmarkTarget, inventoryTarget, PROBE_OUTPUT_LIMIT } from "./runtime.ts";
 
+/**
+ * The probe's own bound on its work. Its manifest timeout must admit the day-long gateway it
+ * starts as a child job (#109), so that limit no longer ends a stuck probe; this does.
+ */
+const PROBE_DEADLINE_MS = 10 * 60 * 1000;
+/** How long an expired probe waits for its cooperative cancellation before it exits anyway. */
+const PROBE_EXIT_GRACE_MS = 10_000;
+
 /** Called only by the two separate manifest-fixed entrypoint modules. */
 export async function runProbe(kind: "inventory" | "benchmark"): Promise<never> {
   isolateProbeEnvironment(process.env);
@@ -20,7 +28,15 @@ export async function runProbe(kind: "inventory" | "benchmark"): Promise<never> 
   let emitted = false;
   let success = false;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(new ProbeError("timeout")), 10 * 60 * 1000);
+  const timeout = setTimeout(() => {
+    controller.abort(new ProbeError("timeout"));
+    // Aborting kills OMP's process group, but a descendant that left that group can still hold
+    // its output pipe open. Exit regardless; native Manifold reaps the job's whole cgroup.
+    setTimeout(() => {
+      try { emit({ schemaVersion: 1, kind: "refused", code: "timeout" }); } catch {}
+      process.exit(1);
+    }, PROBE_EXIT_GRACE_MS);
+  }, PROBE_DEADLINE_MS);
   const cancel = (): void => controller.abort(new ProbeError("cancelled"));
   const emit = (value: unknown): void => {
     if (emitted) return;
