@@ -107,7 +107,7 @@ export async function verifyNativeInventory({ hub, target, broker, client }: {
       return value.result ? value : false;
     }, 180_000, 100);
     inventory = undefined;
-    // A finished parent stops its runtime child; give that child time to settle as well.
+    // A finished parent tears its runtime child down; give that child time to settle as well.
     let children: PublicJob[] = [];
     for (const deadline = Date.now() + 30_000; ; await Bun.sleep(100)) {
       const runs = ListJobRunsResultSchema.parse(await ownerAction(hub, "engine.jobs.listRuns", {
@@ -122,7 +122,14 @@ export async function verifyNativeInventory({ hub, target, broker, client }: {
     // (`parent_invocation_refused`). A refused child never starts and never serves `models`.
     const child = children[0]!;
     const result = child.result;
-    check(child.state !== "refused" && result && result.startedAt !== null && !(child.state === "exited" && result.exitCode !== 0),
+    // The gateway serves until its parent ends, so it never exits on its own here. The child's
+    // cgroup sits inside the inventory's, and the owner SIGKILLs that whole subtree when the
+    // inventory exits, before cancelling its children. If the child's own result settles first it
+    // records `exited` with no exit code; if the cancel reaches it first, `cancelled`. Either is
+    // that teardown; any other ending, such as the gateway's own `gateway_unavailable` exit, fails.
+    const tornDown = result?.exitCode === null && ((child.state === "exited" && result.reason === null)
+      || (child.state === "cancelled" && result.reason === "cancelled"));
+    check(result && result.startedAt !== null && tornDown,
       `gateway-${word(child.state)}-${word(result?.reason ?? String(result?.exitCode ?? "none"))}`);
     check(settled.state === "exited" && settled.result?.exitCode === 0, `job-${await ending(settled)}`);
     const receipt = await call("readInventory", { ...target, jobId: settled.jobId });
