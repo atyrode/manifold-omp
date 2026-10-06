@@ -25,7 +25,7 @@ index 06f9d2c2966fee79f52e0e732a27a3394c6da75b..f80736ea19192ca6eaa993ae932a0fa7
      canFetchOAuthUsage(provider: Provider): boolean;
      /**
 diff --git a/dist/types/auth-broker/refresher.d.ts b/dist/types/auth-broker/refresher.d.ts
-index 97181013f97d281730230bca35a231e73e3264d5..9d49a4c926cb9851c91e98572a0343b4948f21b9 100644
+index 397345732706d9fcb8af1dc2328707cce2d0b586..3849857a22bd9284a0f9892c8126245fa5093163 100644
 --- a/dist/types/auth-broker/refresher.d.ts
 +++ b/dist/types/auth-broker/refresher.d.ts
 @@ -18,7 +18,7 @@ export declare class AuthBrokerRefresher {
@@ -35,8 +35,8 @@ index 97181013f97d281730230bca35a231e73e3264d5..9d49a4c926cb9851c91e98572a0343b4
 -    stop(): void;
 +    stop(): Promise<void>;
      getSchedule(): AuthBrokerRefresherSchedule;
-     /** Run one sweep. Exposed for tests. */
-     tick(): Promise<void>;
+     /**
+      * Run one sweep. Exposed for tests.
 diff --git a/dist/types/auth-broker/remote-store.d.ts b/dist/types/auth-broker/remote-store.d.ts
 index 6977dba34e594884bab7a1ff81c2de9288e52d14..ead199563085c43311d1a8b81aae39d049c66c51 100644
 --- a/dist/types/auth-broker/remote-store.d.ts
@@ -204,7 +204,7 @@ index 8a25b6249bb575e0a0b594f1c3461ec3c7b2f514..85e08424e139e43715523a82ac5c4be0
  	canFetchOAuthUsage(provider: Provider): boolean {
  		return this.providerFor(provider) !== undefined || this.#deps.store.getUsageReport !== undefined;
 diff --git a/src/auth-broker/refresher.ts b/src/auth-broker/refresher.ts
-index 5a5fceca5c84ce9799c16aaed4f0499bfb2652fe..87f2741a3d4da312fbcbd2501c9b1d35163bd290 100644
+index e9a2d3eca2de11545534201dbda87fbcd593ff98..140df149328ab408bb6e51e4abc4c9d8f7a0f845 100644
 --- a/src/auth-broker/refresher.ts
 +++ b/src/auth-broker/refresher.ts
 @@ -38,7 +38,8 @@ export class AuthBrokerRefresher {
@@ -240,59 +240,41 @@ index 5a5fceca5c84ce9799c16aaed4f0499bfb2652fe..87f2741a3d4da312fbcbd2501c9b1d35
  	}
  
  	getSchedule(): AuthBrokerRefresherSchedule {
-@@ -76,28 +80,32 @@ export class AuthBrokerRefresher {
- 	}
- 
- 	/** Run one sweep. Exposed for tests. */
+@@ -81,12 +85,21 @@ export class AuthBrokerRefresher {
+ 	 * Never rejects: callers fire it unawaited from a timer, so a failed sweep
+ 	 * (e.g. an unreadable credential store) is logged and retried next interval.
+ 	 */
 -	async tick(): Promise<void> {
 -		if (this.#running) return;
 -		this.#running = true;
--		this.#nextSweepAt = this.#now();
--		try {
--			await this.#storage.credentials.reload();
--			const snapshot = this.#storage.credentials.snapshot();
--			const now = this.#now();
--			const deadline = now + this.#refreshSkewMs;
--			const targets: number[] = [];
--			for (const entry of snapshot.credentials) {
--				if (entry.credential.type !== "oauth") continue;
--				const expires = entry.credential.expires;
--				if (typeof expires !== "number" || !Number.isFinite(expires)) continue;
--				if (expires > deadline) continue;
--				targets.push(entry.id);
--			}
--			await Promise.all(targets.map(id => this.#refreshOne(id)));
--		} finally {
--			this.#running = false;
 +	tick(): Promise<void> {
 +		if (this.#stopped) return this.#inFlight ?? Promise.resolve();
 +		if (this.#inFlight) return this.#inFlight;
 +		this.#inFlight = this.#sweep().finally(() => {
 +			this.#inFlight = undefined;
- 			this.#nextSweepAt = this.#now() + this.#refreshIntervalMs;
++			this.#nextSweepAt = this.#now() + this.#refreshIntervalMs;
 +		});
 +		return this.#inFlight;
 +	}
 +
 +	async #sweep(): Promise<void> {
-+		this.#nextSweepAt = this.#now();
-+		await this.#storage.credentials.reload();
-+		if (this.#stopped) return;
-+		const snapshot = this.#storage.credentials.snapshot();
-+		const now = this.#now();
-+		const deadline = now + this.#refreshSkewMs;
-+		const targets: number[] = [];
-+		for (const entry of snapshot.credentials) {
-+			if (entry.credential.type !== "oauth") continue;
-+			const expires = entry.credential.expires;
-+			if (typeof expires !== "number" || !Number.isFinite(expires)) continue;
-+			if (expires > deadline) continue;
-+			targets.push(entry.id);
+ 		this.#nextSweepAt = this.#now();
+ 		try {
+ 			await this.#storage.credentials.reload();
++			if (this.#stopped) return;
+ 			const snapshot = this.#storage.credentials.snapshot();
+ 			const now = this.#now();
+ 			const deadline = now + this.#refreshSkewMs;
+@@ -101,9 +114,6 @@ export class AuthBrokerRefresher {
+ 			await Promise.all(targets.map(id => this.#refreshOne(id)));
+ 		} catch (error) {
+ 			logger.warn("auth-broker refresh sweep failed", { error: String(error) });
+-		} finally {
+-			this.#running = false;
+-			this.#nextSweepAt = this.#now() + this.#refreshIntervalMs;
  		}
-+		await Promise.all(targets.map(id => this.#refreshOne(id)));
  	}
  
- 	async #refreshOne(id: number): Promise<void> {
 diff --git a/src/auth-broker/remote-store.ts b/src/auth-broker/remote-store.ts
 index d20be42725299e3f461f2be4e12df7c28756e994..4961da51817da54c8b2b8748a96db2e1786887db 100644
 --- a/src/auth-broker/remote-store.ts
