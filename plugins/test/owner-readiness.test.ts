@@ -958,3 +958,28 @@ test("a gateway is not admitted against a broker policy promoted by an older ver
   const review = await f.client.call("reviewGateway", input);
   if ("refused" in review) throw new Error(review.refused);
 });
+
+test("every operation that calls the job-scoped gateway admits the gateway's whole declared timeout", () => {
+  // Manifold starts a job-scoped runtime service as a child of the calling job, with the service
+  // operation's declared limits, and the job owner refuses a child whose timeout exceeds what
+  // remains of its parent's (`parent_invocation_refused`). A caller declaring less than its
+  // service therefore never reaches it (#109). An instance-scoped service such as the broker
+  // runs as the instance's own job, not as its caller's child, so this rule does not bind it.
+  const operations = Object.fromEntries([rootManifest, accountsManifest, gatewayManifest]
+    .flatMap(manifest => Object.entries(MachineHalfSchema.parse(manifest.machine).operations)));
+  const policies = [
+    buildGatewayPolicy({ pluginId: GATEWAY_PLUGIN_ID, operationId: GATEWAY_OPERATION_ID, ...pins,
+      input: { accountPool: { input: "accountPool" } } }),
+    buildSharedBrokerPolicy({ scope: "instance", pluginId: ACCOUNTS_PLUGIN_ID, operationId: BROKER_OPERATION_ID, ...pins,
+      input: { clientAccess: { literal: "{}" } } }),
+  ];
+  const children = new Map(policies.flatMap(({ serviceId, runtime }) => runtime && runtime.scope !== "instance"
+    ? [[serviceId, operations[runtime.operationId]!.limits.timeoutMs] as const] : []));
+  expect([...children]).toEqual([["omp", gatewayManifest.machine.operations[GATEWAY_OPERATION_ID].limits.timeoutMs]]);
+  const callers = Object.entries(operations).flatMap(([operationId, operation]) => (operation.services ?? [])
+    .filter(({ serviceId }) => children.has(serviceId))
+    .map(({ serviceId }) => ({ operationId, timeoutMs: operation.limits.timeoutMs, required: children.get(serviceId)! })));
+  expect(callers.map(caller => caller.operationId)).toEqual(
+    expect.arrayContaining([`${OMP_PLUGIN_ID}.inventory`, `${OMP_PLUGIN_ID}.benchmark`]));
+  expect(callers.filter(caller => caller.timeoutMs < caller.required)).toEqual([]);
+});

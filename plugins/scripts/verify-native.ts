@@ -626,6 +626,16 @@ try {
     if (!process.env.OMP_VERIFY_CONSUMER_MODULE)
       check(!(await roster(hub)).some(row => row.manifest.id === "atyrode.code" || row.manifest.id.startsWith("atyrode.code.")),
         "positive-worker-introduced-code-dependency");
+    phase = "native-inventory";
+    // Keep native protocol loading behind this verifier's private-environment check.
+    const { verifyNativeInventory } = await import("./verify-native-inventory.ts");
+    try {
+      await verifyNativeInventory({ hub, target, broker: { origin: `http://${clientAccess.bind}`, bearer: clientBearer }, client });
+    } catch (error) {
+      if (error instanceof Error && /^native-inventory-[a-z0-9-]{1,63}$/.test(error.message))
+        throw new VerificationFailure(error.message);
+      throw error;
+    }
     phase = "packaged-sdk-host";
     const { verifySdkHost, SdkHostVerificationFailure } = await import("./verify-sdk-host.ts");
     try {

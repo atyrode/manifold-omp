@@ -341,7 +341,7 @@
         "outputs": [],
         "network": "host",
         "limits": {
-          "timeoutMs": 600000,
+          "timeoutMs": 86400000,
           "memoryBytes": 2147483648,
           "processes": 128,
           "outputBytes": 4194304
@@ -452,7 +452,7 @@
         "outputs": [],
         "network": "host",
         "limits": {
-          "timeoutMs": 600000,
+          "timeoutMs": 86400000,
           "memoryBytes": 2147483648,
           "processes": 128,
           "outputBytes": 4194304
