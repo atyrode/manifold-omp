@@ -1,11 +1,11 @@
 {
   "bunVersion": "1.4.2",
-  "sdkVersion": "18.7.0",
-  "observedOn": "2026-10-06",
+  "sdkVersion": "18.8.0",
+  "observedOn": "2026-10-07",
   "provenance": {
     "bunRelease": "https://github.com/oven-sh/bun/releases/tag/bun-v1.4.2",
     "ompRelease": "https://github.com/can1357/oh-my-pi/releases/tag/v18.4.12",
-    "sdkRelease": "https://github.com/can1357/oh-my-pi/releases/tag/v18.7.0",
+    "sdkRelease": "https://github.com/can1357/oh-my-pi/releases/tag/v18.8.0",
     "caBundle": {
       "version": "2026.1.4",
       "observedOn": "2026-09-12",
@@ -129,15 +129,15 @@
     },
     "pi-natives": {
       "linux-x64": {
-        "url": "https://registry.npmjs.org/@oh-my-pi/pi-natives-linux-x64/-/pi-natives-linux-x64-18.7.0.tgz",
-        "sha256": "b2bcec683c206429dbbd9629c99f2a317880a5a8649e86046c6a8d70a6c26b58",
+        "url": "https://registry.npmjs.org/@oh-my-pi/pi-natives-linux-x64/-/pi-natives-linux-x64-18.8.0.tgz",
+        "sha256": "99558d357e73133f977e2beb269d9e7d34f337cefa010fe348e13e52ff38a681",
         "format": "tar.gz",
         "entry": [
           "package",
           "pi_natives.linux-x64-baseline.node"
         ],
-        "entrySha256": "e3efc6ad9a39f345a539568894bf393018f55b94796b368bfc9472c713f142cf",
-        "maxBytes": 97819585,
+        "entrySha256": "681d871125d3cb6dc0ed357296d06d859a548b22dc52ada27ea70fbecace82a0",
+        "maxBytes": 97819584,
         "maxExpandedBytes": 382856704,
         "maxMembers": 6,
         "files": {
@@ -166,15 +166,15 @@
         }
       },
       "linux-arm64": {
-        "url": "https://registry.npmjs.org/@oh-my-pi/pi-natives-linux-arm64/-/pi-natives-linux-arm64-18.7.0.tgz",
-        "sha256": "2515efed52e27c5aaa564d99447df90cad8f96657f25d370a10d72fb92ef8811",
+        "url": "https://registry.npmjs.org/@oh-my-pi/pi-natives-linux-arm64/-/pi-natives-linux-arm64-18.8.0.tgz",
+        "sha256": "c1ecff8f8ad1c92f9356024a3eb609a46781b0b32712fafe6945ff4f2824e486",
         "format": "tar.gz",
         "entry": [
           "package",
           "pi_natives.linux-arm64.node"
         ],
-        "entrySha256": "0ba662a75dd89377b4a83d067b9720f40f01ec9070ac782f814e450a8e732ac8",
-        "maxBytes": 46940645,
+        "entrySha256": "b0c3cc634ac0dcd2d2c10e1e6a2c0152ed4907efc8ba82e3fbc2e5ee61c366c4",
+        "maxBytes": 46940644,
         "maxExpandedBytes": 184099328,
         "maxMembers": 5,
         "files": {
