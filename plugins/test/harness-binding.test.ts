@@ -3,12 +3,15 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { appendFileSync, closeSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { formatManifoldUri, MachineHalfSchema, PublicJobSchema, type Cap, type ManifoldRef } from "@manifold/protocol";
+import { formatManifoldUri, MachineHalfSchema, PublicJobSchema, type Agent, type AgentRun, type Cap, type ManifoldRef } from "@manifold/protocol";
+import type { GuestCtx } from "@manifold/plugin-kit/server";
 import {
   ACCOUNTS_PLUGIN_ID, BROKER_SERVICE_ID, OMP_PLUGIN_ID, OmpHarnessProfileSchema, PreparedHarnessSessionSchema,
   PreparedResumeSessionSchema, TerminalRuntimeSchema,
 } from "../api/index.ts";
 import { prepareHarnessSession } from "../atyrode.omp/execution.ts";
+import { harness } from "../atyrode.omp/harness.ts";
+import { HarnessLeaseSchema } from "../workers/harness/lifecycle.ts";
 import { listSessions, resumeSession } from "../atyrode.omp/sessions.ts";
 import { digestOf, type OmpContext } from "../atyrode.omp/machine-server.ts";
 import manifest from "../atyrode.omp/manifest.json";
@@ -86,6 +89,8 @@ function launchFixture() {
   } as unknown as OmpContext;
   return {
     ctx, deny: (cap: string) => { denied = cap; },
+    machine,
+    launch: { tui: false, lease: { expiresAt: 1_000_000, lifetimeMs: 300_000 } },
     credentials,
     setDefaults: (overlay: unknown) => { defaults = { revision: 0, overlay, updatedAt: null, updatedBy: null }; },
     setInventory: (value: unknown) => { inventory = value; },
@@ -97,8 +102,8 @@ function launchFixture() {
 
 test("two governed preparations bind distinct IDs to the transcripts OMP will open", async () => {
   const f = launchFixture();
-  const first = await prepareHarnessSession(f.ctx, f.input);
-  const second = await prepareHarnessSession(f.ctx, f.input);
+  const first = await prepareHarnessSession(f.ctx, f.input, f.launch);
+  const second = await prepareHarnessSession(f.ctx, f.input, f.launch);
   expect(first.session.sessionId).not.toBe(second.session.sessionId);
   const directory = mkdtempSync(join(tmpdir(), "omp-binding-"));
   const root = openSessionsRoot(directory);
@@ -125,7 +130,7 @@ test("two governed preparations bind distinct IDs to the transcripts OMP will op
 
 test("prepared harness contracts require the full nested session to match the outer binding", async () => {
   const f = launchFixture();
-  const prepared = await prepareHarnessSession(f.ctx, f.input);
+  const prepared = await prepareHarnessSession(f.ctx, f.input, f.launch);
   expect(PreparedHarnessSessionSchema.parse(prepared).session).toEqual(prepared.session);
   for (const session of [
     undefined,
@@ -159,8 +164,8 @@ test("prepared resume contracts bind the OMP plugin and resume operation without
 
 test("a trusted resumed binding preserves its journal and never creates a missing conversation", async () => {
   const f = launchFixture();
-  const first = await prepareHarnessSession(f.ctx, f.input);
-  const resumed = await prepareHarnessSession(f.ctx, f.input, first.session);
+  const first = await prepareHarnessSession(f.ctx, f.input, f.launch);
+  const resumed = await prepareHarnessSession(f.ctx, f.input, f.launch, first.session);
   const directory = mkdtempSync(join(tmpdir(), "omp-resume-"));
   const root = openSessionsRoot(directory);
   try {
@@ -171,22 +176,23 @@ test("a trusted resumed binding preserves its journal and never creates a missin
     expect(readFileSync(join(directory, filename), "utf8")).toBe(before);
     expect(resumed.reviewDigest).not.toBe(first.reviewDigest);
     expect(() => prepareSessionFile(root, randomUUID(), "/home/job/workspace", true)).toThrow("session_unavailable");
-    await expect(prepareHarnessSession(f.ctx, f.input, { ...first.session, machineId: "another-machine" })).rejects.toThrow("omp_session_binding_changed");
+    await expect(prepareHarnessSession(f.ctx, f.input, f.launch, { ...first.session, machineId: "another-machine" })).rejects.toThrow("omp_session_binding_changed");
   } finally { closeSync(root); rmSync(directory, { recursive: true, force: true }); }
 });
 
 test("harness preparation cannot bypass terminal or bound location authority", async () => {
   const f = launchFixture();
   f.deny("terminals:spawn");
-  await expect(prepareHarnessSession(f.ctx, f.input)).rejects.toThrow("omp_caller_terminals_spawn_required");
+  await expect(prepareHarnessSession(f.ctx, f.input, f.launch)).rejects.toThrow("omp_caller_terminals_spawn_required");
   f.deny("locations:write");
-  await expect(prepareHarnessSession(f.ctx, f.input)).rejects.toThrow("omp_caller_locations_write_required");
+  await expect(prepareHarnessSession(f.ctx, f.input, f.launch)).rejects.toThrow("omp_caller_locations_write_required");
 });
 
 test("durable harness profiles cannot carry executable, environment, path or session authority", () => {
   const f = launchFixture();
   const profile = { accountPool: f.input.accountPool, overlay: f.input.overlay, planYolo: false };
   expect(OmpHarnessProfileSchema.parse(profile)).toEqual(profile);
+  expect(OmpHarnessProfileSchema.parse({ ...profile, tui: true })).toEqual({ ...profile, tui: true });
   expect(() => OmpHarnessProfileSchema.parse({ ...profile, sessionId: randomUUID() })).toThrow();
   expect(() => OmpHarnessProfileSchema.parse({ ...profile, overlay: { ...profile.overlay, extensions: ["/tmp/model-extension"] } })).toThrow();
   expect(() => OmpHarnessProfileSchema.parse({ ...profile, env: { MANIFOLD_ORIGIN: "https://invalid.example" } })).toThrow();
@@ -313,4 +319,41 @@ test("operator session doors reject non-owner and container-scoped authority", a
   const scoped = { ...f.ctx, auth: { ...f.ctx.auth, containerScope: f.input.containerId } };
   await expect(resumeSession(scoped, { machineId: f.input.machineId, sessionId: randomUUID() }))
     .rejects.toThrow("omp_session_owner_required");
+});
+
+test("a harness launch seals its profile's mode and the Run's own lease beside the session", async () => {
+  const f = launchFixture();
+  const createdAt = 1_800_000_000_000;
+  const run = { id: "fixture-run", agentId: "fixture-agent", session: null, createdAt, expiresAt: createdAt + 120_000 } as unknown as AgentRun;
+  const profile = { accountPool: f.input.accountPool, overlay: f.input.overlay, planYolo: false };
+  const agent = (grantMs: number, tui?: boolean) => ({ agentId: "fixture-agent", harness: OMP_PLUGIN_ID,
+    grant: { maxRunLifetimeMs: grantMs }, context: { instructions: "Review the project", profile: { ...profile, ...(tui ? { tui } : {}) } },
+  }) as unknown as Agent;
+  const target = { containerId: f.input.containerId, machineId: f.input.machineId };
+  const sealed = async (launched: { runtime: { operationId: string; input: Record<string, string | number | boolean> } }) => {
+    const operation = MachineHalfSchema.parse(manifest.machine).operations[launched.runtime.operationId]!;
+    const files = materializeJobInputs(operation, launched.runtime.input, new Map([
+      ["omp", { url: "http://127.0.0.1:12345/v1", bearer: randomBytes(32).toString("hex") }],
+    ]));
+    try {
+      const lease = files.find(file => file.target === "/inputs/lease");
+      return { tui: launched.runtime.input.tui, lease: HarnessLeaseSchema.parse(JSON.parse(readFileSync(lease!.fd, "utf8"))) };
+    } finally { for (const file of files) closeSync(file.fd); }
+  };
+  const ctx = f.ctx as unknown as GuestCtx;
+  expect(await sealed(await harness.launch(ctx, run, agent(3_600_000, true), target)))
+    .toEqual({ tui: true, lease: { expiresAt: createdAt + 120_000, lifetimeMs: 120_000 } });
+  // The Agent's grant bounds the lease a renewal asks for; an omitted mode is the RPC harness.
+  expect(await sealed(await harness.launch(ctx, run, agent(60_000), target)))
+    .toEqual({ tui: false, lease: { expiresAt: createdAt + 120_000, lifetimeMs: 60_000 } });
+});
+
+test("a TUI launch refuses Plan-YOLO, and an installation that cannot seal a launch refuses every harness launch", async () => {
+  const f = launchFixture();
+  await expect(prepareHarnessSession(f.ctx, { ...f.input, planYolo: true }, { ...f.launch, tui: true }))
+    .rejects.toThrow("omp_tui_plan_unsupported");
+  const installed = f.machine.operations[`${OMP_PLUGIN_ID}.harness`]!;
+  delete installed.input.lease;
+  delete installed.inputFiles!.lease;
+  await expect(prepareHarnessSession(f.ctx, f.input, f.launch)).rejects.toThrow("omp_harness_runtime_unsupported");
 });

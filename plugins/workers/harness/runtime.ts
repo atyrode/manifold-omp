@@ -16,6 +16,9 @@ import { validateSkillInputs } from "./skills.ts";
 import { readAutomation } from "./sdk-inputs.ts";
 import { forwardOmpOutput, type ReportOmpProgress } from "./progress.ts";
 import { createAgentToolRelay } from "./agent-tools.ts";
+import { controlProgress, type RunControlOutcome } from "./control.ts";
+import { HarnessLeaseSchema, RunLifecycle } from "./lifecycle.ts";
+import { TuiChildMessageSchema, type TuiCommand } from "../../tui-control-ipc.ts";
 
 const runnerEnvironment = z.strictObject({
   origin: z.string().url(), token: z.string().regex(/^[a-f0-9]{64}$/i), runId: z.string().min(1).max(128),
@@ -52,7 +55,7 @@ export function takeRunEnvironment(environment: NodeJS.ProcessEnv) {
   return parsed.data;
 }
 
-function inputText(name: "sessionId" | "prompt", limit: number): string {
+function inputText(name: "sessionId" | "prompt" | "lease", limit: number): string {
   const fd = openSync(`/inputs/${name}`, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const stat = fstatSync(fd);
@@ -213,7 +216,8 @@ export async function runOmpNative(context: WorkerContext): Promise<boolean> {
 
 /** A native operation, not a shell command. OMP sees neither the runner credential
  * nor the private control descriptor; its only host boundary is the RPC pipe. */
-export async function runOmpHarness(signal: AbortSignal): Promise<boolean> {
+export async function runOmpHarness(context: WorkerContext): Promise<boolean> {
+  const { signal } = context;
   const skills = validateSkillInputs();
   if (skills.mode !== "preserve" && process.argv.includes("--plan-yolo")) throw new Error("omp_skills_plan_unsupported");
   const automation = readAutomation();
@@ -375,6 +379,11 @@ export async function runOmpHarness(signal: AbortSignal): Promise<boolean> {
       if (prompt) await request("prompt", { message: prompt, streamingBehavior: "steer" });
       const send = async (raw: unknown) => {
         let input = OmpSendInputSchema.parse(raw);
+        // Live dials belong to the TUI harness. Answer the door now rather than let it wait out its timeout.
+        if (input.type === "control") {
+          context.reportProgress(controlProgress(input.id, { ok: false, reason: "unsupported" }));
+          return;
+        }
         const waiting = prompts.entries().next().value;
         if (input.type === "prompt" && waiting) {
           input = waiting[1] === "confirm"
@@ -431,6 +440,105 @@ export async function runOmpHarness(signal: AbortSignal): Promise<boolean> {
       const cleanup = await runner.close(completed ? "completed" : signal.aborted ? "cancelled" : "failed");
       completed = completed && cleanup;
     } finally { admission?.close(); }
+  }
+  return completed;
+}
+
+/**
+ * OMP's own terminal UI under an Agent Run. The SDK child inherits the job's terminal; this wrapper
+ * alone keeps the Run credential, the private control descriptor and a private IPC channel to the
+ * child, and never reads or writes terminal bytes. It never acknowledges the Run's policy: the
+ * session's model has no Manifold tool, so the Run stays pending and reaches no authority-bearing
+ * door, while renewal and activity run on its own credential from launch. Losing the Run stops
+ * renewal and reporting, never the operator's TUI.
+ */
+export async function runOmpHarnessTui(context: WorkerContext): Promise<boolean> {
+  const { signal } = context;
+  validateSkillInputs();
+  if (process.argv.includes("--plan-yolo")) throw new Error("omp_tui_plan_unsupported");
+  const automation = readAutomation();
+  if (automation.mode === "restricted") throw new Error("omp_restricted_harness_unsupported");
+  if (automation.agentTools) throw new Error("omp_agent_tools_mode_unsupported");
+  const binding = takeRunEnvironment(process.env);
+  const sessionId = SessionIdSchema.parse(inputText("sessionId", 36));
+  const lease = HarnessLeaseSchema.parse(JSON.parse(inputText("lease", 256)));
+  const resuming = process.argv.includes("--resume");
+  const root = openSessionsRoot();
+  let sessionFile: string;
+  try { sessionFile = prepareSessionFile(root, sessionId, "/home/job/workspace", resuming); }
+  finally { closeSync(root); }
+  // Bun adopts inherited socketpairs through connect({fd}), not Socket({fd}).
+  const control = (connect as unknown as (options: { fd: number }) => Socket)({ fd: binding.controlFd });
+  control.on("error", () => control.destroy());
+  const runner = new ActionRunner({ origin: binding.origin, token: binding.token, bind: { runId: binding.runId },
+    emit: frame => lifecycle.observe(frame) });
+  binding.token = "";
+  const lifecycle = new RunLifecycle(runner, binding.runId, lease);
+  let child: ChildProcess | undefined;
+  let completed = false;
+  try {
+    await runner.bind();
+    if (signal.aborted) throw new Error("harness_cancelled");
+    lifecycle.start();
+    lifecycle.report("idle");
+    const processChild = child = spawn("/runtime/bin/bun", ["--no-env-file", "--no-install", "--config=/dev/null", "/runtime/bin/sdkHost",
+      resuming ? "tui-resume" : "tui", sessionFile], { cwd: "/inputs", env: ompEnvironment, stdio: ["inherit", "inherit", "inherit", "ipc"] });
+    const exit = Promise.withResolvers<number | null>();
+    processChild.once("exit", exit.resolve);
+    processChild.once("error", exit.reject);
+    const ready = Promise.withResolvers<void>();
+    void exit.promise.finally(() => ready.reject(new Error("omp_sdk_exited"))).catch(() => {});
+    const stop = () => { processChild.kill("SIGTERM"); control.destroy(); };
+    signal.addEventListener("abort", stop, { once: true });
+    if (signal.aborted) stop();
+    const activity = new OmpRpcActivity();
+    const pending = new Map<string, (outcome: RunControlOutcome) => void>();
+    processChild.on("message", raw => {
+      const message = TuiChildMessageSchema.safeParse(raw);
+      if (!message.success) { stop(); return; }
+      if (message.data.type === "tui_ready") ready.resolve();
+      else if (message.data.type === "tui_result") {
+        pending.get(message.data.id)?.(message.data.outcome);
+        pending.delete(message.data.id);
+      } else {
+        const next = activity.consume(message.data.frame);
+        if (next) lifecycle.report(next);
+      }
+    });
+    const command = (change: TuiCommand) => new Promise<RunControlOutcome>(resolve => {
+      const id = randomUUID();
+      pending.set(id, resolve);
+      const lost = () => { pending.delete(id); resolve({ ok: false, reason: "session_unavailable" }); };
+      if (!processChild.connected) { lost(); return; }
+      processChild.send({ type: "tui_command", id, command: change }, error => { if (error) lost(); });
+    });
+    // Frames apply one at a time and in order; job input carries no reply, so a dial answers its door through progress.
+    void (async () => {
+      await ready.promise;
+      for await (const frame of rpcFrames(control, 65536)) {
+        const input = OmpSendInputSchema.parse(frame);
+        // The operator answers TUI dialogs and interrupts in the TUI itself.
+        if (input.type === "abort" || input.type === "extension_ui_response") continue;
+        if (input.type === "control") {
+          const { model, thinking } = input;
+          context.reportProgress(controlProgress(input.id, await command({ type: "control", model, thinking })));
+        } else await command({ type: "prompt", message: input.message, streamingBehavior: input.type === "steer" ? "steer" : "followUp" });
+      }
+    })().catch(() => control.destroy());
+    try {
+      const code = await exit.promise;
+      completed = code === 0 && !signal.aborted;
+    } finally {
+      signal.removeEventListener("abort", stop);
+      for (const resolve of pending.values()) resolve({ ok: false, reason: "session_unavailable" });
+      pending.clear();
+    }
+    if (completed) lifecycle.report("done");
+  } finally {
+    child?.kill("SIGTERM");
+    control.destroy();
+    await lifecycle.stop();
+    completed = await runner.close(completed ? "completed" : signal.aborted ? "cancelled" : "failed") && completed;
   }
   return completed;
 }

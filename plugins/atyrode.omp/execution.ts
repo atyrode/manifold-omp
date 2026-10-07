@@ -53,6 +53,7 @@ import {
   type ThinkingLevel,
 } from "../api/index.ts";
 import { parseBenchmarkInput, probeAddress } from "../api/probe.ts";
+import type { HarnessLease } from "../workers/harness/lifecycle.ts";
 import { checkedAccountPool, currentGateway, enabledAccountPool } from "./broker.ts";
 import {
   actor,
@@ -710,6 +711,19 @@ function requireAgentToolsRuntime(machine: MachineHalf | undefined, operationId:
       argument.when?.input === "agentTools" && argument.when.equals === true))
     throw new OmpRefusal("agent_tools_runtime_unsupported");
 }
+/** Every harness launch seals its mode and its Run's lease, so an installation predating them refuses. */
+function requireHarnessRuntime(machine: MachineHalf | undefined) {
+  const operation = machine?.operations[`${OMP_PLUGIN_ID}.harness`];
+  if (operation?.input.tui?.type !== "boolean" || operation.input.lease?.type !== "string" || !operation.inputFiles?.lease ||
+    !operation.argv.some(argument => "literal" in argument && argument.literal === "--tui" &&
+      argument.when?.input === "tui" && argument.when.equals === true))
+    throw new OmpRefusal("harness_runtime_unsupported");
+}
+/** What a harness launch seals beside the reviewed session: its mode and the Run's lease. */
+export interface HarnessLaunch {
+  tui: boolean;
+  lease: HarnessLease;
+}
 /** Runtime preparation is machine-scoped. Container and terminal authorization
  * belongs to reviewed launch or, for operator resume, independent placement. */
 async function sessionRuntimePreparation(
@@ -719,6 +733,7 @@ async function sessionRuntimePreparation(
   sessionId?: string,
   resume = false,
   overrides?: ActionInput<"resumeSession">["overrides"],
+  launch?: HarnessLaunch,
 ) {
   if (args.isolation && (sessionId || resume || operationId !== MATERIAL_SESSION_OPERATION_ID ||
     args.skills?.mode === "select" || args.automation?.toolNames.length))
@@ -733,6 +748,8 @@ async function sessionRuntimePreparation(
   if (args.automation && operationId === `${OMP_PLUGIN_ID}.harness`)
     throw new OmpRefusal("restricted_harness_unsupported");
   if (resume && args.planYolo) throw new OmpRefusal("resume_plan_unsupported");
+  // The TUI harness always runs the SDK host, which has no Plan-YOLO hand-off.
+  if (launch?.tui && args.planYolo) throw new OmpRefusal("tui_plan_unsupported");
   const requestedPool = args.accountPool ?? await enabledAccountPool(ctx,
     configuredModels(overlay).map(ref => ref.slice(0, ref.indexOf("/"))));
   const { pool, reference } = await checkedAccountPool(ctx, requestedPool);
@@ -748,8 +765,9 @@ async function sessionRuntimePreparation(
     ? { mode: "restricted" as const, toolNames: [], delegation: "disabled" as const }
     : args.automation ?? { mode: "ordinary" as const };
   if (args.isolation) requireMaterialRuntime(current.deployment.installation?.machine);
-  else if (args.automation || resume) requireSdkRuntime(current.deployment.installation?.machine, operationId);
+  else if (args.automation || resume || launch?.tui) requireSdkRuntime(current.deployment.installation?.machine, operationId);
   if (args.agentTools) requireAgentToolsRuntime(current.deployment.installation?.machine, operationId);
+  if (launch) requireHarnessRuntime(current.deployment.installation?.machine);
   const skills = await resolveSkills(ctx, args.machineId,
     args.isolation ? { mode: "disabled" } : args.skills ?? (args.automation ? { mode: "disabled" } : undefined));
   if (args.planYolo && skills.mode !== "preserve") throw new OmpRefusal("skills_plan_unsupported");
@@ -772,6 +790,7 @@ async function sessionRuntimePreparation(
     automation: JSON.stringify(automation),
     resumeOverrides: JSON.stringify(overrides ?? {}),
     ...(sessionId ? { sessionId, resume } : {}),
+    ...(launch ? { tui: launch.tui, lease: JSON.stringify(launch.lease) } : {}),
     ...(args.isolation ? { isolation: JSON.stringify(args.isolation) } : {}),
     ...(args.agentTools === undefined ? {} : { agentTools: true }),
   });
@@ -783,13 +802,14 @@ async function sessionPreparation(
   args: ActionInput<"reviewSession">,
   sessionId?: string,
   resume = false,
+  launch?: HarnessLaunch,
 ) {
   await authorizeTarget(ctx, args);
   if (args.isolation && (sessionId || resume)) throw new OmpRefusal("material_isolation_unsupported");
   const operationId = args.isolation ? MATERIAL_SESSION_OPERATION_ID : sessionId ? `${OMP_PLUGIN_ID}.harness`
     : args.agentTools ? SESSION_OPERATION_ID : `${OMP_PLUGIN_ID}.launch`;
   const { defaults, overlay, pool, reference, gateway, current, input, config, skills, inputs, automation } =
-    await sessionRuntimePreparation(ctx, args, operationId, sessionId, resume);
+    await sessionRuntimePreparation(ctx, args, operationId, sessionId, resume, undefined, launch);
   const destination = {
     containerId: args.containerId,
     machineId: args.machineId,
@@ -835,15 +855,16 @@ async function prepareReviewedSession(
   args: ActionInput<"prepareSession">,
   sessionId?: string,
   resume = false,
+  launch?: HarnessLaunch,
 ): Promise<ActionResult<"prepareSession">> {
   if (args.isolation) throw new OmpRefusal("material_isolation_unsupported");
   if (args.inferenceLimits !== undefined) throw new OmpRefusal("inference_limits_unsupported");
   await authorizeTarget(ctx, args, true);
   await authorizeTerminalSpawn(ctx, args.containerId);
-  const first = await sessionPreparation(ctx, args, sessionId, resume);
+  const first = await sessionPreparation(ctx, args, sessionId, resume, launch);
   if (first.review.reviewDigest !== args.reviewDigest)
     throw new OmpRefusal("review_changed");
-  const latest = await sessionPreparation(ctx, args, sessionId, resume);
+  const latest = await sessionPreparation(ctx, args, sessionId, resume, launch);
   if (latest.review.reviewDigest !== first.review.reviewDigest)
     throw new OmpRefusal("resources_changed");
   const placedSessionId = sessionId ?? randomUUID();
@@ -1330,15 +1351,16 @@ export async function prepareSession(
 export async function prepareHarnessSession(
   ctx: OmpContext,
   args: ActionInput<"reviewSession">,
+  launch: HarnessLaunch,
   existingSession?: OmpSessionRef,
 ) {
   const session = existingSession ? OmpSessionRefSchema.parse(existingSession) : undefined;
   if (session && session.machineId !== args.machineId) throw new OmpRefusal("session_binding_changed");
   const sessionId = session?.sessionId ?? randomUUID();
   const resume = session !== undefined;
-  const review = await sessionPreparation(ctx, args, sessionId, resume);
+  const review = await sessionPreparation(ctx, args, sessionId, resume, launch);
   const prepared = await prepareReviewedSession(
-    ctx, { ...args, reviewDigest: review.review.reviewDigest }, sessionId, resume,
+    ctx, { ...args, reviewDigest: review.review.reviewDigest }, sessionId, resume, launch,
   );
   return PreparedHarnessSessionSchema.parse({
     ...prepared,

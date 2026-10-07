@@ -39,6 +39,7 @@ export type OmpContext = Pick<
   | "now"
   | "storage"
   | "auth"
+  | "agentRun"
   | "outsideScope"
 >;
 export class OmpRefusal extends Error {
