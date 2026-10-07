@@ -1,7 +1,7 @@
 import { closeSync, writeSync } from "node:fs";
 import { openWorkerContext, type WorkerContext } from "@manifold/sdk/worker";
 import { listSessionSummaries, openSessionsRoot } from "./sessions.ts";
-import { runOmpHarness, runOmpNative, runOmpResume } from "./runtime.ts";
+import { runOmpHarness, runOmpHarnessTui, runOmpNative, runOmpResume } from "./runtime.ts";
 
 const controller = new AbortController();
 const cancel = () => controller.abort();
@@ -22,7 +22,7 @@ try {
     } finally { closeSync(root); }
     success = true;
   } else if (process.argv[2] === "launch") {
-    success = await runOmpHarness(context.signal);
+    success = process.argv.includes("--tui") ? await runOmpHarnessTui(context.signal) : await runOmpHarness(context.signal);
   } else if (process.argv[2] === "resume") {
     success = await runOmpResume(context.signal);
   } else if (process.argv[2] === "native") {

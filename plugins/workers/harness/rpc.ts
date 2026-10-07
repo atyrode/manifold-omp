@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { TuiThinkingSchema } from "../../tui-control-ipc.ts";
 
 export const RPC_FRAME_BYTES = 1024 * 1024;
 export const OmpSendInputSchema = z.union([
@@ -9,6 +10,9 @@ export const OmpSendInputSchema = z.union([
   z.strictObject({ type: z.literal("extension_ui_response"), id: z.string().min(1).max(128), value: z.string().max(16384) }),
   z.strictObject({ type: z.literal("extension_ui_response"), id: z.string().min(1).max(128), confirmed: z.boolean() }),
   z.strictObject({ type: z.literal("extension_ui_response"), id: z.string().min(1).max(128), cancelled: z.literal(true) }),
+  // Live dials act on the session's main agent and select only among models it already serves.
+  z.strictObject({ type: z.literal("set_model"), provider: z.string().min(1).max(128), modelId: z.string().min(1).max(512) }),
+  z.strictObject({ type: z.literal("set_thinking_level"), level: TuiThinkingSchema }),
 ]);
 export type OmpActivity = "working" | "blocked" | "done" | "idle";
 

@@ -15,6 +15,7 @@ import { readAutomation, readResumeOverrides, readSessionInput } from "../worker
 import { admitSdkSession, SdkSessionConfigSchema } from "./sdk-admission.ts";
 import { MATERIAL_SYSTEM_PROMPT, materialMessage, readMaterial, runMaterialPrintMode } from "./material.ts";
 import { loadAgentTools, type AgentToolAdapter } from "./agent-tools.ts";
+import { attachTuiControl, type TuiControl } from "./tui-control.ts";
 
 // This entry is always a new, sanitized child, never imported by CLI passthrough.
 const materialOnly = process.argv[2] === "material-print";
@@ -31,12 +32,15 @@ let created: CreateAgentSessionResult | undefined;
 let mode: InteractiveMode | undefined;
 let heldFile: number | undefined;
 let toolAdapter: AgentToolAdapter | undefined;
+let control: TuiControl | undefined;
 let code = 1;
 try {
   if (Object.keys(process.env).some(name => name.startsWith("MANIFOLD_"))) throw new Error("omp_sdk_environment_invalid");
-  const kind = z.enum(["interactive", "print", "material-print", "resume", "rpc", "rpc-resume"]).parse(process.argv[2]);
-  const resume = kind === "resume" || kind === "rpc-resume";
+  const kind = z.enum(["interactive", "print", "material-print", "resume", "rpc", "rpc-resume", "tui", "tui-resume"]).parse(process.argv[2]);
+  const resume = kind === "resume" || kind === "rpc-resume" || kind === "tui-resume";
   const rpc = kind === "rpc" || kind === "rpc-resume";
+  // A TUI harness: the stock renderer owns the terminal; the private IPC parent turns live dials.
+  const tui = kind === "tui" || kind === "tui-resume";
   const sessionRoot = kind === "print" || materialOnly ? "/outputs/session" : SESSIONS_ROOT;
   const automation = readAutomation();
   const restricted = automation.mode === "restricted";
@@ -47,7 +51,7 @@ try {
     ? materialMessage(readSessionInput("prompt", PROMPT_MAX_BYTES),
       readMaterial(MaterialOnlyIsolationSchema.parse(JSON.parse(readSessionInput("isolation", 4096)))))
     : undefined;
-  if (rpc && restricted) throw new Error("omp_restricted_harness_unsupported");
+  if ((rpc || tui) && restricted) throw new Error("omp_restricted_harness_unsupported");
   const agentTools = automation.mode === "ordinary" ? automation.agentTools : undefined;
   if (agentTools) {
     if (kind !== "print") throw new Error("omp_agent_tools_mode_unsupported");
@@ -148,7 +152,7 @@ try {
   created = await createAgentSession({
     cwd, agentDir: PROBE_AGENT, settings, authStorage: auth, modelRegistry: registry,
     sessionManager: manager, agentRegistry: new AgentRegistry(), ...admitted,
-    hasUI: kind === "interactive" || kind === "resume",
+    hasUI: kind === "interactive" || kind === "resume" || tui,
     // Prompt-cache warming spends provider requests no one is waiting on; one-shots never keep it.
     cacheWarming: kind !== "print" && !materialOnly,
     ...(restricted || skillsRuntime.mode === "disabled" ? { skills } : {}),
@@ -196,10 +200,12 @@ try {
         ...(created.subagentEventBus ? { subagentEventBus: created.subagentEventBus } : {}),
       });
     } else {
-      mode = new InteractiveMode(created.session, "18.4.12", undefined, created.setToolUIContext,
+      control = tui ? attachTuiControl(created.session, created.setToolUIContext, cancel) : undefined;
+      mode = new InteractiveMode(created.session, "18.4.12", undefined, control?.setToolUIContext ?? created.setToolUIContext,
         created.lspServers, created.mcpManager, created.eventBus, undefined, created.subagentEventBus);
       await mode.init();
       if (resume) await mode.renderInitialMessages();
+      control?.ready();
       if (!resume) {
         const prompt = readSessionInput("prompt");
         if (prompt) await created.session.prompt(prompt);
@@ -214,6 +220,7 @@ try {
   writeSync(2, `${reason}\n`);
 } finally {
   toolAdapter?.close();
+  control?.close();
   try {
     await created?.session.abort();
     await created?.session.dispose();

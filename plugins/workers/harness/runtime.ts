@@ -5,11 +5,12 @@ import { connect, type Socket } from "node:net";
 import { setTimeout, clearTimeout } from "node:timers";
 import { ActionRunner } from "@manifold/sdk";
 import type { WorkerContext } from "@manifold/sdk/worker";
-import type { ActionRunnerResponse } from "@manifold/protocol";
+import type { ActionRunnerResponse, AgentPolicyChallenge } from "@manifold/protocol";
 import { z } from "zod";
 import { probeChildEnvironment } from "../probe/inputs.ts";
 import { openSessionsRoot, prepareSessionFile, SESSIONS_ROOT, SessionIdSchema } from "./sessions.ts";
-import { OmpRpcActivity, OmpSendInputSchema, rpcFrames, RPC_FRAME_BYTES } from "./rpc.ts";
+import { OmpRpcActivity, OmpSendInputSchema, rpcFrames, RPC_FRAME_BYTES, type OmpActivity } from "./rpc.ts";
+import { TuiChildMessageSchema, type TuiControlCommand } from "../../tui-control-ipc.ts";
 import { ADMISSION_CONTEXT_BYTES, writeAdmissionContext, type AdmissionContextFile } from "./admission.ts";
 import { dispatchOmpModelRequest, OmpModelToolInputSchema } from "./model.ts";
 import { validateSkillInputs } from "./skills.ts";
@@ -52,7 +53,7 @@ export function takeRunEnvironment(environment: NodeJS.ProcessEnv) {
   return parsed.data;
 }
 
-function inputText(name: "sessionId" | "prompt", limit: number): string {
+function inputText(name: "sessionId" | "prompt" | "lease", limit: number): string {
   const fd = openSync(`/inputs/${name}`, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const stat = fstatSync(fd);
@@ -387,7 +388,9 @@ export async function runOmpHarness(signal: AbortSignal): Promise<boolean> {
             const next = activity.answer(input.id);
             if (next) await reportActivity(next);
           }
-        } else await request(input.type, input.type === "abort" ? {} : { message: input.message, ...(input.type === "prompt" ? { streamingBehavior: "steer" } : {}) });
+        } else if (input.type === "set_model") await request("set_model", { provider: input.provider, modelId: input.modelId });
+        else if (input.type === "set_thinking_level") await request("set_thinking_level", { level: input.level });
+        else await request(input.type, input.type === "abort" ? {} : { message: input.message, ...(input.type === "prompt" ? { streamingBehavior: "steer" } : {}) });
         await checkSession();
       };
       const consumeControl = (async () => { for await (const frame of rpcFrames(control, 65536)) await send(frame); })();
@@ -431,6 +434,139 @@ export async function runOmpHarness(signal: AbortSignal): Promise<boolean> {
       const cleanup = await runner.close(completed ? "completed" : signal.aborted ? "cancelled" : "failed");
       completed = completed && cleanup;
     } finally { admission?.close(); }
+  }
+  return completed;
+}
+
+/** Launch-time lease facts the server half reads from the Run it is launching. Non-secret. */
+const TuiLeaseSchema = z.strictObject({
+  expiresAt: z.number().int().positive(), lifetimeMs: z.number().int().min(60_000).max(3_600_000),
+});
+
+/** Spike: an Agent Run that keeps OMP's stock TUI. The SDK child inherits the job's terminal.
+ * This wrapper keeps the Run credential, the private control descriptor and a private IPC
+ * channel to the child; it never reads or writes terminal bytes. Losing the Run (refused
+ * renewal, expiry, activity budget) stops reporting and renewal, never the operator's TUI. */
+export async function runOmpHarnessTui(signal: AbortSignal): Promise<boolean> {
+  validateSkillInputs();
+  if (process.argv.includes("--plan-yolo")) throw new Error("omp_skills_plan_unsupported");
+  const automation = readAutomation();
+  if (automation.mode === "restricted") throw new Error("omp_restricted_harness_unsupported");
+  if (automation.agentTools) throw new Error("omp_agent_tools_mode_unsupported");
+  const binding = takeRunEnvironment(process.env);
+  const sessionId = SessionIdSchema.parse(inputText("sessionId", 36));
+  const lease = TuiLeaseSchema.parse(JSON.parse(inputText("lease", 256)));
+  const resuming = process.argv.includes("--resume");
+  const root = openSessionsRoot();
+  let sessionFile: string;
+  try { sessionFile = prepareSessionFile(root, sessionId, "/home/job/workspace", resuming); }
+  finally { closeSync(root); }
+  const control = (connect as unknown as (options: { fd: number }) => Socket)({ fd: binding.controlFd });
+  control.on("error", () => control.destroy());
+  let policy: AgentPolicyChallenge | undefined;
+  let result: Extract<ActionRunnerResponse, { type: "result" }> | undefined;
+  const runner = new ActionRunner({ origin: binding.origin, token: binding.token, bind: { runId: binding.runId }, emit(frame) {
+    if (frame.type === "policy") policy = frame.policy;
+    else if (frame.type === "result") result = frame;
+  } });
+  binding.token = "";
+  let runnerTail = Promise.resolve();
+  const useRunner = (action: () => Promise<void>): Promise<void> => {
+    const next = runnerTail.then(action);
+    runnerTail = next.catch(() => {});
+    return next;
+  };
+  let child: ChildProcess | undefined;
+  let renewTimer: NodeJS.Timeout | undefined;
+  let completed = false;
+  try {
+    await runner.bind();
+    if (!policy) throw new Error("harness_policy_unavailable");
+    // Spike decision, unreviewed: renewal requires an active, policy-current Run, and a TUI
+    // session has no model-visible Manifold tool. The launcher assents to the exact bytes.
+    result = undefined;
+    await runner.accept({ type: "ack", id: "launcher-ack", runId: binding.runId,
+      policy: { revision: policy.revision, acknowledgements: policy.required.map(({ id, digest }) => ({ id, digest })) } });
+    if (result?.outcome.ok !== true) throw new Error("harness_policy_refused");
+    if (signal.aborted) throw new Error("harness_cancelled");
+    let renewing = true;
+    let renewals = 0;
+    const scheduleRenewal = (expiresAt: number) => {
+      renewTimer = setTimeout(() => void useRunner(async () => {
+        if (!renewing || runner.closed) return;
+        result = undefined;
+        // The renewal door declares agentJustification: required; the claim is the harness's own.
+        await runner.accept({ type: "renew", id: `renew-${++renewals}`, runId: binding.runId, lifetimeMs: lease.lifetimeMs,
+          justification: "Keep the operator's open interactive OMP session attributed to its Run." });
+        if (result?.outcome.ok === true && result.expiresAt !== undefined) scheduleRenewal(result.expiresAt);
+        else renewing = false;
+      }).catch(() => { renewing = false; }), Math.max(1_000, expiresAt - Date.now() - lease.lifetimeMs / 2));
+    };
+    scheduleRenewal(lease.expiresAt);
+    let reporting = true;
+    const report = (activity: OmpActivity) => void useRunner(async () => {
+      if (!reporting || runner.closed) return;
+      result = undefined;
+      await runner.reportActivity({ runId: binding.runId, activity });
+      if (result?.outcome.ok !== true) reporting = false;
+    }).catch(() => { reporting = false; });
+    report("idle");
+    const processChild = child = spawn("/runtime/bin/bun", ["--no-env-file", "--no-install", "--config=/dev/null", "/runtime/bin/sdkHost",
+      resuming ? "tui-resume" : "tui", sessionFile], { cwd: "/inputs", env: ompEnvironment, stdio: ["inherit", "inherit", "inherit", "ipc"] });
+    const exit = Promise.withResolvers<number | null>();
+    processChild.once("exit", exit.resolve);
+    processChild.once("error", exit.reject);
+    const stop = () => { processChild.kill("SIGTERM"); control.destroy(); };
+    signal.addEventListener("abort", stop, { once: true });
+    const ready = Promise.withResolvers<void>();
+    const activity = new OmpRpcActivity();
+    const pending = new Map<string, (ok: boolean) => void>();
+    processChild.on("message", raw => {
+      const message = TuiChildMessageSchema.safeParse(raw);
+      if (!message.success) { stop(); return; }
+      if (message.data.type === "tui_ready") ready.resolve();
+      else if (message.data.type === "tui_result") {
+        pending.get(message.data.id)?.(message.data.ok);
+        pending.delete(message.data.id);
+      } else {
+        const next = activity.consume(message.data.frame);
+        if (next) report(next);
+      }
+    });
+    void (async () => {
+      await ready.promise;
+      for await (const frame of rpcFrames(control, 65536)) {
+        const input = OmpSendInputSchema.parse(frame);
+        // The operator answers TUI dialogs and interrupts in the TUI itself.
+        if (input.type === "abort" || input.type === "extension_ui_response") continue;
+        if (!processChild.connected) break;
+        const command: TuiControlCommand = input.type === "set_model" || input.type === "set_thinking_level" ? input
+          : { type: "prompt", message: input.message };
+        // Job input carries no reply. A refused dial is visible only in the TUI and the transcript.
+        const applied = Promise.withResolvers<boolean>();
+        const id = randomUUID();
+        pending.set(id, applied.resolve);
+        processChild.send({ type: "tui_control", id, command }, error => {
+          if (error) { pending.delete(id); applied.resolve(false); }
+        });
+        await applied.promise;
+      }
+    })().catch(() => control.destroy());
+    try {
+      const code = await exit.promise;
+      completed = code === 0 && !signal.aborted;
+    } finally {
+      signal.removeEventListener("abort", stop);
+      for (const resolve of pending.values()) resolve(false);
+      pending.clear();
+    }
+    if (completed) report("done");
+  } finally {
+    clearTimeout(renewTimer);
+    child?.kill("SIGTERM");
+    control.destroy();
+    await runnerTail;
+    completed = await runner.close(completed ? "completed" : signal.aborted ? "cancelled" : "failed") && completed;
   }
   return completed;
 }
