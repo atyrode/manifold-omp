@@ -179,6 +179,44 @@ Code consumer pin. This contract requires the declared `MANIFOLD_REV` host's pro
 Disposable unpaid native and compiled-SDK proofs do not establish live deployment,
 provider spending, fleet installation or the independently tracked material-only mode.
 
+## Agent harness
+
+`atyrode.omp` is a Manifold Agent harness. An Agent's `context.profile` is an `OmpHarnessProfileSchema`: the durable launch dials of `SessionInputSchema` without target, prompt, skills, automation, isolation, limits or `agentTools`, plus an optional `tui` flag. `core.access.launchRun` calls `harness.launch`, which prepares the reviewed `atyrode.omp.harness` terminal operation with the Agent's `instructions` as its first prompt and returns its runtime; the caller opens that runtime as a terminal.
+
+- **Headless RPC harness** (`tui` omitted or `false`). OMP runs in RPC mode with the governed `manifold` tool, and the model reads and acknowledges the Run's policy itself.
+- **TUI harness** (`tui: true`, the `--tui` operation literal). OMP's own interactive terminal UI, the SDK host's `InteractiveMode` (18.4.12), runs on the Run's terminal for the operator. The model has no Manifold tool. Plan-YOLO refuses `omp_tui_plan_unsupported`, and the SDK runtime is required.
+
+Every harness launch seals the `tui` input and a `lease` input file, so an installation whose harness operation predates them refuses every harness launch with `omp_harness_runtime_unsupported`.
+
+Manifold's harness lane for a hardened plugin hands `harness.launch` the V1 projections of the Agent and its Run, so both must have a V1 shape. The Agent's V2 `scope` must be a rectangle: every entry carries the same reach and the same nonempty caps. The Run's scope must be exactly one entry, at the Run's own target and reach, so `createRunV2` narrows it explicitly, for example `scope: [{ target: "<container URI>", reach: "subtree", caps: ["containers:read"] }]` with `reach: "subtree"` for a container target. An Agent registered with `scope: []` refuses `launchRun` with `scoped_authority_requires_v2`. In TUI mode the model never exercises this authority, because the Run stays pending.
+
+### Run lifecycle without assent
+
+In TUI mode the harness wrapper alone holds the Run credential, the private control descriptor and a private IPC channel to the SDK child, and it never reads or writes terminal bytes. It adopts the Run through `ActionRunner` and never acknowledges the Run's policy, so the Run stays `pending_policy` and reaches no authority-bearing door. Manifold admits exactly two lifecycle doors for a pending Run on its own credential, `reportRunActivityV2` and `renewAgentRunV2` ([atyrode/manifold#1070](https://github.com/atyrode/manifold/issues/1070)), and the wrapper uses only those:
+
+- **Activity.** `idle` at bind, then `working`, `blocked` and `done` from the session's events. `blocked` is an operator dialog open in the TUI.
+- **Renewal.** At half of each lease, for the same lifetime, with the fixed justification `RENEWAL_JUSTIFICATION`. Each renewal's result supplies the next expiry.
+- **Settlement.** When the TUI exits, the wrapper reports `done` and finishes the Run: `completed` on exit code 0, otherwise `failed`, or `cancelled` when the job was cancelled.
+
+A refused renewal or report, an expired Run, or the `ActionRunner` budget of 1024 activity reports stops that loop only. The TUI keeps running for the operator; the session simply stops being attributed to the Run.
+
+The first expiry comes from the sealed `lease` input, `HarnessLeaseSchema` `{ expiresAt, lifetimeMs }`. `harness.launch` reads it from the Run it launches: `lifetimeMs` is the smaller of the Agent grant's `maxRunLifetimeMs` and the Run's own lifetime, at least 60 s. It is an input because an adopted `ActionRunner` does not expose its Run's expiry ([atyrode/manifold#1071](https://github.com/atyrode/manifold/issues/1071)).
+
+### Live dials: `controlRun`
+
+`controlRun({ runId, model?, thinking? })` turns the main agent's dials of a running TUI harness and answers with the session's dials after the change.
+
+- **Input.** `ControlRunInputSchema`: `model` is a `provider/id` reference of at most 200 characters and `thinking` a `ThinkingSelectorSchema` value (an effort level, `off` or `auto`). At least one is required.
+- **Result.** `RunDialsSchema` `{ model, thinking }`, as the session reports them. `thinking` is what the session applied after clamping to the model. A value the reply cannot carry reads `null`.
+- **Authority: human sponsorship.** Only the Run's launcher or a sponsor of its Agent, root included, turns its dials. The door refuses every Agent principal before it reads anything, `omp_run_control_forbidden`: the Run's own credential, so a session's model never chooses its own model; another Run; and an Agent runner. Manifold's Run-input rule, the one `sendRunInput` uses, then admits the human caller to the Run's terminal input.
+- **Refusals.** `omp_session_unavailable`: no started harness terminal the caller may address. `omp_model_unavailable`: a model the session does not serve, after one discovery refresh. `omp_run_control_unsupported`: a headless RPC harness. `omp_run_control_unconfirmed`: no answer within 20 s, so the change may still apply.
+
+The door writes one `control` frame to the Run's private control descriptor, the channel `sendRunInput` uses. Job input is one-way, so the harness answers on the job's progress under the stage `control <frame id>`, and the door waits for that stage. The session selects only among models it already serves, so a dial cannot widen the reviewed account pool. Subagent and role models are unchanged. `Run.model` keeps its launch value until Manifold accepts a model reported by the harness ([atyrode/manifold#1071](https://github.com/atyrode/manifold/issues/1071)); show the dials `controlRun` returns.
+
+`sendRunInput` text reaches the TUI as an operator follow-up. Abort and dialog answers belong to the operator's keyboard, so the TUI harness ignores those frames.
+
+The native gate proves this path end to end (`scripts/verify-native-harness.ts`): `launchRun` for a `tui: true` Agent, the status line before and after `controlRun`, a turn on the new dials, activity reports, a renewal past the first lease while the Run stays `pending_policy`, refusal of an Agent principal, and settlement on exit.
+
 ## One-shot inference limits
 
 `reviewSession` and `runSession` accept ephemeral `inferenceLimits`: a nonempty combination of `calls`, `inputTokens`, `outputTokens` and `costMicros`. Requested values cannot exceed the current operation's declared ceilings. Cost review requires compatible native metering and reviewed prices for every served model. Limits are bound into review, admission and retained receipt checks; cancellation still targets the same proven job if its reported limits change. Terminal preparation and Agent harnesses refuse unsupported limits, and limits are not saved in defaults or profiles.
