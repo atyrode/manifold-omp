@@ -165,7 +165,9 @@ The parent worker retains the sole private WorkerContext. The SDK receives only 
 bounded child relay, fixed namespaced doors and published argument schemas, never a
 general Run bearer. The model must read policy and explicitly acknowledge its exact
 revision through `manifold_policy` and `manifold_ack_policy`; neither OMP nor Code
-auto-acknowledges. Original model JSON reaches host validation without SDK coercion,
+auto-acknowledges. As the SDK worker does, the relay accepts the acknowledgement result
+under the protocol 57 host's `core.access.acknowledgeAgentPolicyV2` door or the legacy
+`core.access.acknowledgeAgentPolicy` door. Original model JSON reaches host validation without SDK coercion,
 default insertion or extra-field deletion. Collisions and unsupported runtime
 capabilities refuse rather than downgrade. Ordinary instruction discovery is unchanged.
 Completed results, refusals and cancellation with unknown effect acknowledgement
@@ -221,11 +223,12 @@ A key with `agentTools` refuses `omp_posting_key_agent_tools_unsupported`: a Run
 
 ## Repository gate
 
-The SDK pin and reusable workflow reference advance together. The protocol 48 pin retains
-the existing native and SDK-host contracts while making the upstream machine-core inventory
-and credential-bound lifecycle metadata available to downstream consumers. Its ordinary
-installed-bundle gate and preview live-state verification passed before propagation; the
-local native gate below still has to prove the newly packed family, not just the host.
+The SDK pin and reusable workflow reference advance together. The protocol 57 pin stamps
+every packed bundle `builtAgainst["manifold:protocol"] = "57"` under hardened contract 12.
+A protocol 57 host admits only bundles stamped 57 and holds older installed bundles as
+`repack_required`, so the three bundles are replaced together with the host; no earlier
+stamp is retained. The local native gate below still has to prove the newly packed family,
+not just the host.
 
 Use Bun **1.4.2** and a clean sibling `manifold` checkout at the revision in `plugins/MANIFOLD_REV`. From `plugins/`:
 

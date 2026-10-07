@@ -118,7 +118,7 @@ const policy = { runId, revision: "b".repeat(64),
   required: [{ id: "fixture-policy", source: "operator", digest, body: "Read this policy and explicitly acknowledge its exact digest before invoking the fixture door." }],
   issuedAt: 1 };
 const acknowledgement = { revision: policy.revision, acknowledgements: [{ id: policy.required[0]!.id, digest }] };
-const ackReply = { type: "result", door: "core.access.acknowledgeAgentPolicy", traceId: 70, outcome: { ok: true } };
+const ackReply = { type: "result", door: "core.access.acknowledgeAgentPolicyV2", traceId: 70, outcome: { ok: true } };
 const canonicalReplies = {
   result: { type: "result", door, traceId: 71, outcome: { ok: true },
     projection: { ok: true, contractDigest: digest, trust: "untrusted", data: { receipt: "DURABLE-PROJECTED-RECEIPT", count: 7 } } },

@@ -118,7 +118,8 @@ class AgentToolClient {
     switch (expected.type) {
       case "describe": return reply.type === "description" && reply.runId === this.runId;
       case "policy": return reply.type === "policy" && reply.policy.runId === this.runId;
-      case "ack": return reply.type === "result" && reply.door === "core.access.acknowledgeAgentPolicy";
+      case "ack": return reply.type === "result"
+        && (reply.door === "core.access.acknowledgeAgentPolicy" || reply.door === "core.access.acknowledgeAgentPolicyV2");
       case "invoke": return reply.type === "result" && reply.door === expected.door;
     }
   }
