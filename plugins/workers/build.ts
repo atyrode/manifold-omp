@@ -6,7 +6,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { gzipSync } from "node:zlib";
 import type { BunPlugin } from "bun";
 import { dlopen, ptr } from "bun:ffi";
-import { MachineArtifactSchema, type MachineArtifact, type MachineHalf } from "../../../manifold/packages/protocol/src/jobs.ts";
+import { MachineArtifactSchema, type MachineArtifact, type MachineHalf } from "../../../manifold/packages/protocol/src/index.ts";
 import runtime from "../runtime-artifacts.json";
 import sdkRuntime from "../sdk-host/runtime-artifacts.json";
 
