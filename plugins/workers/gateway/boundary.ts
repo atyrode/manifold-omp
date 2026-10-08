@@ -1,11 +1,12 @@
 import { timingSafeEqual } from "node:crypto";
 import { writeSync } from "node:fs";
 import { z } from "zod";
-import { AuthGatewayError, classify } from "@oh-my-pi/pi-ai/error";
+import { AuthGatewayError, classify, isCodexChatGPTAccountPolicyError } from "@oh-my-pi/pi-ai/error";
 import { parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import { unavailable } from "./inputs.ts";
 import { resolvePublished } from "./storage.ts";
+import { gatewayModelRefusal, probeAddress, type GatewayModelRefusal } from "../../api/probe.ts";
 
 const FRAME_LIMIT = 16 * 1024 * 1024;
 const credentialHeader = /^(?:authorization|proxy-authorization|x-api-key|api-key|x-goog-api-key|x-amz-security-token|cookie)$/i;
@@ -42,10 +43,41 @@ function repeatsOnRetry(content: unknown): boolean {
   });
 }
 
+/**
+ * Which PROVIDER'S DEFINITE ANSWER ABOUT THE REQUESTED MODEL an upstream failure is, if any.
+ *
+ * Every other failure is a fact about this gateway, an account or the moment, and one opaque
+ * word is all the caller can act on. These are settled facts about one model, and a benchmark
+ * exists to collect them: hidden behind `gateway_unavailable`, a model the provider does not
+ * have and a model this pool's account may not use were both reported as an inconclusive
+ * failure, and one inconclusive candidate refuses a whole derived catalog.
+ *
+ * The provider's text is read here and goes no further; each test is exact and requires the
+ * answer to name the model this stream requested, so a 404 about something else or a denial of
+ * another model stays opaque. Only the kind, a status and the published model id cross.
+ */
+function modelRefusal(text: string, status: number | undefined, model: Model<Api>): { kind: GatewayModelRefusal; status: number } | null {
+  const requested = model.requestModelId ?? model.id;
+  // Anthropic's messages endpoint answers a model it does not serve with 404 `not_found_error`,
+  // `"message":"model: <id>"`, which the SDK reports as `404 <response body>`.
+  if (model.api === "anthropic-messages" && status === 404) {
+    const body = /^404 (\{.*\})$/.exec(text.split("\n", 1)[0]!)?.[1];
+    let envelope: { type?: unknown; error?: { type?: unknown; message?: unknown } } | null = null;
+    try { envelope = body ? JSON.parse(body) : null; } catch {}
+    if (envelope?.type === "error" && envelope.error?.type === "not_found_error" && envelope.error.message === `model: ${requested}`)
+      return { kind: "model_not_found", status };
+  }
+  // The SDK's own exact test for Codex refusing the requested model to a ChatGPT account's plan.
+  // Its WebSocket form arrives with no status; the HTTP form of the same denial is a 400.
+  if (isCodexChatGPTAccountPolicyError(text, model.provider, requested)) return { kind: "model_not_entitled", status: status ?? 400 };
+  return null;
+}
+
 /** The SDK has no server error-projection hook. This service-local pi-native
  * boundary forwards only to its fixed SDK listener, never a caller-chosen URL.
  * Successful canonical events are unchanged; failed messages cannot expose SDK
- * exception bodies, bearer-bearing request diagnostics or partial error text. */
+ * exception bodies, bearer-bearing request diagnostics or partial error text.
+ * A failure is the word `gateway_unavailable`, or the fixed word of a model refusal. */
 export function safeNativeStream(body: ReadableStream<Uint8Array>, model: Model<Api>): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let buffered = "";
@@ -81,6 +113,7 @@ export function safeNativeStream(body: ReadableStream<Uint8Array>, model: Model<
           // never a body, header, URL, bearer or upstream message.
           const reported = (event.error ?? event.message ?? event.partial ?? {}) as {
             stopReason?: unknown; errorStatus?: unknown; errorId?: unknown; status?: unknown; code?: unknown; usage?: unknown; content?: unknown;
+            errorMessage?: unknown;
           };
           const numeric = (...values: unknown[]): string => {
             const found = values.find(value => typeof value === "number" && Number.isFinite(value));
@@ -102,14 +135,20 @@ export function safeNativeStream(body: ReadableStream<Uint8Array>, model: Model<
           // computes when this boundary answers the same status over HTTP (`AuthGatewayError`):
           // a number, like the status, never the upstream's text. A turn that already produced
           // output a retry would repeat gets none, and ends as it did before.
-          const status = [reported.errorStatus, reported.status].find((value): value is number =>
-            typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599) ?? 503;
+          const upstreamStatus = [reported.errorStatus, reported.status].find((value): value is number =>
+            typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599);
+          // A settled answer about the model keeps it, and its own status: Codex states its denial
+          // over WebSocket with none, and a 503 would have the session retry a permanent refusal.
+          const refusal = typeof reported.errorMessage === "string" ? modelRefusal(reported.errorMessage, upstreamStatus, model) : null;
+          const status = refusal?.status ?? upstreamStatus ?? 503;
+          const errorMessage = refusal ? gatewayModelRefusal(refusal.kind, status, probeAddress(model)) : failure.error.errorMessage;
           produced ||= repeatsOnRetry(reported.content);
           // Missing usage stays missing: inventing zero would make a charged failure look free.
           const projected = { ...failure, error: { ...failure.error,
             ...(usage.success ? { usage: usage.data } : {}),
+            errorMessage,
             errorStatus: status,
-            ...(produced ? {} : { errorId: classify(new AuthGatewayError(failure.error.errorMessage, status)) }),
+            ...(produced ? {} : { errorId: classify(new AuthGatewayError(errorMessage, status)) }),
           } };
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(projected)}\n\ndata: [DONE]\n\n`));
           controller.terminate();

@@ -15,6 +15,8 @@ import type {
   GatewayRequestLimits,
   RuntimeAccountPool,
 } from "../../api/contracts.ts";
+import { gatewayModelRefusal } from "../../api/probe.ts";
+import { benchFailure, benchReceipt } from "../../test/fixtures/bench.ts";
 import { parseInputs } from "./inputs.ts";
 
 // Match the worker's logging barrier: SDK modules must load only after transports
@@ -24,6 +26,10 @@ const { streamSimple, stream, getCustomApi } = await import("@oh-my-pi/pi-ai");
 const { boundedTransport } = await import("./transport.ts");
 const { startPoolGateway } = await import("./runtime.ts");
 const { poolModels } = await import("./storage.ts");
+const { safeNativeStream, startPrivateBoundary } = await import("./boundary.ts");
+const AIError = await import("@oh-my-pi/pi-ai/error");
+const { streamPiNative } = await import("@oh-my-pi/pi-ai/providers/pi-native-client");
+const { encodeStream, parseRequest } = await import("@oh-my-pi/pi-ai/providers/pi-native-server");
 const accountPool = {
   anthropic: [
     {
@@ -93,7 +99,7 @@ class SyntheticProvider {
   readonly headers: Headers[] = [];
   readonly entered = Promise.withResolvers<void>();
   readonly cancelled = Promise.withResolvers<void>();
-  mode: "success" | "retry" | "auth" | "redirect" | "blocked" | "retry-once" =
+  mode: "success" | "retry" | "auth" | "redirect" | "blocked" | "retry-once" | "unknown-model" =
     "success";
   readonly server = Bun.serve({
     hostname: "127.0.0.1",
@@ -118,6 +124,16 @@ class SyntheticProvider {
           status: 307,
           headers: { location: this.url + "/redirected" },
         });
+      // Anthropic's own answer for a model its messages endpoint does not serve.
+      if (this.mode === "unknown-model")
+        return Response.json(
+          {
+            type: "error",
+            error: { type: "not_found_error", message: `model: ${payload.model}` },
+            request_id: "req_fixture-private-request-id",
+          },
+          { status: 404, headers: { "request-id": "req_fixture-private-request-id" } },
+        );
       if (
         this.mode === "auth" ||
         this.mode === "retry" ||
@@ -676,4 +692,178 @@ describe("bounded native provider admission", () => {
       provider.close();
     }
   }, 15000);
+});
+
+/**
+ * A benchmark exists to collect each provider's answer about each model, and `omp bench` reports
+ * nothing of a failure but its `errorMessage`. Behind this gateway that was the one word
+ * `gateway_unavailable` for a model the provider does not have and for one this pool's account
+ * may not use, so the probe could only call both `unresolved` — and one unresolved candidate
+ * refuses a whole derived catalog.
+ */
+describe("a provider's answer about the requested model", () => {
+  const codexPool = {
+    "openai-codex": [{ scope: "fixture-scope", credentialId: 2, identityKey: null }],
+  };
+
+  test("a model the provider does not have reaches omp bench through the actual gateway as settled not_found", async () => {
+    const provider = new SyntheticProvider();
+    provider.mode = "unknown-model";
+    const fixture = await gatewayFixture(provider);
+    const model = poolModels(accountPool).get("anthropic/claude-opus-4-0")!;
+    try {
+      const error = await benchFailure(
+        streamPiNative(
+          { ...model, baseUrl: `http://127.0.0.1:${fixture.gateway.port}` },
+          context(),
+          { apiKey: bearer, maxTokens: 4 },
+        ),
+      );
+      expect(provider.requests).toHaveLength(1);
+      expect(error).toBe(
+        gatewayModelRefusal("model_not_found", 404, "anthropic/claude-opus-4-0"),
+      );
+      const receipt = benchReceipt(model, error!);
+      expect(receipt.results[0]!.status).toBe("not_found");
+      // The provider's own words and its request id stay behind the boundary.
+      for (const text of [error!, JSON.stringify(receipt)]) {
+        expect(text).not.toContain("not_found_error");
+        expect(text).not.toContain("req_fixture");
+      }
+    } finally {
+      await fixture.close();
+      provider.close();
+    }
+  }, 15000);
+
+  /**
+   * Codex refuses a model the ChatGPT account's plan does not serve with one sentence the SDK
+   * recognises exactly: a 400 `{"detail": …}` over HTTP (openai/codex#6603) and an error frame
+   * over WebSocket (openai/codex#17642), the SDK's default for Codex. The SDK reports the
+   * WebSocket form with no status, so the boundary stamped it 503, a transient fault a session
+   * retries. The pool gateway cannot be pointed at a Codex fixture, so the SDK's own provider and
+   * wire encoding stand in for its listener: the same `streamSimple` and `encodeStream` its
+   * pi-native route runs.
+   */
+  test("a model the Codex plan does not serve reaches omp bench as settled client_blocked over either transport", async () => {
+    const published = poolModels(codexPool).get("openai-codex/gpt-6-sol")!;
+    const refusal = (model: string) =>
+      `The '${model}' model is not supported when using Codex with a ChatGPT account.`;
+    const transports: string[] = [];
+    const codex = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request, server) {
+        if (server.upgrade(request)) {
+          transports.push("websocket");
+          return undefined;
+        }
+        transports.push("http");
+        const { model } = (await request.json()) as { model: string };
+        return Response.json({ detail: refusal(model) }, { status: 400 });
+      },
+      websocket: {
+        message(socket, raw) {
+          const { model } = JSON.parse(String(raw)) as { model: string };
+          socket.send(JSON.stringify({ type: "error", status: 400, error: { type: "invalid_request_error", message: refusal(model) } }));
+        },
+      },
+    });
+    const loopbackOnly: typeof fetch = Object.assign(
+      (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        const request = new Request(input, init);
+        if (new URL(request.url).hostname !== "127.0.0.1")
+          throw new Error("unexpected fixture destination");
+        return fetch(request);
+      },
+      { preconnect: fetch.preconnect },
+    );
+    const claims = Buffer.from(JSON.stringify({
+      "https://api.openai.com/auth": { chatgpt_account_id: "fixture-account" },
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    })).toString("base64url");
+    const listener = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const parsed = parseRequest(await request.json());
+        const events = streamSimple(
+          { ...published, baseUrl: `http://127.0.0.1:${codex.port}/backend-api` },
+          parsed.context,
+          {
+            ...parsed.options,
+            apiKey: `fixture.${claims}.fixture`,
+            sessionId: "fixture-session",
+            providerSessionState: new Map(),
+            fetch: loopbackOnly,
+          },
+        );
+        return new Response(encodeStream(events), {
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      },
+    });
+    const boundary = startPrivateBoundary(
+      { url: listener.url.origin, bearer: "internal" },
+      bearer,
+      new Map([["openai-codex/gpt-6-sol", published]]),
+      new AbortController().signal,
+    );
+    try {
+      for (const preferWebsockets of [true, false]) {
+        const run = streamPiNative(
+          { ...published, baseUrl: `http://127.0.0.1:${boundary.port}` },
+          context(),
+          { apiKey: bearer, maxTokens: 4, preferWebsockets },
+        );
+        const error = await benchFailure(run);
+        expect(error).toBe(
+          gatewayModelRefusal("model_not_entitled", 400, "openai-codex/gpt-6-sol"),
+        );
+        expect(
+          benchReceipt(published, error!).results[0]!.status,
+        ).toBe("client_blocked");
+        // A session ends on it rather than retrying a refusal no retry changes.
+        const message = await run.result();
+        expect(message.errorStatus).toBe(400);
+        expect(AIError.retriable(AIError.classifyMessage(message))).toBe(false);
+        expect(error).not.toContain("ChatGPT account");
+      }
+      expect(transports).toEqual(["websocket", "http"]);
+    } finally {
+      boundary.close();
+      listener.stop(true);
+      codex.stop(true);
+    }
+  }, 15000);
+
+  test("only an answer naming the requested model crosses; one resembling it stays opaque", async () => {
+    const anthropic = poolModels(accountPool).get("anthropic/claude-opus-4-0")!;
+    const codex = poolModels(codexPool).get("openai-codex/gpt-6-sol")!;
+    const project = async (model: Model<Api>, reported: Record<string, unknown>) => {
+      const frame = { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", ...reported } };
+      const source = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(frame)}\n\n`));
+          controller.close();
+        },
+      });
+      const projected = await new Response(safeNativeStream(source, model)).text();
+      return JSON.parse(projected.split("\n")[0]!.slice(6)).error.errorMessage as string;
+    };
+    const notFound = (message: string) =>
+      `404 ${JSON.stringify({ type: "error", error: { type: "not_found_error", message }, request_id: "req_fixture" })}`;
+    expect(await project(anthropic, { errorStatus: 404, errorMessage: notFound("model: claude-opus-4-0") }))
+      .toBe(gatewayModelRefusal("model_not_found", 404, "anthropic/claude-opus-4-0"));
+    const resembling: [Model<Api>, Record<string, unknown>][] = [
+      // A 404 about something else the request named, another model's 404, and no status at all.
+      [anthropic, { errorStatus: 404, errorMessage: notFound("File not found: file_fixture") }],
+      [anthropic, { errorStatus: 404, errorMessage: notFound("model: claude-opus-4-1") }],
+      [anthropic, { errorMessage: notFound("model: claude-opus-4-0") }],
+      // Codex refusing a model this stream did not ask for.
+      [codex, { errorMessage: "Codex error event: The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account. (code=invalid_request_error)" }],
+    ];
+    for (const [model, reported] of resembling)
+      expect(await project(model, reported)).toBe("gateway_unavailable");
+  });
 });
