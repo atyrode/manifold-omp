@@ -119,6 +119,16 @@ export function startNativeBroker(options: NativeBrokerOptions): NativeBrokerHan
     return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
   };
 
+  // The metadata read: the stock snapshot stamped with the store's custody id. Both come from
+  // one response, so a reader never pairs one store's credential ids with another's custody.
+  const custodySnapshot = async (request: Request, url: URL): Promise<Response> => {
+    const response = await forward(request, new URL("/v1/snapshot", url));
+    if (!response.ok) return response;
+    const snapshot: unknown = await response.json();
+    if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) throw new Error("Invalid broker snapshot");
+    return Response.json({ ...snapshot, custodyId: storage.custodyId }, { headers: { "cache-control": "no-store" } });
+  };
+
   // Acquire the reviewed endpoint FIRST: an occupied port must not start a
   // stock refresher, open a fallback endpoint, or rotate anybody's credential.
   const server = Bun.serve({
@@ -146,7 +156,8 @@ export function startNativeBroker(options: NativeBrokerOptions): NativeBrokerHan
         return Response.json({ error: "not_found" }, { status: 404 });
       }
       if (state !== "active") return Response.json({ error: "broker_draining" }, { status: 503 });
-      const operation = forward(request, url);
+      const operation = request.method === "GET" && url.pathname === "/v1/custody/snapshot"
+        ? custodySnapshot(request, url) : forward(request, url);
       pendingForwards.add(operation);
       try { return await operation; }
       catch { return Response.json({ error: "broker_unavailable" }, { status: 502 }); }

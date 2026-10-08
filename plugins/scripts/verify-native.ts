@@ -588,7 +588,8 @@ try {
       return ["cancelled", "exited"].includes(value.state) && value.result ? value : false;
     }, 30_000, 50);
     check(stoppedJob.result && stoppedJob.result.startedAt !== null && stoppedJob.result.finishedAt !== null, "broker-stop-receipt-missing");
-    check((await call("accounts", {})).status === "unavailable", "stopped-broker-still-readable");
+    const stoppedAccounts = await call("accounts", {});
+    check(stoppedAccounts.status === "unavailable" && stoppedAccounts.scope !== fresh.scope, "stopped-broker-still-readable");
     phase = "packed-broker-reviewed-recovery";
     const pausedSetup = await call("readAccountSetup", {});
     check(pausedSetup.brokerState === "disabled" && pausedSetup.canReview && !pausedSetup.canSignIn,
@@ -616,7 +617,10 @@ try {
     });
     check(recoveredSnapshot.status === 200, "recovery-broke-unchanged-legacy-client");
     await recoveredSnapshot.body?.cancel();
-    check((await call("accounts", {})).status === "fresh", "recovered-broker-not-readable");
+    const recoveredAccounts = await call("accounts", {});
+    check(recoveredAccounts.status === "fresh", "recovered-broker-not-readable");
+    // Disable and a promotion to a new configuration revision keep the store, so the scope.
+    check(recovered.revision !== promoted.revision && recoveredAccounts.scope === fresh.scope, "promotion-changed-accounts-scope");
     phase = "native-agent-tools";
     // Keep SDK loading behind this verifier's private-environment check.
     const { verifyNativeTools, NativeToolProofFailure } = await import("./verify-native-tools.ts");

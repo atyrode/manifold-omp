@@ -1,6 +1,7 @@
 import { InstanceServiceDescriptionSchema } from "@manifold/protocol";
 import { z } from "zod";
 import { projectAccounts } from "../api/accounts.ts";
+import { OmpDataError } from "../api/errors.ts";
 import { normalizeBrokerUsage } from "../api/usage.ts";
 import { BROKER_SERVICE_ID, ACCOUNTS_PLUGIN_ID, RuntimeAccountPoolSchema, type BrokerReference, type AccountReference, type RuntimeAccountPool, type ServicePin, type JobInferenceLimits } from "../api/index.ts";
 import { digestOf, OmpRefusal, type OmpContext } from "./machine-server.ts";
@@ -10,6 +11,13 @@ export async function describeSharedBroker(ctx: OmpContext) {
   if (description.serviceId !== BROKER_SERVICE_ID || (description.configuration && description.configuration.pluginId !== ACCOUNTS_PLUGIN_ID)) throw new OmpRefusal("resources_changed");
   return description;
 }
+/** The accounts scope names custody of the broker's credential store, never its configuration:
+ * promotion, restart and disable/enable over one store keep it; a new, replaced or purged store
+ * or another owner changes it. `custodyId` is null while no broker can be read. */
+export function accountsScope(machineId: string | null, custodyId: string | null): string {
+  return digestOf({ serviceId: BROKER_SERVICE_ID, machineId, custodyId });
+}
+/** Consistency between reads stays bound to the configuration revision; only the scope is not. */
 export async function sharedBrokerReference(ctx: OmpContext, expected?: BrokerReference): Promise<BrokerReference> {
   const description = await describeSharedBroker(ctx);
   if (!description.configuration?.enabled || !description.owner?.online || !description.connected || description.state !== "ready") throw new OmpRefusal("broker_unavailable");
@@ -28,7 +36,12 @@ export async function accountObservation(ctx: OmpContext, expected?: BrokerRefer
   const metadata = await brokerRead(ctx, reference, "metadata");
   // The guest clock is the dispatch timestamp, not the arrival time of this read.
   const observedAt = Date.now();
-  return projectAccounts(metadata, digestOf(reference), observedAt, observedAt);
+  // A broker promoted by an older version projects no custody id; it has to be promoted again.
+  if (!metadata || typeof metadata !== "object" || !Object.hasOwn(metadata, "custodyId")) throw new OmpRefusal("account_runtime_outdated");
+  const { custodyId, ...snapshot } = metadata as Record<string, unknown>;
+  const custody = z.uuidv4().safeParse(custodyId);
+  if (!custody.success) throw new OmpDataError("invalid_accounts");
+  return projectAccounts(snapshot, accountsScope(reference.machineId, custody.data), observedAt, observedAt);
 }
 export async function usageObservation(ctx: OmpContext) {
   const reference = await sharedBrokerReference(ctx);

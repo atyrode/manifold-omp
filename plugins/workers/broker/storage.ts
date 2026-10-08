@@ -1,4 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
+import type { Database } from "bun:sqlite";
 import {
   AuthStorage,
   SqliteAuthCredentialStore,
@@ -7,6 +9,7 @@ import {
   type OAuthApi,
   type UsageApi,
 } from "@oh-my-pi/pi-ai/auth-storage";
+import { openSqliteDatabase } from "@oh-my-pi/pi-utils/sqlite";
 import { NamespaceViews } from "../sdk-namespace.ts";
 
 interface OperationScope {
@@ -14,7 +17,26 @@ interface OperationScope {
   failed: boolean;
 }
 
-/** Lifecycle accounting only: the published SDK still owns refresh, leases and persistence. */
+const CUSTODY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/**
+ * The custody id lives inside the credential database: a new store gets one when a broker
+ * first opens it, every later broker over that file keeps it, and it goes with the file.
+ * A store that predates it gets one on its first open here. Credential ids are unique only
+ * within one store, so this id is what keeps a reference from aliasing another store's slot.
+ * The SDK neither reads nor migrates this table.
+ */
+function storeCustody(db: Database): string {
+  return db.transaction(() => {
+    db.run("CREATE TABLE IF NOT EXISTS manifold_custody (id INTEGER PRIMARY KEY CHECK (id = 1), custody_id TEXT NOT NULL)");
+    db.run("INSERT OR IGNORE INTO manifold_custody (id, custody_id) VALUES (1, ?)", [randomUUID()]);
+    const row = db.query<{ custody_id: unknown }, []>("SELECT custody_id FROM manifold_custody WHERE id = 1").get();
+    if (typeof row?.custody_id !== "string" || !CUSTODY_ID.test(row.custody_id)) throw new Error("Invalid broker store custody");
+    return row.custody_id;
+  }).immediate();
+}
+
+/** Lifecycle accounting and store custody only: the published SDK still owns refresh, leases and persistence. */
 export class NativeBrokerStorage extends AuthStorage {
   readonly #pending = new Map<Promise<void>, OperationScope>();
   readonly #scope = new AsyncLocalStorage<OperationScope>();
@@ -23,7 +45,10 @@ export class NativeBrokerStorage extends AuthStorage {
   #refreshAdmission = true;
   #drainStarted = false;
 
-  constructor(store: SqliteAuthCredentialStore, options: AuthStorageOptions = {}) {
+  /** Stable across broker restarts, disable/enable and promotion over this same store file. */
+  readonly custodyId: string;
+
+  constructor(store: SqliteAuthCredentialStore, custodyId: string, options: AuthStorageOptions = {}) {
     const refresh = options.refreshOAuthCredential;
     if (!refresh) throw new Error("Native broker requires an SDK OAuth refresh callback");
     super(store, {
@@ -32,12 +57,19 @@ export class NativeBrokerStorage extends AuthStorage {
       // dispatch. Retain its raw lifetime beyond the SDK's request deadline.
       refreshOAuthCredential: (...args) => this.#own(() => refresh(...args), true),
     });
+    this.custodyId = custodyId;
   }
 
   static override async create(dbPath: string, options: AuthStorageOptions = {}): Promise<NativeBrokerStorage> {
+    // The SDK opens, migrates or recovers the file first, so custody is read from the very
+    // database it serves; a corrupt store it replaces is a new store with a new id.
     const store = await SqliteAuthCredentialStore.open(dbPath);
-    try { return new NativeBrokerStorage(store, options); }
-    catch (error) { store.close(); throw error; }
+    try {
+      const custodyId = await openSqliteDatabase(dbPath, db => {
+        try { return storeCustody(db); } finally { db.close(); }
+      });
+      return new NativeBrokerStorage(store, custodyId, options);
+    } catch (error) { store.close(); throw error; }
   }
 
   #own<T>(run: () => Promise<T>, rawProvider = false): Promise<T> {
