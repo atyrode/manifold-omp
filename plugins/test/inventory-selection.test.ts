@@ -75,6 +75,25 @@ test("probe identities are chat models only, as `omp models --json` reports them
   expect(catalog.openai!.some(model => model.id === "text-embedding-3-small")).toBe(false);
 });
 
+test("the pinned catalog carries Claude Haiku 5.5, and the 18.8.6 `omp models --json` row for it reads as inventory", () => {
+  const identity = bundledProbeModels().anthropic!.find(model => model.id === "claude-haiku-5-5");
+  expect(identity).toEqual({ provider: "anthropic", id: "claude-haiku-5-5", api: "anthropic-messages" });
+  // Printed by the hash-pinned 18.8.6 binary, offline: `kind`, `name`, `pricingStatus` and the
+  // long-context rates are reported but never read.
+  const row = {
+    provider: "anthropic", kind: "chat", id: "claude-haiku-5-5", selector: "anthropic/claude-haiku-5-5", name: "Claude Haiku 5.5",
+    contextWindow: 100000, maxTokens: 128000, reasoning: true, thinking: ["low", "medium", "high", "xhigh", "max"], input: ["text", "image"],
+    cost: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125,
+      longContext: { inputThreshold: 100000, input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0.625 } },
+    pricingStatus: "fixed",
+  };
+  expect(parseInventoryObservation({ models: [row] }, [identity], 1, OMP_VERSION, () => null).models).toEqual([{
+    provider: "anthropic", id: "claude-haiku-5-5", api: "anthropic-messages", inputCostPerMillion: 0.1, outputCostPerMillion: 0.5,
+    contextWindow: 100000, maxTokens: 128000, reasoning: true, thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
+    images: true, quotaTier: null,
+  }]);
+});
+
 test("inventory rows carry the pinned SDK's static quota tier", () => {
   const identities = [
     { provider: "openai-codex", id: "gpt-6-luna", api: "openai-codex-responses" },

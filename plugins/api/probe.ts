@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { modelId, ThinkingLevelSchema, epochMilliseconds, identifier } from "./contracts.ts";
 
-export const OMP_VERSION = "18.4.12" as const;
+export const OMP_VERSION = "18.8.6" as const;
 export const PROBE_MODEL_LIMIT = 256;
 /**
  * HOW LONG A SESSION WAITS FOR THE GATEWAY TO LIST ITS MODELS, per discovery attempt.
@@ -70,7 +70,7 @@ export function exactModelScope(reference: string): string {
  * hand-off, eval's `completion()`, compaction's role candidates. A role left unset is not the
  * default model there (`advisor` falls to OMP's reasoning priority list, `tiny` and `memory` to its
  * fast one), and a workspace's own `.omp/config.yml` may name any model for any role. These are
- * the chat roles of both runtimes a one-shot starts, the OMP 18.4.12 CLI and SDK host; the
+ * the chat roles of both runtimes a one-shot starts, the OMP 18.8.6 CLI and SDK host; the
  * model-kind roles select image, search, speech and judgment models, which a chat model is not.
  */
 export const ONE_SHOT_PINNED_ROLES = ["smol", "slow", "vision", "plan", "commit", "tiny", "memory", "task", "advisor"] as const;
@@ -167,7 +167,7 @@ export function parseOmpVersion(raw: string): typeof OMP_VERSION {
   return OMP_VERSION;
 }
 
-// v18.4.12 models-cli.ts toModelJson does NOT emit api, version or quota tier. API is joined
+// v18.8.6 models-cli.ts toModelJson does NOT emit api, version or quota tier. API is joined
 // only from exact, sealed native models configuration identities, never spelling.
 // Other providers may use opaque IDs or sentinel prices; neither defines a Code candidate.
 const RawInventoryModelSchema = z.object({
