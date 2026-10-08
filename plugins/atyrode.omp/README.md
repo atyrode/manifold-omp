@@ -286,6 +286,21 @@ OMP_VERIFY_SYSTEMD_MODE=user bun run verify
 
 `system.json` is an explicit native runtime-tool library declaration for the host. Verify creates its own disposable delegated systemd cgroup and, following Manifold's runtime gate, a private user/mount namespace with a 1 MiB, 4,096-inode tmpfs for governed output leases. `unshare` must be available; the reusable CI fixture already supplies static BusyBox. No host-root mount, fleet daemon or real credential value is involved. A failing native gate is not equivalent to successful packaging.
 
+## Releases
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`. Tag `v<version>`, where `<version>` is the version the three family manifests and the root `package.json` carry.
+
+The `bundles` job checks out the tagged commit beside Manifold at `plugins/MANIFOLD_REV` and runs the gate above with Bun 1.4.2 on the CI fixtures: frozen installs, dependency preparation, both typechecks, `bun test` and `bun run pack`. Then `scripts/verify.ts` packs the same tree again inside its disposable unit, proves that family on a real engine, and installs the public API from GitHub at the tagged commit. This job can only read the repository.
+
+The `release` job is the only one granted `contents: write`, and it runs no repository code. It requires `SHA256SUMS` to verify and to name exactly the packed bundles, then runs `gh release create <tag> --verify-tag --generate-notes` with four assets:
+
+- `atyrode.omp.manifold-plugin.json`
+- `atyrode.omp.accounts.manifold-plugin.json`
+- `atyrode.omp.gateway.manifold-plugin.json`
+- `SHA256SUMS`, which lists the three in installation order: parent, accounts, gateway.
+
+`native-requirements.json` is a pack report and is not attached. The workflow installs nothing on any hub. A failed gate or checksum check creates no release. Re-run a transient failure; anything that needs a fix is released under a new tag, because a pushed tag is never moved.
+
 ## Published SDK packaging
 
 The credential SDK baseline is published **18.8.0**; the ordinary CLI remains **18.4.12**. Every `@oh-my-pi/*` dependency in `plugins/package.json` advances together. `plugins/bun.lock`, `plugins/runtime-artifacts.json`, and the integrity-pinned `patches/@oh-my-pi%2Fpi-ai@18.8.0.patch` define that SDK graph. The patch SHA-256 is `e98f0eb675d7fcad40e9ff9cf218dea6ce129184dd94697b1c8ef8ada58cf748`. The retained patch applies to 18.8.0's namespace modules; stale Bun cache-marker additions are omitted. Its refresher hunk keeps the SDK's non-rejecting sweep (since 18.7.0), which logs a failed sweep and retries on the next interval. It preserves broker quiesce and refresher stop/join, `drainRefreshes` over the refresher's and usage service's in-flight maps, the remote store's fenced snapshot authority (mutation replies are never published, and only a stream's first frame may lower its generation), and early-abort handling in `raceSignal`. On 18.8.0's shared broker snapshot source and stream hub, quiesce also closes the hub, and a stream aborted during its initial reload never joins it; the remote store keeps 18.8.0's per-row credential revision hashing. Native ingress owns bearer hashes and control routes. AuthStorage operations use namespaces (`credentials`, `keys`, `oauth`, `usage`), so native accounting wraps those namespaces, and the gateway's pool guard sits on `keys`, which the stock gateway uses to resolve every bearer. Native broker composition adds control and completion accounting through public SDK hooks; provider refresh, credential selection, leases, compare-and-set and persistence remain SDK-owned.

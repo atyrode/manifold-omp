@@ -1,0 +1,105 @@
+name: Release
+
+# A `v*` tag publishes the native OMP family: the three bundles plugins/pack.ts
+# packs and their SHA256SUMS. `bundles` runs the repository gate on the tagged
+# commit beside Manifold at plugins/MANIFOLD_REV. `release` holds the only write
+# grant, runs no repository code and attaches only bytes that gate packed.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  bundles:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: caller
+          persist-credentials: false
+      - name: Read the pinned Manifold revision
+        id: manifold
+        run: |
+          rev="$(tr -d '[:space:]' < caller/plugins/MANIFOLD_REV)"
+          [ -n "$rev" ] || { echo "MANIFOLD_REV is empty"; exit 1; }
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: atyrode/manifold
+          ref: ${{ steps.manifold.outputs.rev }}
+          path: manifold
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.4.2"
+      - name: Install Manifold's dependencies
+        working-directory: manifold
+        run: bun install --frozen-lockfile
+      - name: Install Linux containment fixtures
+        working-directory: manifold
+        run: bash scripts/install-runtime-ci.sh
+      - name: Install the plugins' dependencies
+        working-directory: caller/plugins
+        run: bun install --frozen-lockfile
+      - name: Prepare the SDK graphs and native verification resources
+        working-directory: caller/plugins
+        run: |
+          bun --no-env-file --no-install workers/build.ts --prepare-dependencies
+          bun --no-env-file --no-install scripts/prepare-ci.ts
+      - name: Typecheck
+        working-directory: caller/plugins
+        run: bun run check
+      - name: Unit tests
+        working-directory: caller/plugins
+        run: bun test
+      - name: Pack
+        working-directory: caller/plugins
+        run: bun run pack
+      # The consumer gate installs the public API from GitHub at the tagged commit.
+      - name: Verify the family natively and as a public consumer
+        working-directory: caller/plugins
+        run: |
+          OMP_CONSUMER_SOURCE="github:$GITHUB_REPOSITORY#$(git rev-parse HEAD)" \
+            bun --no-env-file --no-install scripts/verify.ts
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: omp-plugins
+          path: |
+            caller/plugins/dist/*.manifold-plugin.json
+            caller/plugins/dist/SHA256SUMS
+          if-no-files-found: error
+
+  release:
+    needs: bundles
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: omp-plugins
+          path: dist
+      - name: Require SHA256SUMS to name exactly the packed bundles
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum --check --strict SHA256SUMS
+          listed="$(awk '{ print $2 }' SHA256SUMS | sort)"
+          packed="$(printf '%s\n' *.manifold-plugin.json | sort)"
+          [ "$listed" = "$packed" ] || {
+            printf 'SHA256SUMS lists:\n%s\npacked:\n%s\n' "$listed" "$packed"
+            exit 1
+          }
+      - name: Create the tagged release with the verified bundles
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          gh release create "$TAG" --repo "$REPOSITORY" --verify-tag \
+            --title "$TAG" --generate-notes \
+            dist/*.manifold-plugin.json dist/SHA256SUMS

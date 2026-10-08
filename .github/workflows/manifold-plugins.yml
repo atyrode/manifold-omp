@@ -16,7 +16,8 @@ jobs:
   plugins:
     # This workflow and MANIFOLD_REV pin the same verified native SDK revision.
     # The reusable job installs only CI containment fixtures; this repository
-    # has no fleet-daemon installation or production/release deployment job.
+    # has no fleet-daemon installation or deployment job. release.yml publishes
+    # a tag's verified bundles as release assets and installs nothing.
     uses: atyrode/manifold/.github/workflows/plugins.yml@cd75fbba6d4601fee14267f17e1594429ae17bc3
     with:
       plugins-dir: plugins
