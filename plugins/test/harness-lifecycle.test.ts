@@ -162,6 +162,20 @@ test("stop cancels the pending renewal and settles every queued report before th
   expect(f.sent).toEqual(["done"]);
 });
 
+test("stop during a renewal in flight arms no further renewal once it is answered", async () => {
+  const f = lifecycleFixture();
+  const gate = Promise.withResolvers<void>();
+  f.lifecycle.start();
+  f.hold(gate.promise);
+  await f.advance(LEASE_MS / 2);
+  expect(f.sent).toEqual([renewal(1)]);
+  const stopping = f.lifecycle.stop();
+  // The hub renews the Run after stop: its new expiry must not schedule the next renewal.
+  gate.resolve();
+  await stopping;
+  expect(jest.getTimerCount()).toBe(0);
+});
+
 test("a closed runner is sent nothing", async () => {
   const f = lifecycleFixture();
   f.runner.closed = true;

@@ -94,7 +94,8 @@ export class RunLifecycle {
         await this.runner.accept({ type: "renew", id: `renew-${++this.#renewals}`, runId: this.runId,
           lifetimeMs: this.lease.lifetimeMs, justification: RENEWAL_JUSTIFICATION });
         const result = this.#result as ResultFrame | undefined;
-        if (result?.outcome.ok === true && result.expiresAt !== undefined) this.#schedule(result.expiresAt);
+        // A renewal answered after `stop()` arms nothing: renewal is over even when this one succeeded.
+        if (this.#renewing && result?.outcome.ok === true && result.expiresAt !== undefined) this.#schedule(result.expiresAt);
         else this.#renewing = false;
       }).catch(() => { this.#renewing = false; });
     }, delay);
