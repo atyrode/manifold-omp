@@ -45,19 +45,20 @@ export function controlProgress(id: string, outcome: RunControlOutcome): { stage
  * Answers control frames on the job's progress, one reply per owner window. The owner forwards at
  * most one line per `JOB_PROGRESS_INTERVAL_MS` and keeps the newest, so a reply written inside the
  * previous reply's window could replace it before its door reads it. Each reply waits out that
- * window instead; the session has already acted on its frame.
+ * window instead; the session has already acted on its frame. The window is measured on a monotonic
+ * clock: a wall-clock step back would otherwise hold every later frame in this serial queue.
  */
-export function controlReplies(report: (progress: { stage: string; message: string }) => void, now: () => number = Date.now) {
+export function controlReplies(report: (progress: { stage: string; message: string }) => void) {
   let answered = -Infinity;
   return async (id: string, outcome: RunControlOutcome): Promise<void> => {
-    const wait = answered + JOB_PROGRESS_INTERVAL_MS - now();
+    const wait = answered + JOB_PROGRESS_INTERVAL_MS - performance.now();
     if (wait > 0) {
       const elapsed = Promise.withResolvers<void>();
       setTimeout(elapsed.resolve, wait);
       await elapsed.promise;
     }
     report(controlProgress(id, outcome));
-    answered = now();
+    answered = performance.now();
   };
 }
 
