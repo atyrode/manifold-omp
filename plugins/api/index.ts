@@ -141,6 +141,9 @@ const modelReference = z
 const references = z
   .record(identifier, modelReference)
   .refine((value) => Object.keys(value).length <= 128);
+/** A configured thinking selector: an effort level, `off`, or OMP's per-turn `auto`. */
+export const ThinkingSelectorSchema = z.union([ThinkingLevelSchema, z.literal("off"), z.literal("auto")]);
+export type ThinkingSelector = z.infer<typeof ThinkingSelectorSchema>;
 export const OverlaySchema = z.strictObject({
   modelRoles: references.optional(),
   retry: z
@@ -298,7 +301,9 @@ export const SessionInputSchema = executionInput.extend({
   agentTools: AgentToolsSelectionSchema.optional(),
 });
 /** Durable dials share the exact validated launch settings; paths and credentials
- * are deliberately not part of a profile. Defaults are reviewed at each launch. */
+ * are deliberately not part of a profile. Defaults are reviewed at each launch.
+ * `tui: true` runs the Agent in OMP's own terminal UI for the operator, steered live through
+ * `controlRun`; omitted, the Agent runs the headless RPC harness with its `manifold` tool. */
 export const OmpHarnessProfileSchema = SessionInputSchema.omit({
   containerId: true,
   machineId: true,
@@ -309,7 +314,7 @@ export const OmpHarnessProfileSchema = SessionInputSchema.omit({
   isolation: true,
   inferenceLimits: true,
   agentTools: true,
-});
+}).extend({ tui: z.boolean().optional() });
 export type OmpHarnessProfile = z.infer<typeof OmpHarnessProfileSchema>;
 export const SessionReviewSchema = ReviewSchema.extend({
   defaultsRevision: revision,
@@ -351,7 +356,7 @@ export const ResumeSessionInputSchema = z.strictObject({
   automation: RestrictedAutomationSchema.optional(),
   overrides: z.strictObject({
     model: modelReference.optional(),
-    thinking: z.union([ThinkingLevelSchema, z.literal("off"), z.literal("auto")]).optional(),
+    thinking: ThinkingSelectorSchema.optional(),
   }).refine(value => value.model !== undefined || value.thinking !== undefined, "empty resume overrides").optional(),
 }).describe("Resume an existing OMP transcript without an Agent. Omitted selectors preserve persisted exact state. A bare model override preserves thinking; a model suffix selects thinking unless an explicit thinking field takes precedence. Missing, ambiguous, unavailable or incompatible state refuses before inference. Overlay configures the sealed runtime and an explicit accountPool is used exactly. Placement independently authorizes its container and terminal.");
 export const PreparedResumeSessionSchema = z.strictObject({
@@ -368,6 +373,28 @@ export const PreparedResumeSessionSchema = z.strictObject({
   value.runtime.session.sessionId === value.sessionId, {
   message: "resume session does not match admitted runtime",
 });
+/** A live harness session's main-agent dials. `model` is its `provider/id`, null when it has none
+ * or the reference exceeds the 240 characters a dial reply carries; `thinking` is its configured
+ * selector, `auto` included, null when it has none. */
+export const RunDialsSchema = z.strictObject({
+  model: modelReference.max(240).nullable(),
+  thinking: ThinkingSelectorSchema.nullable(),
+});
+export type RunDials = z.infer<typeof RunDialsSchema>;
+/**
+ * HUMAN SPONSORSHIP, the authority rule of `controlRun`: only the Run's launcher or a sponsor of
+ * its Agent, root included, turns a Run's dials. The door refuses every Agent principal before it
+ * reads anything (`omp_run_control_forbidden`): the Run's own credential, so a session's model never
+ * chooses its own model, another Run's, and an Agent runner's. A human caller is then admitted by
+ * Manifold's own Run-input rule, the one `sendRunInput` uses: a human Manifold does not admit to the
+ * Run's terminal input finds no session (`omp_session_unavailable`).
+ */
+export const ControlRunInputSchema = z.strictObject({
+  runId: id,
+  model: modelReference.max(200).optional(),
+  thinking: ThinkingSelectorSchema.optional(),
+}).refine(value => value.model !== undefined || value.thinking !== undefined, "empty run control")
+  .describe("Set the live main-agent model and/or thinking selector of a running OMP TUI harness session. Authority (human sponsorship): only the Run's launcher or a sponsor of its Agent, root included; every Agent principal is refused, the Run's own credential included. The model must be one the session already serves. A refused change returns its reason and changes nothing. Subagent and role models are unchanged.");
 export const PreparedSignInSchema = z
   .strictObject({ machineId: id, runtime: TerminalRuntimeSchema })
   .refine((value) => value.runtime.machineId === value.machineId, {
@@ -564,6 +591,20 @@ export const rootActionSchemas = {
   resumeSession: {
     input: ResumeSessionInputSchema,
     result: PreparedResumeSessionSchema,
+  },
+  /**
+   * Turns the dials of a Run's live TUI harness session and answers with the session's dials
+   * after the change, as the session itself reports them. The change reaches the session through
+   * the Run's private control descriptor, the channel `sendRunInput` uses, and the reply through
+   * the job's progress. Refusals: `omp_run_control_forbidden` (an Agent principal),
+   * `omp_session_unavailable` (no running harness terminal the caller may address),
+   * `omp_model_unavailable` (a model the session does not serve), `omp_run_control_unsupported`
+   * (a headless RPC harness) and `omp_run_control_unconfirmed` (no reply within 20 s; the change
+   * may still apply). Authority is `ControlRunInputSchema`'s human-sponsorship rule.
+   */
+  controlRun: {
+    input: ControlRunInputSchema,
+    result: RunDialsSchema,
   },
 } as const;
 export const accountActionSchemas = {

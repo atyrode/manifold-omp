@@ -229,6 +229,9 @@
           },
           "planYolo": {
             "type": "boolean"
+          },
+          "tui": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -1077,6 +1080,13 @@
             "literal": "launch"
           },
           {
+            "literal": "--tui",
+            "when": {
+              "input": "tui",
+              "equals": true
+            }
+          },
+          {
             "literal": "--plan-yolo",
             "when": {
               "input": "planYolo",
@@ -1154,6 +1164,15 @@
             "type": "string",
             "required": true,
             "maxLength": 4096
+          },
+          "tui": {
+            "type": "boolean",
+            "required": true
+          },
+          "lease": {
+            "type": "string",
+            "required": true,
+            "maxLength": 256
           }
         },
         "environment": {
@@ -1224,6 +1243,9 @@
           },
           "resumeOverrides": {
             "input": "resumeOverrides"
+          },
+          "lease": {
+            "input": "lease"
           }
         },
         "services": [

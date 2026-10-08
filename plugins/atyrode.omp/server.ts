@@ -16,7 +16,7 @@ import { describeDestination, OmpRefusal, type OmpContext } from "./machine-serv
 import { refusal } from "./refusal.ts";
 import { readDefaults, writeDefaults } from "./state.ts";
 import { readSkillCatalog, writeSkillCatalog } from "./skills.ts";
-import { harness } from "./harness.ts";
+import { controlRun, harness } from "./harness.ts";
 import { listSessions, resumeSession } from "./sessions.ts";
 import {
   reviewWorkspace,
@@ -68,6 +68,7 @@ const implementations: RootHandlers = {
   cancelSession,
   listSessions,
   resumeSession,
+  controlRun,
 };
 /**
  * READING A MACHINE'S OWN FACTS IS ITS OWN WORD, SEPARATE FROM RUNNING THERE. Every door
@@ -123,6 +124,8 @@ const delegates: Record<RootAction, readonly Cap[]> = {
   cancelSession: ["jobs:read", "jobs:cancel"],
   listSessions: [...nativeObservationCaps, "jobs:cancel", "locations:read"],
   resumeSession: [...observedRuntimeCaps, "jobs:cancel", "locations:read"],
+  // Resolving the Run's terminal job, writing one control frame and following its answer.
+  controlRun: ["jobs:read", "jobs:input"],
 };
 const writes: Partial<Record<RootAction, true>> = {
   writeDefaults: true,
@@ -160,15 +163,17 @@ const plugin = {
     defineServerAction({
       name,
       title: name.replace(/([A-Z])/g, " $1"),
-      // Operator doors enforce owner authority in their handler. Governed machine
-      // caps belong to the native target admission below, not context-level caps.
-      caps: name === "listSessions" || name === "resumeSession" ? [] : [writes[name] ? "containers:write" : "containers:read"],
+      // Operator doors enforce owner authority in their handler, and `controlRun` its human-sponsorship
+      // rule. Governed machine caps belong to the native target admission below, not context-level caps.
+      caps: name === "listSessions" || name === "resumeSession" || name === "controlRun" ? []
+        : [writes[name] ? "containers:write" : "containers:read"],
       delegates: delegates[name],
       // Reading the defaults is container-graded like the session doors that need it: a session
       // composed under one container's authority (a scoped token, or a run carrying a press's
       // container grant, manifold#883) reads the overlay it will run with. Writing stays owner-only.
       scope:
-        name === "writeDefaults" || name === "writeSkillCatalog" || name === "listSessions" || name === "resumeSession"
+        name === "writeDefaults" || name === "writeSkillCatalog" || name === "listSessions" || name === "resumeSession" ||
+        name === "controlRun"
           ? "workspace"
           : "container",
       trace: "opaque",

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { RunControlFrameSchema } from "./control.ts";
 
 export const RPC_FRAME_BYTES = 1024 * 1024;
 export const OmpSendInputSchema = z.union([
@@ -9,6 +10,7 @@ export const OmpSendInputSchema = z.union([
   z.strictObject({ type: z.literal("extension_ui_response"), id: z.string().min(1).max(128), value: z.string().max(16384) }),
   z.strictObject({ type: z.literal("extension_ui_response"), id: z.string().min(1).max(128), confirmed: z.boolean() }),
   z.strictObject({ type: z.literal("extension_ui_response"), id: z.string().min(1).max(128), cancelled: z.literal(true) }),
+  RunControlFrameSchema,
 ]);
 export type OmpActivity = "working" | "blocked" | "done" | "idle";
 

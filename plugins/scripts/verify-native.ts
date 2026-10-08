@@ -626,6 +626,16 @@ try {
     if (!process.env.OMP_VERIFY_CONSUMER_MODULE)
       check(!(await roster(hub)).some(row => row.manifest.id === "atyrode.code" || row.manifest.id.startsWith("atyrode.code.")),
         "positive-worker-introduced-code-dependency");
+    phase = "native-harness";
+    // Keep SDK and native protocol loading behind this verifier's private-environment check.
+    const { verifyNativeHarness } = await import("./verify-native-harness.ts");
+    try {
+      await verifyNativeHarness({ root, server, hub, target, broker: { origin: `http://${clientAccess.bind}`, bearer: clientBearer }, client });
+    } catch (error) {
+      if (error instanceof Error && /^native-harness-[a-z0-9-]{1,63}$/.test(error.message))
+        throw new VerificationFailure(error.message);
+      throw error;
+    }
     phase = "native-inventory";
     // Keep native protocol loading behind this verifier's private-environment check.
     const { verifyNativeInventory } = await import("./verify-native-inventory.ts");
