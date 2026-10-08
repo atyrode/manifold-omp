@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, jest, test } from "bun:test";
+import { randomUUID } from "node:crypto";
 import { ActionRunnerRequestSchema, ActionRunnerResponseSchema, MANIFOLD_ROOT_URI, ReportRunActivityV2RequestSchema } from "@manifold/protocol";
 import { RENEWAL_JUSTIFICATION, RunLifecycle } from "../workers/harness/lifecycle.ts";
 
@@ -111,6 +112,21 @@ test.each([
   expect(f.sent).toEqual(["idle"]);
   await f.advance(LEASE_MS / 2);
   expect(f.sent).toEqual(["idle", renewal(1)]);
+});
+
+test("past 64 open dialogs reporting ends on blocked, never the session and never renewal", async () => {
+  const f = lifecycleFixture();
+  f.lifecycle.start();
+  f.lifecycle.track({ type: "agent_start" });
+  const dialogs = Array.from({ length: 65 }, () => randomUUID());
+  // The child's message listener calls this directly: a throw would reach the operator's terminal.
+  for (const id of dialogs) expect(() => f.lifecycle.track({ type: "extension_ui_request", method: "select", id })).not.toThrow();
+  for (const id of dialogs) f.lifecycle.track({ type: "extension_ui_request", method: "cancel", targetId: id });
+  f.lifecycle.track({ type: "agent_end", willContinue: false });
+  await settle();
+  expect(f.sent).toEqual(["working", "blocked"]);
+  await f.advance(LEASE_MS / 2);
+  expect(f.sent).toEqual(["working", "blocked", renewal(1)]);
 });
 
 test("frames never overlap: a report waits for the renewal in flight, then applies in order", async () => {

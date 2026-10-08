@@ -491,7 +491,6 @@ export async function runOmpHarnessTui(context: WorkerContext): Promise<boolean>
     const stop = () => { processChild.kill("SIGTERM"); control.destroy(); };
     signal.addEventListener("abort", stop, { once: true });
     if (signal.aborted) stop();
-    const activity = new OmpRpcActivity();
     const pending = new Map<string, (outcome: RunControlOutcome) => void>();
     processChild.on("message", raw => {
       const message = TuiChildMessageSchema.safeParse(raw);
@@ -500,10 +499,7 @@ export async function runOmpHarnessTui(context: WorkerContext): Promise<boolean>
       else if (message.data.type === "tui_result") {
         pending.get(message.data.id)?.(message.data.outcome);
         pending.delete(message.data.id);
-      } else {
-        const next = activity.consume(message.data.frame);
-        if (next) lifecycle.report(next);
-      }
+      } else lifecycle.track(message.data.frame);
     });
     const command = (change: TuiCommand) => new Promise<RunControlOutcome>(resolve => {
       const id = randomUUID();

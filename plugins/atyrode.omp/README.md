@@ -198,7 +198,7 @@ In TUI mode the harness wrapper alone holds the Run credential, the private cont
 - **Renewal.** At half of each lease, for the same lifetime, with the fixed justification `RENEWAL_JUSTIFICATION`. Each renewal's result supplies the next expiry.
 - **Settlement.** When the TUI exits, the wrapper reports `done` and finishes the Run: `completed` on exit code 0, otherwise `failed`, or `cancelled` when the job was cancelled.
 
-A refused renewal or report, an expired Run, or the `ActionRunner` budget of 1024 activity reports stops that loop only. The TUI keeps running for the operator; the session simply stops being attributed to the Run.
+A refused renewal or report, an expired Run, the `ActionRunner` budget of 1024 activity reports, or more than 64 operator dialogs open at once stops that loop only. The TUI keeps running for the operator; the session simply stops being attributed to the Run.
 
 The first expiry comes from the sealed `lease` input, `HarnessLeaseSchema` `{ expiresAt, lifetimeMs }`. `harness.launch` reads it from the Run it launches: `lifetimeMs` is the smaller of the Agent grant's `maxRunLifetimeMs` and the Run's own lifetime, at least 60 s. It is an input because an adopted `ActionRunner` does not expose its Run's expiry ([atyrode/manifold#1071](https://github.com/atyrode/manifold/issues/1071)).
 
