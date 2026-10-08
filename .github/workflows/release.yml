@@ -1,9 +1,12 @@
 name: Release
 
 # A `v*` tag publishes the native OMP family: the three bundles plugins/pack.ts
-# packs and their SHA256SUMS. `bundles` runs the repository gate on the tagged
-# commit beside Manifold at plugins/MANIFOLD_REV. `release` holds the only write
-# grant, runs no repository code and attaches only bytes that gate packed.
+# packs and their SHA256SUMS. `bundles` refuses a tag that does not name the
+# family version on a commit main has, then runs the repository gate on the
+# tagged commit beside Manifold at plugins/MANIFOLD_REV; verify repacks the
+# family in its disposable unit and fails unless it reproduces the packed bytes.
+# `release` holds the only write grant, runs no repository code and attaches
+# only those bytes.
 
 on:
   push:
@@ -20,6 +23,24 @@ jobs:
         with:
           path: caller
           persist-credentials: false
+      - name: Require the tag to name the family version on a commit main has
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          want="${TAG#v}"
+          for manifest in caller/package.json caller/plugins/atyrode.omp/manifest.json \
+            caller/plugins/atyrode.omp/accounts/manifest.json caller/plugins/atyrode.omp/gateway/manifest.json; do
+            got="$(jq -er .version "$manifest")"
+            [ "$got" = "$want" ] || { echo "$manifest is version $got; tag $TAG names $want"; exit 1; }
+          done
+          status="$(gh api "repos/$REPOSITORY/compare/main...$GITHUB_SHA" --jq .status)"
+          case "$status" in
+            identical | behind) ;;
+            *) echo "$GITHUB_SHA is $status relative to main; tag a commit main has"; exit 1 ;;
+          esac
       - name: Read the pinned Manifold revision
         id: manifold
         run: |
@@ -32,7 +53,7 @@ jobs:
           ref: ${{ steps.manifold.outputs.rev }}
           path: manifold
           persist-credentials: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.2"
       - name: Install Manifold's dependencies
@@ -41,6 +62,9 @@ jobs:
       - name: Install Linux containment fixtures
         working-directory: manifold
         run: bash scripts/install-runtime-ci.sh
+      - name: Verify real machine jobs
+        working-directory: manifold
+        run: bash scripts/verify-runtime.sh --system jobs
       - name: Install the plugins' dependencies
         working-directory: caller/plugins
         run: bun install --frozen-lockfile
@@ -58,10 +82,13 @@ jobs:
       - name: Pack
         working-directory: caller/plugins
         run: bun run pack
-      # The consumer gate installs the public API from GitHub at the tagged commit.
-      - name: Verify the family natively and as a public consumer
+      # The in-unit pack must reproduce dist/SHA256SUMS, so the proven family is
+      # the published one. The consumer gate installs the public API from GitHub
+      # at the tagged commit.
+      - name: Verify the packed family natively and as a public consumer
         working-directory: caller/plugins
         run: |
+          OMP_VERIFY_EXPECTED_SUMS="$PWD/dist/SHA256SUMS" \
           OMP_CONSUMER_SOURCE="github:$GITHUB_REPOSITORY#$(git rev-parse HEAD)" \
             bun --no-env-file --no-install scripts/verify.ts
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -71,6 +98,7 @@ jobs:
             caller/plugins/dist/*.manifold-plugin.json
             caller/plugins/dist/SHA256SUMS
           if-no-files-found: error
+          overwrite: true
 
   release:
     needs: bundles
@@ -84,7 +112,7 @@ jobs:
         with:
           name: omp-plugins
           path: dist
-      - name: Require SHA256SUMS to name exactly the packed bundles
+      - name: Require SHA256SUMS to name exactly the packed bundles, at the tag's version
         working-directory: dist
         run: |
           set -euo pipefail
@@ -95,11 +123,19 @@ jobs:
             printf 'SHA256SUMS lists:\n%s\npacked:\n%s\n' "$listed" "$packed"
             exit 1
           }
+          want="${TAG#v}"
+          for bundle in *.manifold-plugin.json; do
+            got="$(jq -er .manifest.version "$bundle")"
+            [ "$got" = "$want" ] || { echo "$bundle is version $got; tag $TAG names $want"; exit 1; }
+          done
       - name: Create the tagged release with the verified bundles
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPOSITORY: ${{ github.repository }}
         run: |
+          set -euo pipefail
+          commit="$(gh api "repos/$REPOSITORY/commits/refs/tags/$TAG" --jq .sha)"
+          [ "$commit" = "$GITHUB_SHA" ] || { echo "tag $TAG now names $commit; this run built $GITHUB_SHA"; exit 1; }
           gh release create "$TAG" --repo "$REPOSITORY" --verify-tag \
             --title "$TAG" --generate-notes \
             dist/*.manifold-plugin.json dist/SHA256SUMS

@@ -118,6 +118,19 @@ async function delegated(): Promise<void> {
     );
     const frozenSystem = join(root, "system.json");
     await writeFile(frozenSystem, systemBytes, { mode: 0o600 });
+    // A release binds this proof to the family it publishes: the in-unit pack
+    // must reproduce the frozen SHA256SUMS of the pack being released.
+    let frozenSums: string | undefined;
+    const expectedSums = process.env.OMP_VERIFY_EXPECTED_SUMS;
+    if (expectedSums !== undefined) {
+      const sumsBytes = await readFile(expectedSums);
+      check(
+        sumsBytes.length > 0 && sumsBytes.length <= 4096,
+        "invalid-expected-sums-size",
+      );
+      frozenSums = join(root, "SHA256SUMS");
+      await writeFile(frozenSums, sumsBytes, { mode: 0o600 });
+    }
     const command = [
       ...manager,
       systemdRun,
@@ -148,6 +161,7 @@ async function delegated(): Promise<void> {
       `MANIFOLD_TEST_STATIC_BUSYBOX=${busyboxPath}`,
       `OMP_VERIFY_UNSHARE=${unsharePath}`,
       ...(process.env.OMP_VERIFY_CONSUMER_MODULE ? [`OMP_VERIFY_CONSUMER_MODULE=${process.env.OMP_VERIFY_CONSUMER_MODULE}`] : []),
+      ...(frozenSums ? [`OMP_VERIFY_EXPECTED_SUMS=${frozenSums}`] : []),
       process.execPath,
       "--no-env-file",
       "--no-install",
@@ -358,6 +372,7 @@ async function isolated(): Promise<void> {
           OMP_VERIFY_DEVELOPMENT_SHELL: busybox,
           OMP_PACK_GIT: process.env.OMP_PACK_GIT!,
           ...(process.env.OMP_VERIFY_CONSUMER_MODULE ? { OMP_VERIFY_CONSUMER_MODULE: process.env.OMP_VERIFY_CONSUMER_MODULE } : {}),
+          ...(process.env.OMP_VERIFY_EXPECTED_SUMS ? { OMP_VERIFY_EXPECTED_SUMS: process.env.OMP_VERIFY_EXPECTED_SUMS } : {}),
           NODE_ENV: "test",
           LANG: "C",
           TZ: "UTC",
@@ -429,6 +444,8 @@ async function isolated(): Promise<void> {
 try {
   const consumerModule = process.env.OMP_VERIFY_CONSUMER_MODULE;
   check(consumerModule === undefined || (isAbsolute(consumerModule) && consumerModule.endsWith(".ts")), "invalid-consumer-module");
+  const expectedSums = process.env.OMP_VERIFY_EXPECTED_SUMS;
+  check(expectedSums === undefined || isAbsolute(expectedSums), "invalid-expected-sums");
   if (!process.env.OMP_VERIFY_UNIT) await verifyConsumer();
   check(Bun.version === "1.4.2", "pinned-bun-required");
   check(
