@@ -1,10 +1,11 @@
-import { expect, test } from "bun:test";
+import { expect, jest, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { PublicJobSchema, type JobFollowUpdate, type Principal } from "@manifold/protocol";
+import { JOB_PROGRESS_INTERVAL_MS, PublicJobSchema, type JobFollowUpdate, type Principal } from "@manifold/protocol";
+import { JobProgressCoalescer } from "../../../manifold/packages/agent/src/job-progress.ts";
 import { OMP_PLUGIN_ID, RefusalSchema, RunDialsSchema } from "../api/index.ts";
 import { handlers } from "../atyrode.omp/server.ts";
 import type { OmpContext } from "../atyrode.omp/machine-server.ts";
-import { controlProgress, readControlProgress, RunControlFrameSchema, sessionDials } from "../workers/harness/control.ts";
+import { controlProgress, controlReplies, readControlProgress, RunControlFrameSchema, sessionDials } from "../workers/harness/control.ts";
 import { OmpSendInputSchema } from "../workers/harness/rpc.ts";
 
 const controlRun = handlers.controlRun!;
@@ -126,6 +127,43 @@ test("a dial reply fits one progress line and reads back exactly, never truncate
   expect(readControlProgress(controlProgress(id, { ok: false, reason: "model_unavailable" }).message))
     .toEqual({ ok: false, reason: "model_unavailable" });
   for (const message of [undefined, "", "refused not_a_reason", "applied", "applied high fixture/x extra"]) expect(readControlProgress(message)).toBeNull();
+});
+
+test("each control reply opens its own progress window, so the owner never folds one into the next", async () => {
+  jest.useFakeTimers();
+  try {
+    let now = 0;
+    const advance = async (ms: number) => {
+      now += ms;
+      jest.advanceTimersByTime(ms);
+      const settled = Promise.withResolvers<void>();
+      setImmediate(settled.resolve);
+      await settled.promise;
+    };
+    // The job owner's own coalescer on the test's clock: at most one line per window, the newest kept.
+    const clock = { now: () => now, after(ms: number, fn: () => void) { const timer = setTimeout(fn, ms); return () => clearTimeout(timer); } };
+    const owner = () => {
+      const published: string[] = [];
+      const coalescer = new JobProgressCoalescer(line => published.push(line.stage), { clock });
+      return { published, report: (line: { stage: string; message: string }) => coalescer.report({ type: "progress", ...line }) };
+    };
+    const ids = [randomUUID(), randomUUID(), randomUUID()];
+    const outcome = { ok: true as const, dials: RunDialsSchema.parse({ model: "fixture/openai/o3", thinking: "high" }) };
+    // Three changes answered back to back: the owner publishes the newest reply only.
+    const direct = owner();
+    for (const id of ids) direct.report(controlProgress(id, outcome));
+    await advance(JOB_PROGRESS_INTERVAL_MS);
+    expect(direct.published).toEqual([`control ${ids[2]}`]);
+    // Paced, each reply waits out the previous one's window, so every door reads its own stage.
+    const paced = owner();
+    const reply = controlReplies(paced.report, () => now);
+    const answering = (async () => { for (const id of ids) await reply(id, outcome); })();
+    for (let step = 0; step < 3 * JOB_PROGRESS_INTERVAL_MS / 1_000; step++) await advance(1_000);
+    await answering;
+    expect(paced.published).toEqual(ids.map(id => `control ${id}`));
+  } finally {
+    jest.useRealTimers();
+  }
 });
 
 test("a control frame names only reviewed dials under a lowercase id, on the descriptor both harness modes parse", () => {

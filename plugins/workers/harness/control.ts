@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { JOB_PROGRESS_INTERVAL_MS } from "@manifold/protocol";
 import { ControlRunInputSchema, RunDialsSchema, ThinkingSelectorSchema, type RunDials } from "../../api/index.ts";
 
 /** A live dial change that `atyrode.omp.controlRun` writes to a harness Run's private control
@@ -37,6 +38,26 @@ export function controlProgress(id: string, outcome: RunControlOutcome): { stage
     message: outcome.ok
       ? `applied ${outcome.dials.thinking ?? "-"} ${outcome.dials.model ?? "-"}`
       : `refused ${outcome.reason}`,
+  };
+}
+
+/**
+ * Answers control frames on the job's progress, one reply per owner window. The owner forwards at
+ * most one line per `JOB_PROGRESS_INTERVAL_MS` and keeps the newest, so a reply written inside the
+ * previous reply's window could replace it before its door reads it. Each reply waits out that
+ * window instead; the session has already acted on its frame.
+ */
+export function controlReplies(report: (progress: { stage: string; message: string }) => void, now: () => number = Date.now) {
+  let answered = -Infinity;
+  return async (id: string, outcome: RunControlOutcome): Promise<void> => {
+    const wait = answered + JOB_PROGRESS_INTERVAL_MS - now();
+    if (wait > 0) {
+      const elapsed = Promise.withResolvers<void>();
+      setTimeout(elapsed.resolve, wait);
+      await elapsed.promise;
+    }
+    report(controlProgress(id, outcome));
+    answered = now();
   };
 }
 

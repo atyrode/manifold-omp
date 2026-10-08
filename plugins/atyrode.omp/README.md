@@ -213,6 +213,8 @@ The first expiry comes from the sealed `lease` input, `HarnessLeaseSchema` `{ ex
 
 The door writes one `control` frame to the Run's private control descriptor, the channel `sendRunInput` uses. Job input is one-way, so the harness answers on the job's progress under the stage `control <frame id>`, and the door waits for that stage. The session selects only among models it already serves, so a dial cannot widen the reviewed account pool. Subagent and role models are unchanged. `Run.model` keeps its launch value until Manifold accepts a model reported by the harness ([atyrode/manifold#1071](https://github.com/atyrode/manifold/issues/1071)); show the dials `controlRun` returns.
 
+The job owner forwards at most one progress line every 5 s (`JOB_PROGRESS_INTERVAL_MS`) and keeps only the newest, so the TUI harness holds each answer until 5 s after the previous one, after its change applied; the frames behind it wait in order. Changes sent together are therefore answered 5 s apart, and from the fifth on an answer can outlast the door's 20 s.
+
 `sendRunInput` text reaches the TUI as an operator follow-up. Abort and dialog answers belong to the operator's keyboard, so the TUI harness ignores those frames.
 
 The native gate proves this path end to end (`scripts/verify-native-harness.ts`): `launchRun` for a `tui: true` Agent, the status line before and after `controlRun`, a turn on the new dials, activity reports, a renewal past the first lease while the Run stays `pending_policy`, refusal of an Agent principal, and settlement on exit.

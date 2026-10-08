@@ -16,7 +16,7 @@ import { validateSkillInputs } from "./skills.ts";
 import { readAutomation } from "./sdk-inputs.ts";
 import { forwardOmpOutput, type ReportOmpProgress } from "./progress.ts";
 import { createAgentToolRelay } from "./agent-tools.ts";
-import { controlProgress, type RunControlOutcome } from "./control.ts";
+import { controlProgress, controlReplies, type RunControlOutcome } from "./control.ts";
 import { HarnessLeaseSchema, RunLifecycle } from "./lifecycle.ts";
 import { TuiChildMessageSchema, type TuiCommand } from "../../tui-control-ipc.ts";
 
@@ -508,7 +508,9 @@ export async function runOmpHarnessTui(context: WorkerContext): Promise<boolean>
       if (!processChild.connected) { lost(); return; }
       processChild.send({ type: "tui_command", id, command: change }, error => { if (error) lost(); });
     });
-    // Frames apply one at a time and in order; job input carries no reply, so a dial answers its door through progress.
+    // Frames apply one at a time and in order; job input carries no reply, so a dial answers its door through
+    // progress, one reply per progress window.
+    const reply = controlReplies(progress => context.reportProgress(progress));
     void (async () => {
       await ready.promise;
       for await (const frame of rpcFrames(control, 65536)) {
@@ -517,7 +519,7 @@ export async function runOmpHarnessTui(context: WorkerContext): Promise<boolean>
         if (input.type === "abort" || input.type === "extension_ui_response") continue;
         if (input.type === "control") {
           const { model, thinking } = input;
-          context.reportProgress(controlProgress(input.id, await command({ type: "control", model, thinking })));
+          await reply(input.id, await command({ type: "control", model, thinking }));
         } else await command({ type: "prompt", message: input.message, streamingBehavior: input.type === "steer" ? "steer" : "followUp" });
       }
     })().catch(() => control.destroy());
