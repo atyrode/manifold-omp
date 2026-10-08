@@ -1,10 +1,11 @@
-import { expect, test } from "bun:test";
+import { expect, jest, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { PublicJobSchema, type JobFollowUpdate, type Principal } from "@manifold/protocol";
+import { JOB_PROGRESS_INTERVAL_MS, PublicJobSchema, type JobFollowUpdate, type Principal } from "@manifold/protocol";
+import { JobProgressCoalescer } from "../../../manifold/packages/agent/src/job-progress.ts";
 import { OMP_PLUGIN_ID, RefusalSchema, RunDialsSchema } from "../api/index.ts";
 import { handlers } from "../atyrode.omp/server.ts";
 import type { OmpContext } from "../atyrode.omp/machine-server.ts";
-import { controlProgress, readControlProgress, RunControlFrameSchema, sessionDials } from "../workers/harness/control.ts";
+import { controlProgress, controlReplies, readControlProgress, RunControlFrameSchema, sessionDials } from "../workers/harness/control.ts";
 import { OmpSendInputSchema } from "../workers/harness/rpc.ts";
 
 const controlRun = handlers.controlRun!;
@@ -126,6 +127,74 @@ test("a dial reply fits one progress line and reads back exactly, never truncate
   expect(readControlProgress(controlProgress(id, { ok: false, reason: "model_unavailable" }).message))
     .toEqual({ ok: false, reason: "model_unavailable" });
   for (const message of [undefined, "", "refused not_a_reason", "applied", "applied high fixture/x extra"]) expect(readControlProgress(message)).toBeNull();
+});
+
+/** Lets the replies already released run. Never `advanceTimersByTime(0)`: Bun 1.4.2 moves its fake clock 1 ms on it. */
+async function settle() {
+  const settled = Promise.withResolvers<void>();
+  setImmediate(settled.resolve);
+  await settled.promise;
+}
+async function advance(ms: number) {
+  jest.advanceTimersByTime(ms);
+  await settle();
+}
+const appliedHigh = { ok: true as const, dials: RunDialsSchema.parse({ model: "fixture/openai/o3", thinking: "high" }) };
+
+test("each control reply opens its own progress window, so the owner never folds one into the next", async () => {
+  jest.useFakeTimers();
+  try {
+    // The job owner's own coalescer on its own, faked clock: at most one line per window, the newest kept.
+    const owner = () => {
+      const published: string[] = [];
+      const coalescer = new JobProgressCoalescer(line => published.push(line.stage));
+      return { published, report: (line: { stage: string; message: string }) => coalescer.report({ type: "progress", ...line }) };
+    };
+    const ids = Array.from({ length: 4 }, () => randomUUID());
+    // Four changes answered back to back: the owner publishes the newest reply only.
+    const direct = owner();
+    for (const id of ids) direct.report(controlProgress(id, appliedHigh));
+    await advance(JOB_PROGRESS_INTERVAL_MS);
+    expect(direct.published).toEqual([`control ${ids[3]}`]);
+    // Paced, each reply waits out the previous one's full window, so every door reads its own stage.
+    const paced = owner();
+    const start = performance.now();
+    const written: number[] = [];
+    const reply = controlReplies(line => { written.push(performance.now() - start); paced.report(line); });
+    const answering = (async () => { for (const id of ids) await reply(id, appliedHigh); })();
+    await settle();
+    for (let answered = 1; answered < ids.length; answered++) {
+      // Not a millisecond early: under any shorter window a long enough burst folds one reply into the next.
+      await advance(JOB_PROGRESS_INTERVAL_MS - 1);
+      expect(written).toHaveLength(answered);
+      await advance(1);
+      expect(written).toHaveLength(answered + 1);
+    }
+    await answering;
+    await advance(JOB_PROGRESS_INTERVAL_MS);
+    expect(written).toEqual(ids.map((_, index) => index * JOB_PROGRESS_INTERVAL_MS));
+    expect(paced.published).toEqual(ids.map(id => `control ${id}`));
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("the reply window runs on a monotonic clock, so a wall-clock step back holds no control frame", async () => {
+  jest.useFakeTimers();
+  try {
+    const written: number[] = [];
+    const reply = controlReplies(() => written.push(performance.now()));
+    await reply(randomUUID(), appliedHigh);
+    // The frames behind a held reply wait in the same serial queue, so a wall-clock wait would hold them a minute more.
+    jest.setSystemTime(Date.now() - 60_000);
+    const next = reply(randomUUID(), appliedHigh);
+    await advance(JOB_PROGRESS_INTERVAL_MS);
+    expect(written).toHaveLength(2);
+    await next;
+    expect(written[1]! - written[0]!).toBe(JOB_PROGRESS_INTERVAL_MS);
+  } finally {
+    jest.useRealTimers();
+  }
 });
 
 test("a control frame names only reviewed dials under a lowercase id, on the descriptor both harness modes parse", () => {

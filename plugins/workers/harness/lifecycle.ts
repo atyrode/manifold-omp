@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { AGENT_RUN_MAX_LIFETIME_MS, type ActionRunnerResponse } from "@manifold/protocol";
-import type { OmpActivity } from "./rpc.ts";
+import { OmpRpcActivity, type OmpActivity } from "./rpc.ts";
+import type { TuiActivityFrame } from "../../tui-control-ipc.ts";
 
 /**
  * The Run's lease, as `harness.launch` reads it from the Run it launches and seals it beside the
@@ -28,9 +29,11 @@ interface LifecycleRunner {
  * the justification, and activity reports. Both run on the Run's own credential from launch, with
  * no policy assent: atyrode/manifold#1070 admits exactly these two doors while a Run awaits its
  * model's acknowledgement. Frames are sequential, as `ActionRunner` requires. A refused renewal or
- * report, an expiry or the runner's activity budget stops that loop, never the session.
+ * report, an expiry, the runner's activity budget or more open dialogs than `OmpRpcActivity`
+ * tracks stops that loop, never the session.
  */
 export class RunLifecycle {
+  #activity = new OmpRpcActivity();
   #result: ResultFrame | undefined;
   #tail = Promise.resolve();
   #timer: NodeJS.Timeout | undefined;
@@ -62,6 +65,18 @@ export class RunLifecycle {
     }).catch(() => { this.#reporting = false; });
   }
 
+  /** The SDK child's activity events. Past the 64 open dialogs `OmpRpcActivity` tracks, the activity
+   * is unknown: reporting ends after the reports already queued, so the Run reads `blocked`. */
+  track(frame: TuiActivityFrame): void {
+    let next: OmpActivity | null;
+    try { next = this.#activity.consume(frame); }
+    catch {
+      this.#tail = this.#tail.then(() => { this.#reporting = false; });
+      return;
+    }
+    if (next) this.report(next);
+  }
+
   /** Cancels the pending renewal and settles every queued frame before the runner closes. */
   async stop(): Promise<void> {
     this.#renewing = false;
@@ -79,7 +94,8 @@ export class RunLifecycle {
         await this.runner.accept({ type: "renew", id: `renew-${++this.#renewals}`, runId: this.runId,
           lifetimeMs: this.lease.lifetimeMs, justification: RENEWAL_JUSTIFICATION });
         const result = this.#result as ResultFrame | undefined;
-        if (result?.outcome.ok === true && result.expiresAt !== undefined) this.#schedule(result.expiresAt);
+        // A renewal answered after `stop()` arms nothing: renewal is over even when this one succeeded.
+        if (this.#renewing && result?.outcome.ok === true && result.expiresAt !== undefined) this.#schedule(result.expiresAt);
         else this.#renewing = false;
       }).catch(() => { this.#renewing = false; });
     }, delay);

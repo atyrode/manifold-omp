@@ -195,10 +195,10 @@ Manifold's harness lane for a hardened plugin hands `harness.launch` the V1 proj
 In TUI mode the harness wrapper alone holds the Run credential, the private control descriptor and a private IPC channel to the SDK child, and it never reads or writes terminal bytes. It adopts the Run through `ActionRunner` and never acknowledges the Run's policy, so the Run stays `pending_policy` and reaches no authority-bearing door. Manifold admits exactly two lifecycle doors for a pending Run on its own credential, `reportRunActivityV2` and `renewAgentRunV2` ([atyrode/manifold#1070](https://github.com/atyrode/manifold/issues/1070)), and the wrapper uses only those:
 
 - **Activity.** `idle` at bind, then `working`, `blocked` and `done` from the session's events. `blocked` is an operator dialog open in the TUI.
-- **Renewal.** At half of each lease, for the same lifetime, with the fixed justification `RENEWAL_JUSTIFICATION`. Each renewal's result supplies the next expiry.
+- **Renewal.** At half of each lease, for the same lifetime, with the fixed justification `RENEWAL_JUSTIFICATION`. Each renewal's result supplies the next expiry. Manifold refuses a Run's 25th renewal (`AGENT_RUN_MAX_RENEWALS` is 24). Each renewal at half a lease extends the expiry by half a lease, so a Run stays attributed for about 13 leases: about 13 minutes for a 60 s lease, about 13 hours for the 1 h maximum.
 - **Settlement.** When the TUI exits, the wrapper reports `done` and finishes the Run: `completed` on exit code 0, otherwise `failed`, or `cancelled` when the job was cancelled.
 
-A refused renewal or report, an expired Run, or the `ActionRunner` budget of 1024 activity reports stops that loop only. The TUI keeps running for the operator; the session simply stops being attributed to the Run.
+A refused renewal or report, Manifold's 24-renewal limit, an expired Run, the `ActionRunner` budget of 1024 activity reports, or more than 64 operator dialogs open at once stops that loop only. The TUI keeps running for the operator; the session simply stops being attributed to the Run.
 
 The first expiry comes from the sealed `lease` input, `HarnessLeaseSchema` `{ expiresAt, lifetimeMs }`. `harness.launch` reads it from the Run it launches: `lifetimeMs` is the smaller of the Agent grant's `maxRunLifetimeMs` and the Run's own lifetime, at least 60 s. It is an input because an adopted `ActionRunner` does not expose its Run's expiry ([atyrode/manifold#1071](https://github.com/atyrode/manifold/issues/1071)).
 
@@ -212,6 +212,8 @@ The first expiry comes from the sealed `lease` input, `HarnessLeaseSchema` `{ ex
 - **Refusals.** `omp_session_unavailable`: no started harness terminal the caller may address. `omp_model_unavailable`: a model the session does not serve, after one discovery refresh. `omp_run_control_unsupported`: a headless RPC harness. `omp_run_control_unconfirmed`: no answer within 20 s, so the change may still apply.
 
 The door writes one `control` frame to the Run's private control descriptor, the channel `sendRunInput` uses. Job input is one-way, so the harness answers on the job's progress under the stage `control <frame id>`, and the door waits for that stage. The session selects only among models it already serves, so a dial cannot widen the reviewed account pool. Subagent and role models are unchanged. `Run.model` keeps its launch value until Manifold accepts a model reported by the harness ([atyrode/manifold#1071](https://github.com/atyrode/manifold/issues/1071)); show the dials `controlRun` returns.
+
+The job owner forwards at most one progress line every 5 s (`JOB_PROGRESS_INTERVAL_MS`) and keeps only the newest, so the TUI harness holds each answer until 5 s after the previous one, after its change applied; the frames behind it wait in order. Changes sent together are therefore answered 5 s apart, and from the fifth on an answer can outlast the door's 20 s.
 
 `sendRunInput` text reaches the TUI as an operator follow-up. Abort and dialog answers belong to the operator's keyboard, so the TUI harness ignores those frames.
 
