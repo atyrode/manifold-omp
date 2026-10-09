@@ -287,7 +287,7 @@ OMP_VERIFY_SYSTEMD_MODE=user bun run verify
 
 `system.json` is an explicit native runtime-tool library declaration for the host. Verify creates its own disposable delegated systemd cgroup and, following Manifold's runtime gate, a private user/mount namespace with a 1 MiB, 4,096-inode tmpfs for governed output leases. `unshare` must be available; the reusable CI fixture already supplies static BusyBox. No host-root mount, fleet daemon or real credential value is involved. A failing native gate is not equivalent to successful packaging.
 
-Verify packs the family again inside that unit and proves the bundles it packed. With `OMP_VERIFY_EXPECTED_SUMS`, it freezes the named `SHA256SUMS` and refuses with `packed-family-differs-from-release` unless its own pack reproduces that file byte for byte, so the bundles in `dist/` are the bundles proven. Hosted CI packs and verifies this way on every change.
+Verify packs the family again inside that unit and proves the bundles it packed. It requires `OMP_VERIFY_EXPECTED_SUMS`, an absolute path to the `SHA256SUMS` of the pack being published: it freezes that file and refuses with `packed-family-differs-from-release` unless its own pack reproduces it byte for byte, so the bundles in `dist/` are the bundles proven. Without it, verify refuses with `invalid-expected-sums` before any work. Hosted CI packs and verifies this way on every change.
 
 ## Releases
 
