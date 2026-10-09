@@ -298,9 +298,11 @@ try {
         usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
       };
-      // The CLI may title a new session separately. This reply cannot satisfy
-      // the primary-turn completion or ordinary tool-registry proof.
-      if (native && !material && names.length === 0) {
+      // The CLI may title a new session separately: a tool-less request, or since 18.8 a side turn
+      // forked from the streaming reply that ends in a `<title-request>`. Neither can satisfy the
+      // primary-turn completion or ordinary tool-registry proof.
+      const titleFork = JSON.stringify(parsed.context.messages.at(-1)?.content ?? "").includes("<title-request>");
+      if (native && !material && (names.length === 0 || titleFork)) {
         message.content = [{ type: "text", text: "Fixture session title" }];
         return response(message);
       }
