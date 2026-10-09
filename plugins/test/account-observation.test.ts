@@ -30,9 +30,11 @@ test("usage generated after dispatch is accepted at receipt time", async () => {
   expect(observation.accounts.observedAt).toBeGreaterThan(1);
 });
 
-/** One broker whose configuration revision, owner and store custody a test can move. */
+/** One broker whose configuration revision, owner and store custody a test can move.
+ * `raw`, when set, replaces the whole metadata result. */
 function brokerFixture() {
-  const state = { revision: "fixture-revision", machineId: "fixture-owner", metadata: { custodyId } as Record<string, unknown>, mutations: 0 };
+  const state: { revision: string; machineId: string; metadata: Record<string, unknown>; raw?: unknown; mutations: number } =
+    { revision: "fixture-revision", machineId: "fixture-owner", metadata: { custodyId }, mutations: 0 };
   const ctx = {
     services: {
       describeInstance: async () => {
@@ -54,7 +56,7 @@ function brokerFixture() {
       },
       readInstance: async () => ({
         ok: true,
-        result: {
+        result: Object.hasOwn(state, "raw") ? state.raw : {
           ...state.metadata,
           credentials: [{
             id: 7,
@@ -131,4 +133,12 @@ test("a broker without a custody id must be promoted; a malformed one is invalid
     state.metadata = { custodyId: malformed };
     await expect(accountObservation(ctx)).rejects.toThrow("omp_invalid_accounts");
   }
+  // Metadata that is not a snapshot object is invalid data, not an older broker.
+  for (const raw of ["snapshot", 7, [{ custodyId }]]) {
+    state.raw = raw;
+    await expect(accountObservation(ctx)).rejects.toThrow("omp_invalid_accounts");
+  }
+  // No snapshot at all stays an unavailable reading that names no store.
+  state.raw = null;
+  expect(await accountObservation(ctx)).toEqual({ scope: accountsScope("fixture-owner", null), observedAt: null, status: "unavailable", accounts: [] });
 });

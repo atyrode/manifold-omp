@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
 import type { Database } from "bun:sqlite";
 import {
   AuthStorage,
@@ -36,6 +37,17 @@ function storeCustody(db: Database): string {
   }).immediate();
 }
 
+/** The identity the SDK's SQLite recovery compares; birth time because an unlinked file's inode number can be reused. */
+function fileIdentity(path: string): string | null {
+  try {
+    const stat = statSync(path);
+    return `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 /** Lifecycle accounting and store custody only: the published SDK still owns refresh, leases and persistence. */
 export class NativeBrokerStorage extends AuthStorage {
   readonly #pending = new Map<Promise<void>, OperationScope>();
@@ -61,15 +73,24 @@ export class NativeBrokerStorage extends AuthStorage {
   }
 
   static override async create(dbPath: string, options: AuthStorageOptions = {}): Promise<NativeBrokerStorage> {
-    // The SDK opens, migrates or recovers the file first, so custody is read from the very
-    // database it serves; a corrupt store it replaces is a new store with a new id.
-    const store = await SqliteAuthCredentialStore.open(dbPath);
-    try {
-      const custodyId = await openSqliteDatabase(dbPath, db => {
-        try { return storeCustody(db); } finally { db.close(); }
-      });
-      return new NativeBrokerStorage(store, custodyId, options);
-    } catch (error) { store.close(); throw error; }
+    // The SDK opens, migrates or recovers the file first; custody is then read through a
+    // second connection by path. OMP sign-in shares this store and may quarantine and recreate
+    // it in between, which would serve one file's credentials under another's custody. Both
+    // connections must see one file: the same identity before the SDK open and after the
+    // custody read. A new store has no file before its first open and an SDK recovery replaces
+    // the file, so one reopen is allowed; a file that changes again refuses to start.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const before = fileIdentity(dbPath);
+      const store = await SqliteAuthCredentialStore.open(dbPath);
+      try {
+        const custodyId = await openSqliteDatabase(dbPath, db => {
+          try { return storeCustody(db); } finally { db.close(); }
+        });
+        if (before !== null && before === fileIdentity(dbPath)) return new NativeBrokerStorage(store, custodyId, options);
+      } catch (error) { store.close(); throw error; }
+      store.close();
+    }
+    throw new Error("Broker store changed while opening");
   }
 
   #own<T>(run: () => Promise<T>, rawProvider = false): Promise<T> {

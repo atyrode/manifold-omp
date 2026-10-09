@@ -36,8 +36,11 @@ export async function accountObservation(ctx: OmpContext, expected?: BrokerRefer
   const metadata = await brokerRead(ctx, reference, "metadata");
   // The guest clock is the dispatch timestamp, not the arrival time of this read.
   const observedAt = Date.now();
+  // No snapshot is an unavailable reading, as before custody; it observes no store.
+  if (metadata === null) return projectAccounts(null, accountsScope(reference.machineId, null), observedAt, observedAt);
+  if (typeof metadata !== "object" || Array.isArray(metadata)) throw new OmpDataError("invalid_accounts");
   // A broker promoted by an older version projects no custody id; it has to be promoted again.
-  if (!metadata || typeof metadata !== "object" || !Object.hasOwn(metadata, "custodyId")) throw new OmpRefusal("account_runtime_outdated");
+  if (!Object.hasOwn(metadata, "custodyId")) throw new OmpRefusal("account_runtime_outdated");
   const { custodyId, ...snapshot } = metadata as Record<string, unknown>;
   const custody = z.uuidv4().safeParse(custodyId);
   if (!custody.success) throw new OmpDataError("invalid_accounts");

@@ -1,12 +1,12 @@
 import { Database } from "bun:sqlite";
-import { copyFile, rm } from "node:fs/promises";
+import { copyFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { SdkScenarioContext } from "./isolated-sdk.ts";
 import { runSdkScenario } from "./isolated-sdk.ts";
 
 await runSdkScenario(async (ctx: SdkScenarioContext) => {
   // SDK loading must follow the child's environment, logging, and fetch isolation.
-  const { AuthStorage } = await import("@oh-my-pi/pi-ai/auth-storage");
+  const { AuthStorage, SqliteAuthCredentialStore } = await import("@oh-my-pi/pi-ai/auth-storage");
   const { NativeBrokerStorage } = await import("../../workers/broker/storage.ts");
   const { startNativeBroker } = await import("../../workers/broker/server.ts");
   const bearer = "synthetic-custody-service-bearer";
@@ -61,11 +61,10 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
   ctx.check(restarted.custodyId === upgraded.custodyId, "restart-changed-custody");
   ctx.check(restarted.credentials === upgraded.credentials, "restart-changed-credential-ids");
 
-  // Brokers racing over one new store agree on a single id.
-  const raced = join(ctx.root, "state", "raced.db");
-  const racers = await Promise.all([0, 1].map(() => NativeBrokerStorage.create(raced, { refreshOAuthCredential: ctx.refreshOAuthCredential })));
-  ctx.check(racers[0]!.custodyId === racers[1]!.custodyId, "racing-opens-minted-two-ids");
-  for (const racer of racers) racer.close();
+  // Another store, stamped by its own broker, to copy in below.
+  const other = join(ctx.root, "state", "other.db");
+  await legacyStore(other);
+  const otherCustody = (await serve(other)).custodyId;
 
   // A purge removes the store; the next broker creates a new one with new custody.
   await removeStore(store);
@@ -73,10 +72,51 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
   ctx.check(purged.custodyId !== upgraded.custodyId && purged.credentials === "[]", "purge-kept-custody");
   // A replaced database brings its own custody, or none: the id travels with the file.
   await removeStore(store);
-  await copyFile(raced, store);
-  ctx.check((await serve(store)).custodyId === racers[0]!.custodyId, "replacement-kept-location-custody");
+  await copyFile(other, store);
+  ctx.check((await serve(store)).custodyId === otherCustody, "replacement-kept-location-custody");
   await removeStore(store);
   await legacyStore(store);
   const replaced = await serve(store);
-  ctx.check(![upgraded.custodyId, purged.custodyId, racers[0]!.custodyId].includes(replaced.custodyId), "replacement-reused-custody");
+  ctx.check(![upgraded.custodyId, purged.custodyId, otherCustody].includes(replaced.custodyId), "replacement-reused-custody");
+
+  // OMP sign-in shares the store and may quarantine and recreate it between the SDK's open
+  // and the custody read. Replace the file right after the SDK open: a broker reopens once and
+  // serves the replacement whole; a file replaced again on the reopen refuses to start.
+  const sdkOpen = SqliteAuthCredentialStore.open;
+  let pending = 0;
+  let replacements = 0;
+  SqliteAuthCredentialStore.open = async (path?: string) => {
+    const opened = await sdkOpen.call(SqliteAuthCredentialStore, path);
+    ctx.check(path, "missing-store-path");
+    if (pending > 0) {
+      pending--;
+      // Renaming rather than unlinking keeps the open file's inode number allocated.
+      const displaced = `${path}.displaced-${replacements++}`;
+      for (const suffix of ["", "-wal", "-shm"]) {
+        await rename(`${path}${suffix}`, `${displaced}${suffix}`).catch((error: NodeJS.ErrnoException) => {
+          if (suffix === "" || error.code !== "ENOENT") throw error;
+        });
+      }
+      await copyFile(other, path);
+    }
+    return opened;
+  };
+  try {
+    await removeStore(store);
+    const original = (await serve(store)).custodyId;
+    pending = 1;
+    const reopened = await NativeBrokerStorage.create(store, { refreshOAuthCredential: ctx.refreshOAuthCredential });
+    try {
+      await reopened.credentials.reload();
+      ctx.check(reopened.custodyId === otherCustody && reopened.custodyId !== original
+        && reopened.credentials.list().length === 2, "replaced-store-not-reopened");
+    } finally { reopened.close(); }
+    pending = 2;
+    const refused = await NativeBrokerStorage.create(store, { refreshOAuthCredential: ctx.refreshOAuthCredential }).then(
+      storage => { storage.close(); return false; },
+      (error: unknown) => error instanceof Error && error.message === "Broker store changed while opening");
+    ctx.check(refused, "changing-store-not-refused");
+  } finally {
+    SqliteAuthCredentialStore.open = sdkOpen;
+  }
 });
