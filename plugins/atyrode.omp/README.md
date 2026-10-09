@@ -175,7 +175,10 @@ under the protocol 57 host's `core.access.acknowledgeAgentPolicyV2` door or the 
 default insertion or extra-field deletion. Collisions and unsupported runtime
 capabilities refuse rather than downgrade. Ordinary instruction discovery is unchanged.
 Completed results, refusals and cancellation with unknown effect acknowledgement
-remain distinct; the adapter never replays an uncertain invocation.
+remain distinct; the adapter never replays an uncertain invocation. Cancelling the
+one-shot is Manifold's immediate job kill, so its sealed transcript records an in-flight
+call's `unknown` result only when OMP wrote it before the kill; otherwise the transcript
+ends at OMP's `tool_execution_start` marker for that call, which claims no outcome.
 
 Upgrade the compatible Manifold host first, then the exact native source, then any
 Code consumer pin. This contract requires the declared `MANIFOLD_REV` host's protocol

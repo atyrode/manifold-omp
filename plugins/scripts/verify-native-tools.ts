@@ -3,6 +3,7 @@ import { writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { NativeToolConsumer, NativeToolConsumerModule } from "./verify-consumer-types.ts";
+import { SealedJournalEntrySchema, sealedToolResult, type SealedJournalEntry } from "./sealed-journal.ts";
 import { z } from "zod";
 import { parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import type { AssistantMessage, AssistantMessageEvent, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
@@ -447,10 +448,7 @@ export async function verifyNativeTools(options: Options): Promise<void> {
         bytes.copy(archive, offset); offset += bytes.length;
       }
       check(createHash("sha256").update(archive).digest("hex") === output.sha256, "sealed-session-digest-mismatch");
-      const entrySchema = z.object({ type: z.string(), id: z.string().optional(), message: z.object({
-        role: z.string(), toolCallId: z.string().optional(), details: z.unknown().optional(), isError: z.boolean().optional(),
-      }).optional() });
-      const journals: { name: string; entries: z.infer<typeof entrySchema>[] }[] = [];
+      const journals: { name: string; entries: SealedJournalEntry[] }[] = [];
       for (let cursor = 0; cursor + 512 <= archive.length;) {
         const header = archive.subarray(cursor, cursor + 512);
         if (header.every(byte => byte === 0)) break;
@@ -459,7 +457,7 @@ export async function verifyNativeTools(options: Options): Promise<void> {
         check(Number.isSafeInteger(size) && size >= 0 && cursor + 512 + size <= archive.length, "session-archive-invalid");
         const name = field(0, 100);
         if (name.endsWith(".jsonl")) journals.push({ name, entries: archive.subarray(cursor + 512, cursor + 512 + size).toString("utf8")
-          .trim().split("\n").map(line => entrySchema.parse(JSON.parse(line))) });
+          .trim().split("\n").map(line => SealedJournalEntrySchema.parse(JSON.parse(line))) });
         cursor += 512 + Math.ceil(size / 512) * 512;
       }
       check(journals.length === 1, "fixed-journal-not-unique");
@@ -469,10 +467,11 @@ export async function verifyNativeTools(options: Options): Promise<void> {
       check(session?.id && session.id === inspection.run.session?.sessionId && journal.name.endsWith(`${session.id}.jsonl`),
         "sealed-journal-run-session-mismatch");
       for (const id of ids) {
-        const results = journal.entries.filter(entry => entry.type === "message" && entry.message?.role === "toolResult" && entry.message.toolCallId === id);
-        check(results.length === 1, "journal-tool-result-missing-or-replayed");
-        if ((id === "unselected" || id === "invalid") && results[0]!.message!.isError) continue;
-        const result = AgentToolReplySchema.parse(results[0]!.message!.details);
+        // The cancelled call may be left pending by the job's kill; it then claims no outcome.
+        const sealed = sealedToolResult(journal.entries, id, id === "uncertain");
+        if (!sealed.ok) throw new NativeToolProofFailure(sealed.code);
+        if (!sealed.result || ((id === "unselected" || id === "invalid") && sealed.result.message!.isError)) continue;
+        const result = AgentToolReplySchema.parse(sealed.result.message!.details);
         if (id === "uncertain") check(result.type === "unknown", "cancelled-uncertain-effect-claimed-certain");
         else if (id === "unselected" || id === "invalid")
           check(result.type === "refused" || (result.type === "result" && !result.outcome.ok), "journal-rejected-call-succeeded");
