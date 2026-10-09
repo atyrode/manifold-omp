@@ -1,6 +1,6 @@
 {
   "id": "atyrode.omp.accounts",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "title": "omp accounts",
   "description": "Independent OMP accounts over governed native Manifold resources.",
   "capabilities": [

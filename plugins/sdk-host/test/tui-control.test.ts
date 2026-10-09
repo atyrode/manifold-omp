@@ -11,7 +11,8 @@ const settle = () => new Promise<void>(resolve => setImmediate(resolve));
 const levels = ["off", "minimal", "low", "medium", "high", "xhigh"];
 
 /** The main agent's session as the TUI holds it. Discovery-backed models appear only after a
- * background refresh, and thinking clamps to `high` the way a model without `xhigh` clamps it. */
+ * background refresh, thinking clamps to `high` the way a model without `xhigh` clamps it, and a
+ * selection that changes the model emits `model_changed`, as `AgentSession` does. */
 function sessionFixture(options: {
   discovered?: Model[];
   refresh?: Promise<void>;
@@ -28,7 +29,12 @@ function sessionFixture(options: {
     subscribe(receive: typeof listener) { listener = receive; return () => { listener = undefined; }; },
     getAvailableModels: () => refreshed ? [...served, ...options.discovered ?? []] : served,
     modelRegistry: { async awaitBackgroundRefresh() { calls.push("refresh"); await options.refresh; refreshed = true; } },
-    async setModel(next: Model) { calls.push(`model ${next.provider}/${next.id}`); model = next; },
+    async setModel(next: Model) {
+      calls.push(`model ${next.provider}/${next.id}`);
+      const changed = model?.provider !== next.provider || model.id !== next.id;
+      model = next;
+      if (changed) listener?.({ type: "model_changed" });
+    },
     setThinkingLevel(level: string) {
       if (options.closed) throw new Error("fixture-session-closed");
       calls.push(`thinking ${level}`);
@@ -44,7 +50,9 @@ function sessionFixture(options: {
   // Only the members `TuiSession` picks are implemented.
   const session = fixture as unknown as TuiSession;
   return { session, calls, emit: (event: { type: string; isTerminal?: boolean }) => listener?.(event),
-    subscribed: () => listener !== undefined };
+    subscribed: () => listener !== undefined,
+    /** The operator's own selector, or a retry fallback: the session changes model with no dial. */
+    select: (next: Model) => fixture.setModel(next) };
 }
 
 /** The child's side of the private IPC channel, as the wrapper drives it. Every frame the child
@@ -127,6 +135,27 @@ test("dials apply one command at a time and in order, and reply with the dials t
   await settle();
   expect(session.calls).toEqual(["thinking off", "thinking auto"]);
   expect(tui.results().at(-1)?.outcome).toEqual({ ok: true, dials: { model: "openai/o3", thinking: "auto" } });
+});
+
+test("the session's model reaches the wrapper at ready and once per change, whatever changed it", async () => {
+  const session = sessionFixture({ discovered: [{ provider: "openai", id: "o3" }] });
+  const tui = attached(session.session);
+  const sent = () => tui.sent.map(message => message.type === "tui_model" ? `model ${message.model.provider}/${message.model.model}` : message.type);
+  expect(sent()).toEqual([]);
+  tui.control.ready();
+  expect(tui.sent).toEqual([{ type: "tui_ready" }, { type: "tui_model", model: { provider: "openai", model: "gpt-5" } }]);
+  // A dial's switch is sent before the reply that confirms it; a dial that keeps the model sends none.
+  tui.command({ type: "control", model: "openai/o3" });
+  tui.command({ type: "control", model: "openai/o3", thinking: "high" });
+  await settle();
+  expect(sent().slice(2)).toEqual(["model openai/o3", "tui_result", "tui_result"]);
+  // The operator's own selector is a change too; the same selector rebound after discovery is not.
+  await session.select({ provider: "openai", id: "gpt-5" });
+  session.emit({ type: "model_changed" });
+  // A model `Run.model` cannot carry is not sent, and the next one that it can is.
+  await session.select({ provider: "openai", id: "m".repeat(257) });
+  await session.select({ provider: "openai", id: "o3" });
+  expect(sent().slice(5)).toEqual(["model openai/gpt-5", "model openai/o3"]);
 });
 
 test("a session that cannot apply a dial answers unavailable, and the next command still applies", async () => {

@@ -6,11 +6,12 @@ import { join } from "node:path";
 import { formatManifoldUri, MachineHalfSchema, PublicJobSchema, type Agent, type AgentRun, type Cap, type ManifoldRef } from "@manifold/protocol";
 import type { GuestCtx } from "@manifold/plugin-kit/server";
 import {
-  ACCOUNTS_PLUGIN_ID, BROKER_SERVICE_ID, OMP_PLUGIN_ID, OmpHarnessProfileSchema, PreparedHarnessSessionSchema,
-  PreparedResumeSessionSchema, TerminalRuntimeSchema,
+  ACCOUNTS_PLUGIN_ID, BROKER_SERVICE_ID, OMP_PLUGIN_ID, OmpHarnessProfileSchema, OmpSessionRefSchema, PreparedHarnessSessionSchema,
+  PreparedResumeSessionSchema, TerminalRuntimeSchema, type ActionInput,
 } from "../api/index.ts";
 import { accountsScope } from "../atyrode.omp/broker.ts";
-import { prepareHarnessSession } from "../atyrode.omp/execution.ts";
+import { prepareHarnessSession, servesModel } from "../atyrode.omp/execution.ts";
+import { bundledProbeModels } from "../atyrode.omp/sdk-metadata.macro.ts" with { type: "macro" };
 import { harness } from "../atyrode.omp/harness.ts";
 import { HarnessLeaseSchema } from "../workers/harness/lifecycle.ts";
 import { listSessions, resumeSession } from "../atyrode.omp/sessions.ts";
@@ -19,7 +20,7 @@ import manifest from "../atyrode.omp/manifest.json";
 import sdkRuntimeArtifacts from "../sdk-host/runtime-artifacts.json";
 import { openSessionsRoot, prepareSessionFile, resolveSessionFile } from "../workers/harness/sessions.ts";
 import { materializeJobInputs } from "../../../manifold/packages/agent/src/job-inputs.ts";
-import { ABSENT_MODEL_ID, UNLISTED_PUBLISHED_ID } from "./fixtures/models.ts";
+import { ABSENT_MODEL_ID, UNLISTED_MODEL_ID, UNLISTED_PUBLISHED_ID } from "./fixtures/models.ts";
 
 function launchFixture() {
   const machineId = "fixture-machine";
@@ -42,7 +43,7 @@ function launchFixture() {
   const broker = { serviceId: BROKER_SERVICE_ID, revision: "fixture-broker", machineId };
   const custodyId = "5c2d8e41-0f3a-4b7c-9d1e-6a8b2c4f0e13";
   let denied: string | undefined;
-  let defaults: unknown = null;
+  const stored = new Map<string, string>();
   let inventory: unknown = [];
   let inventoryBytes = Buffer.from("[]");
   let job: unknown;
@@ -54,7 +55,12 @@ function launchFixture() {
     outsideScope: async () => null,
     now: () => 1,
     newId: async () => randomUUID(),
-    storage: { get: async () => defaults === null ? null : JSON.stringify(defaults) },
+    storage: {
+      get: async (key: string) => stored.get(key) ?? null,
+      set: async (key: string, value: string) => { stored.set(key, value); },
+      delete: async (key: string) => { stored.delete(key); },
+      keys: async (prefix = "") => [...stored.keys()].filter(key => key.startsWith(prefix)).sort(),
+    },
     jobs: {
       describe: async () => description,
       describeDeployment: async () => ({ installation: { revision: pins.installationRevision, artifactSha256: pins.artifactSha256, machine }, deployment: null }),
@@ -92,9 +98,10 @@ function launchFixture() {
   return {
     ctx, deny: (cap: string) => { denied = cap; },
     machine,
+    stored,
     launch: { tui: false, lease: { expiresAt: 1_000_000, lifetimeMs: 300_000 } },
     credentials,
-    setDefaults: (overlay: unknown) => { defaults = { revision: 0, overlay, updatedAt: null, updatedBy: null }; },
+    setDefaults: (overlay: unknown) => { stored.set("defaults/v1", JSON.stringify({ revision: 0, overlay, updatedAt: null, updatedBy: null })); },
     setInventory: (value: unknown) => { inventory = value; },
     input: { containerId: "fixture-container", machineId, expectedDefaultsRevision: 0,
       accountPool: { anthropic: [{ scope: accountsScope(machineId, custodyId), credentialId: 7, identityKey: "fixture-identity" }] },
@@ -348,6 +355,90 @@ test("a harness launch seals its profile's mode and the Run's own lease beside t
   // The Agent's grant bounds the lease a renewal asks for; an omitted mode is the RPC harness.
   expect(await sealed(await harness.launch(ctx, run, agent(60_000), target)))
     .toEqual({ tui: false, lease: { expiresAt: createdAt + 120_000, lifetimeMs: 60_000 } });
+});
+
+/** A TUI Agent's Run launched as Manifold launches one, then bound to the session its launch returned. */
+async function launchedRun(f: { ctx: OmpContext; input: ActionInput<"reviewSession"> }, id = "fixture-run") {
+  const createdAt = 1_800_000_000_000;
+  const run = { id, agentId: "fixture-agent", session: null, createdAt, expiresAt: createdAt + 120_000 } as unknown as AgentRun;
+  const agent = { agentId: "fixture-agent", harness: OMP_PLUGIN_ID, grant: { maxRunLifetimeMs: 120_000 }, context: {
+    instructions: "Review the project", profile: { accountPool: f.input.accountPool, overlay: f.input.overlay, planYolo: false, tui: true } },
+  } as unknown as Agent;
+  const ctx = f.ctx as unknown as GuestCtx;
+  const launched = await harness.launch(ctx, run, agent, { containerId: f.input.containerId, machineId: f.input.machineId });
+  return { ctx, run: { ...run, session: launched.session } as AgentRun };
+}
+
+test("a Run's model resolves exactly when its own reviewed launch serves it, the same every time", async () => {
+  const f = launchFixture();
+  const { ctx, run } = await launchedRun(f);
+  const resolve = (provider: string, model: string) => harness.resolveModel!(ctx, run, { provider, model });
+  // The profile's model, and another the pinned catalog carries for the pool's one provider: the
+  // session can switch to it, as `controlRun` would.
+  for (const model of ["claude-sonnet-4-5", "claude-haiku-4-5"]) for (let attempt = 0; attempt < 2; attempt++)
+    expect(await resolve("anthropic", model)).toEqual({ provider: "anthropic", model });
+  // A provider the pool holds no credential for, an id the pinned catalog lacks, a thinking
+  // suffix a served id never carries, and names only an object's prototype has.
+  for (const [provider, model] of [["openai", "gpt-5"], ["anthropic", ABSENT_MODEL_ID], ["anthropic", "claude-sonnet-4-5:high"],
+    ["constructor", "claude-sonnet-4-5"], ["anthropic", "constructor"]] as const) for (let attempt = 0; attempt < 2; attempt++)
+    expect(await resolve(provider, model)).toBeNull();
+  // A provider whose catalog the gateway resolves live is the machine's to decide, so not even an
+  // id the pinned snapshot carries is confirmed for it, and neither is a live-listed one.
+  const pinned = bundledProbeModels().openrouter![0]!.id;
+  for (const id of [pinned, UNLISTED_MODEL_ID, UNLISTED_PUBLISHED_ID]) expect(servesModel(["openrouter"], "openrouter", id)).toBe(false);
+  expect(servesModel(["openrouter", "anthropic"], "anthropic", "claude-sonnet-4-5")).toBe(true);
+});
+
+test("a model resolves for no Run but the one launched: not another Run, Agent, session or launch", async () => {
+  const f = launchFixture();
+  const { ctx, run } = await launchedRun(f);
+  const served = { provider: "anthropic", model: "claude-sonnet-4-5" };
+  expect(await harness.resolveModel!(ctx, run, served)).toEqual(served);
+  const session = OmpSessionRefSchema.parse(run.session);
+  for (const other of [
+    { ...run, id: "another-run" },
+    { ...run, agentId: "another-agent" },
+    { ...run, createdAt: run.createdAt + 1 },
+    { ...run, session: null },
+    { ...run, session: { ...session, sessionId: randomUUID() } },
+    { ...run, session: { ...session, machineId: "another-machine" } },
+    { ...run, session: { ...session, harness: "another.harness" } },
+  ] as AgentRun[]) expect(await harness.resolveModel!(ctx, other, served)).toBeNull();
+  // Another Run of the same Agent answers from its own launch, never through the first Run's session.
+  const second = await launchedRun(f, "second-run");
+  expect(await harness.resolveModel!(ctx, second.run, served)).toEqual(served);
+  expect(await harness.resolveModel!(ctx, { ...second.run, session: run.session } as AgentRun, served)).toBeNull();
+});
+
+test("resolving a model reads the Run's launch record and nothing else: no job, write, action or emit", async () => {
+  const f = launchFixture();
+  const { run } = await launchedRun(f);
+  const before = new Map(f.stored);
+  const touched: string[] = [];
+  const ctx = new Proxy(f.ctx, {
+    get(target, property, receiver) {
+      if (property !== "storage") { touched.push(String(property)); return Reflect.get(target, property, receiver); }
+      return new Proxy(target.storage, { get(storage, verb) {
+        touched.push(`storage.${String(verb)}`);
+        return Reflect.get(storage, verb);
+      } });
+    },
+  }) as unknown as GuestCtx;
+  for (const model of ["claude-sonnet-4-5", ABSENT_MODEL_ID]) await harness.resolveModel!(ctx, run, { provider: "anthropic", model });
+  await harness.resolveModel!(ctx, { ...run, id: "another-run" }, { provider: "anthropic", model: "claude-sonnet-4-5" });
+  expect(touched).toEqual(["storage.get", "storage.get", "storage.get"]);
+  expect(f.stored).toEqual(before);
+});
+
+test("a launch prunes only launch records whose Runs can no longer be live", async () => {
+  const f = launchFixture();
+  // The fixture's clock reads 1: a record due at 1 is past, one due at 2 is not.
+  f.stored.set("runs/1/expired-run", "{}");
+  f.stored.set("runs/2/live-run", "{}");
+  await launchedRun(f);
+  // 25 leases of at most an hour: the first and AGENT_RUN_MAX_RENEWALS renewals.
+  expect([...f.stored.keys()].filter(key => key.startsWith("runs/")))
+    .toEqual(["runs/2/live-run", `runs/${1_800_000_000_000 + 25 * 3_600_000}/fixture-run`]);
 });
 
 test("a TUI launch refuses Plan-YOLO, and an installation that cannot seal a launch refuses every harness launch", async () => {

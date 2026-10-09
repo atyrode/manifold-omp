@@ -202,12 +202,25 @@ Manifold's harness lane for a hardened plugin hands `harness.launch` the V1 proj
 In TUI mode the harness wrapper alone holds the Run credential, the private control descriptor and a private IPC channel to the SDK child, and it never reads or writes terminal bytes. It adopts the Run through `ActionRunner` and never acknowledges the Run's policy, so the Run stays `pending_policy` and reaches no authority-bearing door. Manifold admits exactly two lifecycle doors for a pending Run on its own credential, `reportRunActivityV2` and `renewAgentRunV2` ([atyrode/manifold#1070](https://github.com/atyrode/manifold/issues/1070)), and the wrapper uses only those:
 
 - **Activity.** `idle` at bind, then `working`, `blocked` and `done` from the session's events. `blocked` is an operator dialog open in the TUI.
+- **Model.** The model the session serves, on the activity report after it changes: the first report once the session is up, then after every switch, whether a `controlRun` dial, the operator's own selector or a retry fallback made it. See [Run model](#run-model).
 - **Renewal.** At half of each lease, for the same lifetime, with the fixed justification `RENEWAL_JUSTIFICATION`. Each renewal's result supplies the next expiry. Manifold refuses a Run's 25th renewal (`AGENT_RUN_MAX_RENEWALS` is 24). Each renewal at half a lease extends the expiry by half a lease, so a Run stays attributed for about 13 leases: about 13 minutes for a 60 s lease, about 13 hours for the 1 h maximum.
 - **Settlement.** When the TUI exits, the wrapper reports `done` and finishes the Run: `completed` on exit code 0, otherwise `failed`, or `cancelled` when the job was cancelled.
 
-A refused renewal or report, Manifold's 24-renewal limit, an expired Run, the `ActionRunner` budget of 1024 activity reports, or more than 64 operator dialogs open at once stops that loop only. The TUI keeps running for the operator; the session simply stops being attributed to the Run.
+A refused renewal or report, Manifold's 24-renewal limit, an expired Run, the `ActionRunner` budget of 1024 activity reports per lease (each successful renewal starts the next), or more than 64 operator dialogs open at once stops that loop only. The TUI keeps running for the operator; the session simply stops being attributed to the Run. A refused model stops nothing.
 
-The first expiry comes from the sealed `lease` input, `HarnessLeaseSchema` `{ expiresAt, lifetimeMs }`. `harness.launch` reads it from the Run it launches: `lifetimeMs` is the smaller of the Agent grant's `maxRunLifetimeMs` and the Run's own lifetime, at least 60 s. It is an input because an adopted `ActionRunner` does not expose its Run's expiry ([atyrode/manifold#1071](https://github.com/atyrode/manifold/issues/1071)).
+The first expiry comes from the sealed `lease` input, `HarnessLeaseSchema` `{ expiresAt, lifetimeMs }`. `harness.launch` reads it from the Run it launches: `lifetimeMs` is the smaller of the Agent grant's `maxRunLifetimeMs` and the Run's own lifetime, at least 60 s. Since [atyrode/manifold#1078](https://github.com/atyrode/manifold/pull/1078) bind also reports the adopted Run's expiry, but no Manifold result carries the lease length, so the lease stays a sealed input.
+
+### Run model
+
+`Run.model` follows the model the TUI session serves ([atyrode/manifold#1071](https://github.com/atyrode/manifold/issues/1071)). The SDK child sends the wrapper the main agent's model at ready and on each of the session's `model_changed` events, once per change and only when it fits Manifold's `RunModelSchema`. The wrapper sends it as `model` on its next `reportRunActivityV2`, or reports the current activity again to carry it. It sends `model` only when bind's discovery shows that the hub's `core.access.reportRunActivityV2` input schema has a `model` property; an older hub would refuse the whole report as `invalid_args`, so there the wrapper reports activity alone, as before.
+
+Manifold asks the Run's own harness to confirm the model before it replaces `Run.model`. `harness.resolveModel` answers the exact reported model when the Run's reviewed launch serves it, and null otherwise:
+
+- **Served.** The launch's sealed account pool holds a credential for the provider, so the session registers it, and the pinned SDK catalog carries exactly that id under it. That is the catalog check a configured model passes at review. A provider whose catalog the gateway resolves live, OpenRouter, is the machine's to decide: the pinned snapshot can neither confirm nor rule out one of its ids, so no OpenRouter model is confirmed, not even one the snapshot carries, and `Run.model` keeps its last accepted value.
+- **The Run's own launch.** `harness.launch` retains a record under `runs/<deadline>/<runId>`: the Run's Agent, its session and the providers its sealed pool registers. A Run with no record, or whose Agent or session differs from the record's, is answered null. The deadline is the Run's creation plus 25 hours, its first lease and 24 renewals of at most an hour each; a later launch deletes the records past their deadline, unread.
+- **Read-only and deterministic.** The resolver reads that one record and nothing else: no job, write, action or emit. The same Run, launch record and model always get the same answer.
+
+A refused model refuses the whole report, so the wrapper reports the activity again alone, and `Run.model` keeps its last accepted value. The runner reports only a denial's rule. A `refused` denial is the Run's harness answering this model, `run_model_unavailable` or another deterministic answer, so the wrapper does not send that model again until the session changes model. Any other outcome, such as an `unavailable` guest that was busy or past its deadline, or no answer at all, leaves the model pending, and the next report carries it again. Runs launched by an earlier OMP version have no record, so a model reported for them is refused; their own wrappers never report one.
 
 ### Live dials: `controlRun`
 
@@ -218,13 +231,13 @@ The first expiry comes from the sealed `lease` input, `HarnessLeaseSchema` `{ ex
 - **Authority: human sponsorship.** Only the Run's launcher or a sponsor of its Agent, root included, turns its dials. The door refuses every Agent principal before it reads anything, `omp_run_control_forbidden`: the Run's own credential, so a session's model never chooses its own model; another Run; and an Agent runner. Manifold's Run-input rule, the one `sendRunInput` uses, then admits the human caller to the Run's terminal input.
 - **Refusals.** `omp_session_unavailable`: no started harness terminal the caller may address. `omp_model_unavailable`: a model the session does not serve, after one discovery refresh. `omp_run_control_unsupported`: a headless RPC harness. `omp_run_control_unconfirmed`: no answer within 20 s, so the change may still apply.
 
-The door writes one `control` frame to the Run's private control descriptor, the channel `sendRunInput` uses. Job input is one-way, so the harness answers on the job's progress under the stage `control <frame id>`, and the door waits for that stage. The session selects only among models it already serves, so a dial cannot widen the reviewed account pool. Subagent and role models are unchanged. `Run.model` keeps its launch value until Manifold accepts a model reported by the harness ([atyrode/manifold#1071](https://github.com/atyrode/manifold/issues/1071)); show the dials `controlRun` returns.
+The door writes one `control` frame to the Run's private control descriptor, the channel `sendRunInput` uses. Job input is one-way, so the harness answers on the job's progress under the stage `control <frame id>`, and the door waits for that stage. The session selects only among models it already serves, so a dial cannot widen the reviewed account pool. Subagent and role models are unchanged. A model switch reaches `Run.model` through the activity report described in [Run model](#run-model), so `listRunsV2` and `inspectRunV2` show it shortly after the door answers.
 
 The job owner forwards at most one progress line every 5 s (`JOB_PROGRESS_INTERVAL_MS`) and keeps only the newest, so the TUI harness holds each answer until 5 s after the previous one, after its change applied; the frames behind it wait in order. Changes sent together are therefore answered 5 s apart, and from the fifth on an answer can outlast the door's 20 s.
 
 `sendRunInput` text reaches the TUI as an operator follow-up. Abort and dialog answers belong to the operator's keyboard, so the TUI harness ignores those frames.
 
-The native gate proves this path end to end (`scripts/verify-native-harness.ts`): `launchRun` for a `tui: true` Agent, the status line before and after `controlRun`, a turn on the new dials, activity reports, a renewal past the first lease while the Run stays `pending_policy`, refusal of an Agent principal, and settlement on exit.
+The native gate proves this path end to end (`scripts/verify-native-harness.ts`): `launchRun` for a `tui: true` Agent, the status line before and after `controlRun`, `Run.model` in `inspectRunV2` and `listRunsV2` at launch and after the switch, a turn on the new dials, activity reports, a renewal past the first lease while the Run stays `pending_policy`, refusal of an Agent principal, and settlement on exit.
 
 ## One-shot inference limits
 
@@ -284,12 +297,15 @@ Any copy forked from this store keeps its custody id: a restored backup, or a co
 
 ## Repository gate
 
-The SDK pin and reusable workflow reference advance together. The protocol 57 pin stamps
-every packed bundle `builtAgainst["manifold:protocol"] = "57"` under hardened contract 12.
-A protocol 57 host admits only bundles stamped 57 and holds older installed bundles as
-`repack_required`, so the three bundles are replaced together with the host; no earlier
-stamp is retained. The local native gate below still has to prove the newly packed family,
-not just the host.
+The SDK pin and reusable workflow reference advance together. The pin, Manifold
+`82605419` ([atyrode/manifold#1078](https://github.com/atyrode/manifold/pull/1078)), stamps
+every packed bundle `builtAgainst["manifold:protocol"] = "57"` under hardened contract 13,
+the contract that adds the harness `resolveModel`. A hub older than `82605419` does not admit a
+contract-13 stamp, so the 0.2.0 bundles need a hub at Manifold `82605419` or later: upgrade the
+hub first. A protocol 57 host admits only bundles stamped 57 and holds older
+installed bundles as `repack_required`, so the three bundles are replaced together with the
+host; no earlier stamp is retained. The local native gate below still has to prove the newly
+packed family, not just the host.
 
 Use Bun **1.4.2** and a clean sibling `manifold` checkout at the revision in `plugins/MANIFOLD_REV`. From `plugins/`:
 

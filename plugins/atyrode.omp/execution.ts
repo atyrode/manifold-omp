@@ -141,10 +141,12 @@ function splitThinking(reference: string): { bare: string; level: ThinkingLevel 
   return level.success ? { bare: reference.slice(0, colon), level: level.data } : { bare: reference, level: undefined };
 }
 
+/** The providers a session launched with this pool registers: each one holding a credential. */
+export function registeredProviders(pool: RuntimeAccountPool): string[] {
+  return Object.keys(pool).filter(provider => pool[provider]!.length > 0);
+}
 export function nativeModelConfiguration(pool: RuntimeAccountPool, overlay?: Overlay) {
-  const selected = Object.keys(pool).filter(
-    (provider) => pool[provider]!.length > 0,
-  );
+  const selected = registeredProviders(pool);
   if (
     selected.length === 0 ||
     selected.some((provider) => !providers.includes(provider))
@@ -275,6 +277,18 @@ function checkOverlay(overlay: Overlay, pool: RuntimeAccountPool) {
     models[index] = `${provider}/${resolved.id}`;
   }
   return models;
+}
+/**
+ * Whether a session that registers `registered` serves `provider/id`, as far as this build can
+ * confirm it: the session registers the provider, the provider's catalog is the pinned snapshot,
+ * and that snapshot carries exactly that id under it. That is `checkOverlay`'s catalog question
+ * for a model the session already runs, so no thinking suffix applies. For a provider whose
+ * catalog the gateway resolves live (`LIVE_CATALOG_PROVIDERS`), the machine decides what is
+ * served and the snapshot can neither confirm nor rule out an id, so no model of it is confirmed.
+ */
+export function servesModel(registered: readonly string[], provider: string, id: string): boolean {
+  return registered.includes(provider) && LIVE_CATALOG_PROVIDERS[provider] !== true && Object.hasOwn(registry, provider) &&
+    registry[provider]!.some(identity => identity.id === id);
 }
 function boundedInput(input: Record<string, string | number | boolean>) {
   if (Buffer.byteLength(JSON.stringify(input)) > 65536)

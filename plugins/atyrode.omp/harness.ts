@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { ServerHarness, GuestCtx, GuestJobNode } from "@manifold/plugin-kit/server";
-import { PublicJobSchema } from "@manifold/protocol";
+import { AGENT_RUN_MAX_LIFETIME_MS, AGENT_RUN_MAX_RENEWALS, PublicJobSchema, type AgentRun } from "@manifold/protocol";
 import {
-  OMP_PLUGIN_ID, OmpHarnessProfileSchema, OmpSessionRefSchema, SessionInputSchema, TargetSchema,
+  OMP_PLUGIN_ID, OmpHarnessProfileSchema, OmpSessionRefSchema, RuntimeAccountPoolSchema, SessionInputSchema, TargetSchema,
   OmpHarnessTargetSchema, type ActionInput, type ActionResult,
 } from "../api/index.ts";
-import { prepareHarnessSession } from "./execution.ts";
+import { prepareHarnessSession, registeredProviders, servesModel } from "./execution.ts";
 import { readDefaults } from "./state.ts";
 import { sessionInventory } from "./sessions.ts";
 import {
@@ -38,6 +38,28 @@ async function writeControlFrame(ctx: OmpContext, node: GuestJobNode, seq: numbe
   await ctx.jobs.input({ node, requestId: await ctx.newId(), seq, data: data.toString("base64"), eof: false });
 }
 
+/**
+ * What `resolveModel` reads of a launched Run, and all it reads: the session its reviewed launch
+ * bound and the providers that launch's sealed account pool registers. Only `launch` writes it.
+ */
+const LaunchedRunSchema = z.strictObject({
+  agentId: z.string().min(1).max(128),
+  session: OmpSessionRefSchema,
+  providers: z.array(z.string().min(1).max(128)).max(1024),
+});
+const LAUNCHES = "runs/";
+/** No Run outlives its creation by more than its first lease and every renewal, each at most an hour. */
+const RUN_SPAN_MS = (AGENT_RUN_MAX_RENEWALS + 1) * AGENT_RUN_MAX_LIFETIME_MS;
+/** The key leads with the time past which the Run can report no model, so a later launch prunes it unread. */
+const launchKey = (run: AgentRun) => `${LAUNCHES}${run.createdAt + RUN_SPAN_MS}/${run.id}`;
+
+async function retainLaunch(ctx: GuestCtx, run: AgentRun, launched: z.infer<typeof LaunchedRunSchema>): Promise<void> {
+  const now = ctx.now();
+  for (const key of await ctx.storage.keys(LAUNCHES))
+    if (Number(key.slice(LAUNCHES.length, key.indexOf("/", LAUNCHES.length))) <= now) await ctx.storage.delete(key);
+  await ctx.storage.set(launchKey(run), JSON.stringify(LaunchedRunSchema.parse(launched)));
+}
+
 export const harness: ServerHarness<GuestCtx> = {
   profileSchema: OmpHarnessProfileSchema,
   async launch(ctx, run, agent, rawTarget) {
@@ -55,6 +77,8 @@ export const harness: ServerHarness<GuestCtx> = {
       ...target, ...profile, expectedDefaultsRevision: defaults.revision,
       prompt: agent.context.instructions ?? "",
     }), { tui, lease }, session);
+    const pool = RuntimeAccountPoolSchema.parse(JSON.parse(String(prepared.runtime.input.accountPool)));
+    await retainLaunch(ctx, run, { agentId: run.agentId, session: prepared.session, providers: registeredProviders(pool) });
     return { runtime: prepared.runtime, session: prepared.session, reviewDigest: prepared.reviewDigest };
   },
   async sessions(ctx, rawTarget) {
@@ -76,6 +100,21 @@ export const harness: ServerHarness<GuestCtx> = {
     const { node, seq } = await runHarnessJob(ctx, run.id);
     if (node.machineId !== session.machineId) throw new OmpRefusal("session_unavailable");
     await writeControlFrame(ctx, node, seq, { type: "prompt", message });
+  },
+  /**
+   * The reported model, exactly, when this Run's own reviewed launch serves it (`servesModel`), and
+   * null otherwise: for another Agent's or session's launch, a Run launched by no retained launch,
+   * or a model the launch's providers and the pinned catalog cannot establish. The answer depends
+   * on the Run, its launch record and the model alone. It reads that one record: no job, write or emit.
+   */
+  async resolveModel(ctx, run, model) {
+    const raw = await ctx.storage.get(launchKey(run));
+    if (raw === null) return null;
+    const launched = LaunchedRunSchema.parse(JSON.parse(raw));
+    const session = OmpSessionRefSchema.safeParse(run.session);
+    if (!session.success || launched.agentId !== run.agentId || launched.session.sessionId !== session.data.sessionId ||
+        launched.session.machineId !== session.data.machineId) return null;
+    return servesModel(launched.providers, model.provider, model.model) ? { provider: model.provider, model: model.model } : null;
   },
 };
 

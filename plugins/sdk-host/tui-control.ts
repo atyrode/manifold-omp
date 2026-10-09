@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { RunModelSchema } from "@manifold/protocol";
 import { sessionDials, type RunControlOutcome } from "../workers/harness/control.ts";
 import {
   TuiParentMessageSchema, type TuiActivityFrame, type TuiChildMessage, type TuiCommand,
@@ -50,10 +51,22 @@ export function parentChannel(stop: () => void): TuiChannel {
 }
 
 /** The terminal stays the operator's. The parent turns only the main agent's reviewed dials, adds
- * prompts as if typed, and observes activity; it never reads or writes terminal bytes. */
+ * prompts as if typed, and observes activity and the model the session serves; it never reads or
+ * writes terminal bytes. */
 export function attachTuiControl(session: TuiSession, setToolUIContext: SetToolUIContext, channel: TuiChannel, stop: () => void): TuiControl {
   const activity = (frame: TuiActivityFrame) => channel.send({ type: "tui_event", frame });
+  // Once per change of the main agent's model, whatever changed it: a dial, the operator's own
+  // selector or a retry fallback. A model `Run.model` cannot carry is not sent.
+  let served: string | undefined;
+  const serve = () => {
+    const model = RunModelSchema.safeParse(session.model && { provider: session.model.provider, model: session.model.id });
+    const key = model.success ? JSON.stringify(model.data) : undefined;
+    if (!model.success || key === served) return;
+    served = key;
+    channel.send({ type: "tui_model", model: model.data });
+  };
   const unsubscribe = session.subscribe(event => {
+    if (event.type === "model_changed") serve();
     if (!Object.hasOwn(forwarded, event.type)) return;
     activity(event.type === "agent_end" ? { type: "agent_end", willContinue: event.isTerminal === false }
       : { type: event.type as Exclude<TuiActivityFrame["type"], "agent_end" | "extension_ui_request"> });
@@ -99,7 +112,10 @@ export function attachTuiControl(session: TuiSession, setToolUIContext: SetToolU
   });
   return {
     setToolUIContext: (ui: UIContext, hasUI: boolean) => setToolUIContext(observeDialogs(ui, activity), hasUI),
-    ready: () => channel.send({ type: "tui_ready" }),
+    ready() {
+      channel.send({ type: "tui_ready" });
+      serve();
+    },
     close() {
       unsubscribe();
       stopListening();

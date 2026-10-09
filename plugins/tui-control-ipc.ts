@@ -1,11 +1,12 @@
 import { z } from "zod";
+import { RunModelSchema } from "@manifold/protocol";
 import { ControlRunInputSchema, RunDialsSchema } from "./api/index.ts";
 import { RunControlRefusalSchema } from "./workers/harness/control.ts";
 
 // The private channel between the TUI harness wrapper and its SDK child. The wrapper alone holds
 // the Run credential and the control descriptor. This channel carries only the reviewed dials,
-// operator-equivalent prompts and activity-relevant event names: never transcript bytes, terminal
-// input, session identities, paths or credentials.
+// the model the session serves, operator-equivalent prompts and activity-relevant event names:
+// never transcript bytes, terminal input, session identities, paths or credentials.
 export const TuiCommandSchema = z.discriminatedUnion("type", [
   z.strictObject({ type: z.literal("control"), model: ControlRunInputSchema.shape.model, thinking: ControlRunInputSchema.shape.thinking }),
   z.strictObject({ type: z.literal("prompt"), message: z.string().min(1).max(16384), streamingBehavior: z.enum(["steer", "followUp"]) }),
@@ -26,6 +27,8 @@ export type TuiActivityFrame = z.infer<typeof TuiActivityFrameSchema>;
 
 export const TuiChildMessageSchema = z.discriminatedUnion("type", [
   z.strictObject({ type: z.literal("tui_ready") }),
+  /** The model the session serves, sent once per change: Manifold's `Run.model` shape. */
+  z.strictObject({ type: z.literal("tui_model"), model: RunModelSchema }),
   z.strictObject({ type: z.literal("tui_event"), frame: TuiActivityFrameSchema }),
   z.strictObject({ type: z.literal("tui_result"), id: z.uuid(), outcome: z.discriminatedUnion("ok", [
     z.strictObject({ ok: z.literal(true), dials: RunDialsSchema }),
