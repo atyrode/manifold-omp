@@ -73,8 +73,11 @@ async function priorFamily(destination: string): Promise<Record<string, string>>
   return snapshot(destination);
 }
 
-// Compare the private copied graph with the original source in another process and cwd.
-// Output ordering alone does not exercise checkout-layout or identifier-minifier drift.
+// Compare the private copied graph with the original source in another process, cwd and
+// environment. Output ordering alone does not exercise checkout-layout or identifier-minifier
+// drift. This file runs under bun test's NODE_ENV=test, as verify's in-unit pack does; the
+// child packs with neither NODE_ENV nor BUN_ENV, as release.yml's host `bun run pack` does,
+// so bytes that followed the packer's environment would differ from the bytes verify proves.
 async function packWithReorderedAssets(destination: string) {
   const script = `
     const originalBuild = Bun.build;
@@ -96,7 +99,8 @@ async function packWithReorderedAssets(destination: string) {
   `;
   const child = Bun.spawn([process.execPath, "--no-install", "--eval", script], {
     cwd: source, stdin: "ignore", stdout: "pipe", stderr: "pipe",
-    env: { ...process.env, OMP_PACK_REORDER: JSON.stringify({ source, destination }) },
+    env: { ...Object.fromEntries(Object.entries(process.env).filter(([name]) => name !== "NODE_ENV" && name !== "BUN_ENV")),
+      OMP_PACK_REORDER: JSON.stringify({ source, destination }) },
   });
   const [exit, stdout, stderr] = await Promise.all([
     child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),

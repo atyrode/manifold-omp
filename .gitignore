@@ -1,5 +1,4 @@
 node_modules/
 plugins/dist/
 plugins/.omp-native-pack-*/
-plugins/.omp-worker-output/
 plugins/.runtime-cache/

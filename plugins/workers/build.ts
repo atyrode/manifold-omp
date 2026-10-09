@@ -548,16 +548,26 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
         });
       },
     };
-    const outputDirectory = join(root, ".omp-worker-output");
+    // No outdir: Bun's artifacts for an outdir build are file-backed, so their bytes would be
+    // re-read from a fixed path in the checkout that any other build there can rewrite first.
+    // In memory, the embedded bytes are exactly the bytes this build produced.
     const result = await Bun.build({
-      entrypoints: [join(root, source)], outdir: outputDirectory,
+      entrypoints: [join(root, source)],
       naming: { entry: `${name}.js`, asset: `${name}-assets/[name]-[hash].[ext]` },
       // Identical-input workers differed with optional minification enabled,
       // even without identifier renaming. Keep only whitespace compaction.
       target: "bun", format: "esm", splitting: false,
       minify: { whitespace: true, syntax: false, identifiers: false },
       sourcemap: "none", packages: "bundle", plugins: [...(legacyPlugin ? [legacyPlugin] : []), plugin],
-      define: { "process.env.PI_DOCS_EMBED": JSON.stringify(docs) },
+      // Bun.build inlines `process.env.NODE_ENV` and `process.env.BUN_ENV` from the packing
+      // process's environment. A worker is a production artifact whatever that environment is
+      // (the kit defines NODE_ENV the same way for server and web members), so its bytes
+      // cannot follow the packer.
+      define: {
+        "process.env.PI_DOCS_EMBED": JSON.stringify(docs),
+        "process.env.NODE_ENV": JSON.stringify("production"),
+        "process.env.BUN_ENV": JSON.stringify("production"),
+      },
       // The resolver binds OMP packages to the selected prepared graph and
       // leaves the pinned Manifold SDK's transitive graph with its owner.
       tsconfig: join(root, "tsconfig.json"),
@@ -567,7 +577,7 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
     if (!entry) throw new Error(`Missing worker entrypoint: ${name}`);
     for (const output of result.outputs) {
       if (output === entry) continue;
-      const member = relative(outputDirectory, resolve(output.path)).split(sep).join("/");
+      const member = output.path.startsWith("./") ? output.path.slice(2) : output.path;
       const prefix = `${name}-assets/`;
       if (output.kind !== "asset" || assets.has(member) || !member.startsWith(prefix) ||
           !/^(?:template-[a-z0-9]+\.(?:css|html|js)|tool-views\.generated-[a-z0-9]+\.js|CHANGELOG-[a-z0-9]+\.md)$/.test(member.slice(prefix.length)))
