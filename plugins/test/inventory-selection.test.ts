@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   OMP_VERSION,
+  gatewayModelRefusal,
   PROBE_MODEL_LIMIT,
   parseBenchmarkInput,
   parseBenchmarkObservation,
@@ -158,4 +159,22 @@ test("every provider wording for an unknown or unserved model is a settled answe
   expect(status("Your plan does not support this model")).toBe("client_blocked");
   expect(status("model_not_found")).toBe("not_found");
   expect(status("upstream timed out")).toBe("unresolved");
+});
+
+test("the gateway's word for a provider's answer settles only the model it names", () => {
+  const status = (error: string) => {
+    const built = reportFor("vendor/model", error);
+    return parseBenchmarkObservation(built.raw, built.input, 1_700_000_000_001, 1_700_000_000_002).results[0]!.status;
+  };
+  expect(status(gatewayModelRefusal("model_not_found", 404, "openrouter/vendor/model"))).toBe("not_found");
+  expect(status(gatewayModelRefusal("model_not_entitled", 400, "openrouter/vendor/model"))).toBe("client_blocked");
+  // About another model, or of a kind outside the contract, it settles nothing — even though the
+  // provider-wording patterns would otherwise read a `model_not_found` in it.
+  expect(status(gatewayModelRefusal("model_not_found", 404, "openrouter/vendor/other"))).toBe("unresolved");
+  expect(status("gateway_model_refused model_gone 404 openrouter/vendor/model")).toBe("unresolved");
+  // A kind outside the contract whose name the provider-wording pattern alone would settle.
+  expect(status("gateway_model_refused not_found 404 openrouter/vendor/model")).toBe("unresolved");
+  // Only a 4xx is a provider's answer to the request; a 5xx naming the model is not one.
+  expect(status("gateway_model_refused model_not_found 503 openrouter/vendor/model")).toBe("unresolved");
+  expect(status("gateway_unavailable")).toBe("unresolved");
 });

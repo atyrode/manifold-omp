@@ -14,6 +14,43 @@ export const PROBE_MODEL_LIMIT = 256;
  */
 export const GATEWAY_DISCOVERY_TIMEOUT_MS = 60_000;
 /**
+ * A PROVIDER'S DEFINITE ANSWER ABOUT ONE MODEL, as the gateway names it to its caller, and the
+ * benchmark status each one settles.
+ *
+ * The gateway answers every other upstream failure with the one word `gateway_unavailable`,
+ * and `omp bench` reports nothing of a failure but that word. A provider saying a model does
+ * not exist, or that this pool's account may not use it, arrived as the same word as a broken
+ * credential or a rate limit, so the probe could only call it `unresolved` — and one unresolved
+ * candidate refuses the whole derived catalog.
+ *
+ * `model_not_entitled` settles `client_blocked`, not `not_found`: the model exists and is
+ * published, and what excludes it is the caller's account, like a data-policy exclusion.
+ */
+const gatewayModelRefusals = { model_not_found: "not_found", model_not_entitled: "client_blocked" } as const;
+export type GatewayModelRefusal = keyof typeof gatewayModelRefusals;
+const GATEWAY_MODEL_REFUSED = "gateway_model_refused";
+/**
+ * The gateway's whole failure word for one: a fixed label, the kind, the upstream's status and
+ * the published model it is about. Never the provider's text, request id, account or URL.
+ */
+export function gatewayModelRefusal(kind: GatewayModelRefusal, status: number, address: string): string {
+  return `${GATEWAY_MODEL_REFUSED} ${kind} ${String(status)} ${address}`;
+}
+/**
+ * What a gateway model refusal settles for the candidate at `address`; undefined when `error`
+ * is not one. The word decides alone: a refusal naming another model, or a kind this contract
+ * does not hold, is no answer about this candidate, and the provider-wording patterns that
+ * follow it must not read one into its `model_not_found`.
+ */
+function gatewayModelRefusalStatus(error: string, address: string): "not_found" | "client_blocked" | "unresolved" | undefined {
+  if (!error.startsWith(`${GATEWAY_MODEL_REFUSED} `)) return undefined;
+  // A refusal is the provider's answer to the request, so only a 4xx status is one.
+  const match = /^\S+ ([a-z_]+) (4[0-9]{2}) /.exec(error);
+  if (!match || !Object.hasOwn(gatewayModelRefusals, match[1]!)) return "unresolved";
+  const kind = match[1] as GatewayModelRefusal;
+  return error === gatewayModelRefusal(kind, Number(match[2]), address) ? gatewayModelRefusals[kind] : "unresolved";
+}
+/**
  * An OMP `enabledModels` entry that admits exactly one configured model reference.
  *
  * OMP matches a plain pattern with fuzzy and substring fallbacks once the exact id is absent,
@@ -192,6 +229,9 @@ export function parseBenchmarkObservation(raw: unknown, inputValue: unknown, sta
     if (!run.ok) {
       if (row.stats !== null) throw new ProbeError("invalid_observation");
       // Raw error text is inspected privately and is never retained in receipts.
+      // Through the gateway, a provider's answer about the model arrives only as its fixed word.
+      const refused = gatewayModelRefusalStatus(run.error, probeAddress(candidate));
+      if (refused) return failure(refused);
       if (/claude_code_version_too_old|does not support this model/i.test(run.error)) return failure("client_blocked");
       // Providers name an unknown or unentitled model in several ways; every one is a definite
       // answer about that model, and an `unresolved` one would stop the whole derived catalog.
