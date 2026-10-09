@@ -1,7 +1,7 @@
 import { constants, closeSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, writeSync, type Stats } from "node:fs";
 import { z } from "zod";
 import {
-  AgentRegistry, AuthStorage, InteractiveMode, ModelRegistry, SessionManager, Settings,
+  AgentRegistry, AuthStorage, InteractiveMode, ModelRegistry, SessionManager, Settings, VERSION,
   createAgentSession, loadSkillsFromDir, type Skill, type CreateAgentSessionResult,
 } from "@oh-my-pi/pi-coding-agent";
 import type { SettingsOptions } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -41,6 +41,8 @@ try {
   const rpc = kind === "rpc" || kind === "rpc-resume";
   // An Agent's TUI harness: the stock renderer owns the terminal, the private IPC parent turns its dials.
   const tui = kind === "tui" || kind === "tui-resume";
+  // The stock InteractiveMode renders these sessions; print and RPC replies are read as text.
+  const terminal = kind === "interactive" || kind === "resume" || tui;
   const sessionRoot = kind === "print" || materialOnly ? "/outputs/session" : SESSIONS_ROOT;
   const automation = readAutomation();
   const restricted = automation.mode === "restricted";
@@ -152,7 +154,9 @@ try {
   created = await createAgentSession({
     cwd, agentDir: PROBE_AGENT, settings, authStorage: auth, modelRegistry: registry,
     sessionManager: manager, agentRegistry: new AgentRegistry(), ...admitted,
-    hasUI: kind === "interactive" || kind === "resume" || tui,
+    hasUI: terminal,
+    // Since 18.8 only a TUI transcript is told it can draw Mermaid, SVG and table charts.
+    tuiTranscript: terminal,
     // Prompt-cache warming spends provider requests no one is waiting on; one-shots never keep it.
     cacheWarming: kind !== "print" && !materialOnly,
     ...(restricted || skillsRuntime.mode === "disabled" ? { skills } : {}),
@@ -201,7 +205,7 @@ try {
       });
     } else {
       control = tui ? attachTuiControl(created.session, created.setToolUIContext, parentChannel(cancel), cancel) : undefined;
-      mode = new InteractiveMode(created.session, "18.4.12", undefined, control?.setToolUIContext ?? created.setToolUIContext,
+      mode = new InteractiveMode(created.session, VERSION, undefined, control?.setToolUIContext ?? created.setToolUIContext,
         created.lspServers, created.mcpManager, created.eventBus, undefined, created.subagentEventBus);
       await mode.init();
       if (resume) await mode.renderInitialMessages();

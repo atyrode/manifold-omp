@@ -30,6 +30,7 @@ import rootManifest from "../atyrode.omp/manifest.json";
 import sdkRuntimeArtifacts from "../sdk-host/runtime-artifacts.json";
 import { OPENROUTER_LISTING_TEMPLATE } from "../workers/gateway/template.ts";
 import { ProbeModelsConfigSchema } from "../workers/probe/inputs.ts";
+import { ustar } from "./fixtures/ustar.ts";
 
 type JobInput = Record<string, string | number | boolean>;
 type JobNode = { kind: "job"; machineId: string; operationId: string; jobId: string };
@@ -98,32 +99,6 @@ function argvFor(operation: typeof launch, input: JobInput): string[] {
   return operation.argv
     .filter((slot) => !slot.when || input[slot.when.input] === slot.when.equals)
     .map((slot) => ("literal" in slot ? slot.literal : String(input[slot.input])));
-}
-
-/** Canonical POSIX ustar, as `JobOutputStore.seal` writes it: lexical files, two zero blocks. */
-function ustar(members: readonly (readonly [string, string])[]): Buffer {
-  const blocks: Buffer[] = [];
-  for (const [name, body] of members) {
-    const content = Buffer.from(body, "utf8");
-    const header = Buffer.alloc(512);
-    header.write(name, 0, 100, "utf8");
-    const octal = (value: number, offset: number, length: number) =>
-      header.write(`${value.toString(8).padStart(length - 1, "0")}\0`, offset, length, "ascii");
-    octal(0o600, 100, 8);
-    octal(0, 108, 8);
-    octal(0, 116, 8);
-    octal(content.length, 124, 12);
-    octal(0, 136, 12);
-    header.fill(32, 148, 156);
-    header[156] = 0x30;
-    header.write("ustar\0", 257, 6, "ascii");
-    header.write("00", 263, 2, "ascii");
-    let sum = 0;
-    for (const byte of header) sum += byte;
-    header.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, 8, "ascii");
-    blocks.push(header, content, Buffer.alloc((512 - (content.length % 512)) % 512));
-  }
-  return Buffer.concat([...blocks, Buffer.alloc(1024)]);
 }
 
 // A transcript in the shape omp 18.1.14 writes under --session-dir.
@@ -889,7 +864,7 @@ test("a one-shot holds every model role its configuration leaves unset to the co
   const job = await f.client.call("runSession", { ...advised, reviewDigest });
   if ("refused" in job) throw new Error(job.refused);
   const roles: Record<string, string> = JSON.parse(String(f.posted[0]!.input.config)).modelRoles;
-  // The chat roles of OMP 18.4.12, in the CLI and in the SDK host.
+  // The chat roles of OMP 18.8.6, in the CLI and in the SDK host.
   for (const role of ["default", "slow", "vision", "plan", "commit", "tiny", "memory", "task", "advisor"])
     expect(roles[role]).toBe(configured);
   // A role the operator configured keeps its model.

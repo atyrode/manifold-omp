@@ -15,7 +15,7 @@ const stages = {
 type Stage = keyof typeof stages;
 
 /** An observation only: never forwards event fields or interprets usage as activity.
- * The published 18.4.12 CLI and SDK-host print modes write one JSON event per line. Both
+ * The published 18.8.6 CLI and SDK-host print modes write one JSON event per line. Both
  * agent loops emit assistant message_start on provider stream start, but also
  * synthesize aborted/error boundaries without a stream. Exclude those starts.
  * Owner JobProgressCoalescer supplies observation time; repeated deltas must not

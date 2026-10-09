@@ -8,6 +8,7 @@ import {
   type ManifoldRef,
   type ServiceConfigurationRead,
 } from "@manifold/protocol";
+import { AuthBrokerClient } from "@oh-my-pi/pi-ai/auth-broker/client";
 import {
   ACCOUNTS_PLUGIN_ID,
   BROKER_OPERATION_ID,
@@ -893,7 +894,7 @@ test("broker recovery preserves the declared service contract revision", async (
   });
 });
 
-test("the broker policy admits every route the 18.4 gateway client sends, and nothing wider", () => {
+test("the broker policy admits every route the pinned gateway client sends, and nothing wider", async () => {
   const policy = buildSharedBrokerPolicy({
     scope: "instance", pluginId: ACCOUNTS_PLUGIN_ID, operationId: BROKER_OPERATION_ID, ...pins,
     input: { clientAccess: { literal: "{}" } },
@@ -906,6 +907,18 @@ test("the broker policy admits every route the 18.4 gateway client sends, and no
   // A healed block is cleared by exact scope, separately from clearing every block.
   expect(policy.operations["gateway-clear-block"]).toMatchObject({
     method: "DELETE", path: "/v1/credential/{credentialId}/block", request: { kind: "json" },
+  });
+  // The pinned client names the provider of a usage invalidation, and only that query.
+  const sent: URL[] = [];
+  const client = new AuthBrokerClient({ url: "http://broker.invalid", token: "fixture", maxRetries: 0,
+    fetchImpl: Object.assign(async (input: Parameters<typeof fetch>[0]) => {
+      sent.push(new URL(input instanceof Request ? input.url : String(input)));
+      return Response.json({ ok: true });
+    }, { preconnect: fetch.preconnect }) });
+  await client.notifyUsageStale("anthropic");
+  expect(sent.map(url => [url.pathname, [...url.searchParams.keys()]])).toEqual([["/v1/usage/stale", ["provider"]]]);
+  expect(policy.operations["gateway-usage-stale"]).toMatchObject({
+    method: "POST", path: "/v1/usage/stale", query: { provider: { type: "string", required: false, maxBytes: 128 } },
   });
   // The gateway binds exactly the operations the policy declares for it.
   const bound = gatewayManifest.machine.operations["atyrode.omp.gateway.serve"].services[0]!.operationIds;

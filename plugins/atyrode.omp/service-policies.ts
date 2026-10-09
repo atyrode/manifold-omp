@@ -34,7 +34,7 @@ export function buildSharedBrokerPolicy(runtime: ServiceRuntime): ServicePolicy 
   ]);
   metadata.readable = true;
   metadata.requestHeaders = capabilities;
-  // 18.4.12 /v1/usage has generatedAt and reports, not snapshot credentials or
+  // 18.8.6 /v1/usage has generatedAt and reports, not snapshot credentials or
   // health tombstones. Preserve identity/quota leaves consumed by normalizeBrokerUsage.
   const usage = projected("GET", "/v1/usage", [
     ["generatedAt"], ["reports", "*", "provider"], ["reports", "*", "fetchedAt"],
@@ -77,6 +77,10 @@ export function buildSharedBrokerPolicy(runtime: ServiceRuntime): ServicePolicy 
   // moments ago. The proxy refuses any undeclared query, so the one value is declared.
   const refresh = credentialProxy("POST", "refresh");
   refresh.query = { reason: { type: "string", required: false, maxBytes: 16, enum: ["auth-recovery"] } };
+  // The 18.8.6 client names the provider of a usage invalidation (`?provider=`), so the broker
+  // drops only that provider's reports. The undeclared-query refusal would lose the notice.
+  const usageStale = proxy("POST", "/v1/usage/stale");
+  usageStale.query = { provider: { type: "string", required: false, maxBytes: 128 } };
   return ServicePolicySchema.parse({ serviceId: BROKER_SERVICE_ID, revision: "1", runtime,
     maxConcurrent: 16, operations: { metadata, usage, "clear-blocks": clearBlocks, disable,
       "gateway-snapshot": snapshot, "gateway-snapshot-stream": snapshotStream, "gateway-usage": gatewayUsage,
@@ -84,7 +88,7 @@ export function buildSharedBrokerPolicy(runtime: ServiceRuntime): ServicePolicy 
       // A healed block is cleared by exact scope since OMP 18.4, not with every block of the credential.
       "gateway-clear-block": credentialProxy("DELETE", "block", json),
       "gateway-block": credentialProxy("POST", "block", json), "gateway-clear-blocks": credentialProxy("DELETE", "blocks"),
-      "gateway-usage-stale": proxy("POST", "/v1/usage/stale"), "gateway-usage-observed": proxy("POST", "/v1/usage/observed", json),
+      "gateway-usage-stale": usageStale, "gateway-usage-observed": proxy("POST", "/v1/usage/observed", json),
     } });
 }
 

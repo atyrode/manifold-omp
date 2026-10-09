@@ -15,9 +15,9 @@
     "deps:prepare": "bun --no-install workers/build.ts --prepare-dependencies"
   },
   "dependencies": {
-    "@oh-my-pi/pi-ai": "18.8.0",
-    "@oh-my-pi/pi-catalog": "18.8.0",
-    "@oh-my-pi/pi-utils": "18.8.0",
+    "@oh-my-pi/pi-ai": "18.8.6",
+    "@oh-my-pi/pi-catalog": "18.8.6",
+    "@oh-my-pi/pi-utils": "18.8.6",
     "zod": "4.4.3"
   },
   "devDependencies": {
@@ -27,6 +27,6 @@
     "typescript": "^5.9.3"
   },
   "patchedDependencies": {
-    "@oh-my-pi/pi-ai@18.8.0": "patches/@oh-my-pi%2Fpi-ai@18.8.0.patch"
+    "@oh-my-pi/pi-ai@18.8.6": "patches/@oh-my-pi%2Fpi-ai@18.8.6.patch"
   }
 }

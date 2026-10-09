@@ -57,7 +57,7 @@ const brokerIdentity = z.object({
 });
 
 /**
- * The 18.4.12 broker's GET /v1/usage payload. Unknown report metadata, notes and
+ * The 18.8.6 broker's GET /v1/usage payload. Unknown report metadata, notes and
  * provider response/error bodies are deliberately stripped, never echoed.
  * Optional health arrays accept separately sanctioned native health facts.
  */

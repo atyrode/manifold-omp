@@ -18,12 +18,14 @@ function word(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
 }
 const INVENTORY_OPERATION_ID = `${OMP_PLUGIN_ID}.inventory`;
+/** OpenAI's catalog is large and Anthropic's carries Claude Haiku 5.5, which no OMP before 18.8.6 lists. */
+const SYNTHETIC_PROVIDERS = ["openai", "anthropic"] as const;
 
 /**
  * An inventory posted through the public doors starts the packed gateway as its job-scoped
  * runtime service under the real native owner, which refuses that child unless the inventory's
- * timeout covers the gateway's (#109). The pool holds one synthetic unpaid credential, and
- * listing models makes no inference call, so no provider is contacted.
+ * timeout covers the gateway's (#109). The pool holds one synthetic unpaid credential per
+ * provider, and listing models makes no inference call, so no provider is contacted.
  */
 export async function verifyNativeInventory({ hub, target, broker, client }: {
   hub: Parameters<typeof ownerAction>[0];
@@ -64,22 +66,25 @@ export async function verifyNativeInventory({ hub, target, broker, client }: {
     return `${word(job.state)}-${String(job.result?.exitCode ?? "none")}`;
   }
   let originalServices: ServiceConfiguration | undefined;
-  let credential: { id: number; reference: AccountReference } | undefined;
+  const credentials: { id: number; reference: AccountReference }[] = [];
   let inventory: PublicJob | undefined;
   let failed = false;
   try {
-    // Existing broker client ingress owns this one synthetic slot.
+    // Existing broker client ingress owns these synthetic slots.
     const before = new Set((await call("accounts", {})).accounts.map(account => account.credentialId));
-    const upload = await fetch(`${broker.origin}/v1/credential`, {
-      method: "POST", headers: { authorization: `Bearer ${broker.bearer}`, "content-type": "application/json" },
-      body: JSON.stringify({ provider: "openai", credential: { type: "api_key", key: "SYNTHETIC-UNPAID-NATIVE-INVENTORY-PROOF" } }),
-      signal: AbortSignal.timeout(5000),
-    });
-    check(upload.ok, "synthetic-account-upload");
-    await upload.body?.cancel();
-    const account = (await call("accounts", {})).accounts.find(value => !before.has(value.credentialId));
-    check(account && account.reference.provider === "openai" && !account.disabled, "synthetic-account-unobserved");
-    credential = { id: account.credentialId, reference: account.reference };
+    for (const provider of SYNTHETIC_PROVIDERS) {
+      const upload = await fetch(`${broker.origin}/v1/credential`, {
+        method: "POST", headers: { authorization: `Bearer ${broker.bearer}`, "content-type": "application/json" },
+        body: JSON.stringify({ provider, credential: { type: "api_key", key: "SYNTHETIC-UNPAID-NATIVE-INVENTORY-PROOF" } }),
+        signal: AbortSignal.timeout(5000),
+      });
+      check(upload.ok, `synthetic-${provider}-upload`);
+      await upload.body?.cancel();
+    }
+    const accounts = (await call("accounts", {})).accounts.filter(value => !before.has(value.credentialId));
+    credentials.push(...accounts.map(account => ({ id: account.credentialId, reference: account.reference })));
+    check(accounts.length === SYNTHETIC_PROVIDERS.length && accounts.every(account => !account.disabled) &&
+      SYNTHETIC_PROVIDERS.every(provider => accounts.some(account => account.reference.provider === provider)), "synthetic-account-unobserved");
 
     await deploy(GATEWAY_PLUGIN_ID, GATEWAY_OPERATION_ID, "gateway");
     originalServices = ServiceConfigurationReadSchema.parse(await ownerAction(hub, "engine.services.readConfiguration", { machineId: target.machineId })).configuration;
@@ -100,7 +105,8 @@ export async function verifyNativeInventory({ hub, target, broker, client }: {
     await deploy(OMP_PLUGIN_ID, INVENTORY_OPERATION_ID, "inventory");
 
     inventory = await call("startInventory", { ...target, expectedDefaultsRevision: (await call("readDefaults", {})).revision,
-      accountPool: { openai: [{ scope: account.reference.scope, credentialId: account.credentialId, identityKey: account.identityKey }] } });
+      accountPool: Object.fromEntries(accounts.map(account => [account.reference.provider,
+        [{ scope: account.reference.scope, credentialId: account.credentialId, identityKey: account.identityKey }]])) });
     const node = { kind: "job", machineId: target.machineId, operationId: INVENTORY_OPERATION_ID, jobId: inventory.jobId };
     const settled = await waitFor(async () => {
       const value = PublicJobSchema.parse(await ownerAction(hub, "engine.jobs.status", { node }));
@@ -133,7 +139,11 @@ export async function verifyNativeInventory({ hub, target, broker, client }: {
       `gateway-${word(child.state)}-${word(result?.reason ?? String(result?.exitCode ?? "none"))}`);
     check(settled.state === "exited" && settled.result?.exitCode === 0, `job-${await ending(settled)}`);
     const receipt = await call("readInventory", { ...target, jobId: settled.jobId });
-    check(receipt.inventory.models.length > 0 && receipt.inventory.models.every(model => model.provider === "openai"), "receipt-models");
+    const addresses = receipt.inventory.models.map(model => `${model.provider}/${model.id}`);
+    check(addresses.some(address => address.startsWith("openai/")) &&
+      receipt.inventory.models.every(model => SYNTHETIC_PROVIDERS.some(provider => provider === model.provider)), "receipt-models");
+    // The packed runtime's own `omp models --json --no-extensions` lists the model released with 18.8.6.
+    check(addresses.includes("anthropic/claude-haiku-5-5"), "receipt-claude-haiku-5-5");
   } catch (error) {
     failed = true;
     throw error;
@@ -148,7 +158,7 @@ export async function verifyNativeInventory({ hub, target, broker, client }: {
       await ownerAction(hub, "engine.services.configureConfiguration", { machineId: target.machineId,
         expectedRevision: current.configuration.revision, policies: originalServices.policies });
     } catch { cleanupFailed = true; }
-    if (credential) try {
+    for (const credential of credentials) try {
       await call("disableCredential", { containerId: target.containerId, reference: credential.reference, credentialId: credential.id });
     } catch { cleanupFailed = true; }
     // A cleanup failure must not mask the assertion that failed first.
