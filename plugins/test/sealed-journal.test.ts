@@ -39,6 +39,9 @@ test("a cancelled call is sealed unknown, or left pending when the job's kill la
   expect(sealedToolResult([...head, ...call("uncertain"), exit], "uncertain", true)).toEqual({ ok: true });
   expect(sealedToolResult([...head, ...call("other"), ...call("uncertain").slice(0, 1)], "uncertain", true))
     .toEqual({ ok: false, code: "journal-tool-result-missing-uncertain-az" });
+  // Only the cancelled call's own marker counts: another call's start excuses nothing.
+  expect(sealedToolResult([...head, ...call("uncertain").slice(0, 1), ...call("other").slice(1)], "uncertain", true))
+    .toEqual({ ok: false, code: "journal-tool-result-missing-uncertain-asz" });
   expect(sealedToolResult([...head, ...call("uncertain"), result("uncertain"), result("uncertain", "interrupted")], "uncertain", true))
     .toEqual({ ok: false, code: "journal-tool-result-replayed-2-uncertain-asrrz" });
   // A completed call is never excused by a start marker.
