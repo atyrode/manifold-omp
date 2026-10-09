@@ -220,7 +220,7 @@ Manifold asks the Run's own harness to confirm the model before it replaces `Run
 - **The Run's own launch.** `harness.launch` retains a record under `runs/<deadline>/<runId>`: the Run's Agent, its session and the providers its sealed pool registers. A Run with no record, or whose Agent or session differs from the record's, is answered null. The deadline is the Run's creation plus 25 hours, its first lease and 24 renewals of at most an hour each; a later launch deletes the records past their deadline, unread.
 - **Read-only and deterministic.** The resolver reads that one record and nothing else: no job, write, action or emit. The same Run, launch record and model always get the same answer.
 
-A refused model refuses the whole report, so the wrapper reports the activity again alone and does not send that model again until the session changes model. `Run.model` keeps its last accepted value. Runs launched by an earlier OMP version have no record, so their reported models are refused, and their wrappers never send one.
+A refused model refuses the whole report, so the wrapper reports the activity again alone, and `Run.model` keeps its last accepted value. The runner reports only a denial's rule. A `refused` denial is the Run's harness answering this model, `run_model_unavailable` or another deterministic answer, so the wrapper does not send that model again until the session changes model. Any other outcome, such as an `unavailable` guest that was busy or past its deadline, or no answer at all, leaves the model pending, and the next report carries it again. Runs launched by an earlier OMP version have no record, so a model reported for them is refused; their own wrappers never report one.
 
 ### Live dials: `controlRun`
 

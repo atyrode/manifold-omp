@@ -12,8 +12,9 @@ const settle = () => new Promise<void>(resolve => setImmediate(resolve));
 beforeEach(() => { jest.useFakeTimers(); });
 afterEach(() => { jest.useRealTimers(); });
 
-/** What the hub answers one call: a result frame, no result frame at all, or a thrown runner error. */
-type Answer = { ok: true; expiresAt?: number } | { ok: false } | "silent" | "throw";
+/** What the hub answers one call: a result frame, refused under a rule (`forbidden` unless named), no
+ * result frame at all, or a thrown runner error. */
+type Answer = { ok: true; expiresAt?: number } | { ok: false; rule?: "refused" | "unavailable" | "forbidden" } | "silent" | "throw";
 
 /**
  * An adopted `ActionRunner` as the lifecycle drives it: each call emits its result frame before it
@@ -52,7 +53,7 @@ function lifecycleFixture(options: {
     if (value === "throw") throw new Error("fixture-transport-failed");
     if (value === "silent") return;
     lifecycle.observe(ActionRunnerResponseSchema.parse({ type: "result", id, runId, door, target: MANIFOLD_ROOT_URI, traceId: 1,
-      outcome: value.ok ? { ok: true } : { ok: false, denial: { rule: "forbidden" } },
+      outcome: value.ok ? { ok: true } : { ok: false, denial: { rule: value.rule ?? "forbidden" } },
       ...("expiresAt" in value && value.expiresAt !== undefined ? { expiresAt: value.expiresAt } : {}) }));
   }
   return {
@@ -227,8 +228,9 @@ test("the session's model rides one report per change: the first after launch, t
   expect(f.sent.slice(4)).toEqual(["done openai/gpt-5"]);
 });
 
-test("a refused model is not sent again, its activity is reported alone, and reporting and renewal go on", async () => {
-  const f = lifecycleFixture({ activity: (_, model) => model === "openai/o3" ? { ok: false } : { ok: true } });
+test("a model the Run's harness refuses is not sent again, its activity is reported alone, and reporting and renewal go on", async () => {
+  // `refused` is the harness's own answer, as `run_model_unavailable` reaches the runner.
+  const f = lifecycleFixture({ activity: (_, model) => model === "openai/o3" ? { ok: false, rule: "refused" } : { ok: true } });
   f.discover(true);
   f.lifecycle.start();
   f.lifecycle.report("idle");
@@ -253,6 +255,26 @@ test("a refused model whose activity is refused alone too ends reporting, as any
   f.lifecycle.report("working");
   await settle();
   expect(f.sent).toEqual(["idle", "idle openai/o3", "idle"]);
+});
+
+test.each([
+  ["an unavailable guest", { ok: false, rule: "unavailable" }],
+  ["a refusal under another rule", { ok: false, rule: "forbidden" }],
+  ["no answer", "silent"],
+] as const)("a model met by %s rides the next report again, the first one at ready included", async (_, answer) => {
+  const f = lifecycleFixture({ activity: count => count === 2 ? answer : { ok: true } });
+  f.discover(true);
+  f.lifecycle.report("idle");
+  await settle();
+  f.lifecycle.serve(gpt5);
+  await settle();
+  // Its activity still goes, alone.
+  expect(f.sent).toEqual(["idle", "idle openai/gpt-5", "idle"]);
+  f.lifecycle.track({ type: "agent_start" });
+  f.lifecycle.track({ type: "agent_end", willContinue: false });
+  await settle();
+  // Accepted on the next report, then settled.
+  expect(f.sent.slice(3)).toEqual(["working openai/gpt-5", "done"]);
 });
 
 test("a hub whose discovered activity door takes no model is never sent one", async () => {

@@ -45,9 +45,9 @@ export class RunLifecycle {
   #modelReports = false;
   /** The latest activity reported, which a model change reports again to carry the model. */
   #current: OmpActivity = "idle";
-  /** The model the session serves now, and the last one a report carried, accepted or refused. */
+  /** The model the session serves now, and the last one a report settled: accepted, or refused by the Run's harness. */
   #served: RunModel | undefined;
-  #sent: string | undefined;
+  #settled: string | undefined;
   constructor(
     private readonly runner: LifecycleRunner,
     private readonly runId: string,
@@ -106,22 +106,30 @@ export class RunLifecycle {
   #enqueue(activity: OmpActivity, onlyWithModel: boolean): void {
     this.#tail = this.#tail.then(async () => {
       if (!this.#reporting || this.runner.closed) return;
-      const model = this.#served !== undefined && JSON.stringify(this.#served) !== this.#sent ? this.#served : undefined;
+      const key = this.#served === undefined ? undefined : JSON.stringify(this.#served);
+      const model = key !== this.#settled ? this.#served : undefined;
       if (model === undefined && onlyWithModel) return;
       if (model !== undefined) {
-        // Once per change, even refused: a refused model refuses the whole report, so the
-        // activity goes again alone and `Run.model` keeps its last accepted value.
-        this.#sent = JSON.stringify(model);
-        if (await this.#reported({ runId: this.runId, activity, model })) return;
+        const outcome = await this.#reported({ runId: this.runId, activity, model });
+        if (outcome?.ok === true) {
+          this.#settled = key;
+          return;
+        }
+        // A refused model refuses the whole report, so the activity goes again alone and `Run.model`
+        // keeps its last accepted value. The runner reports only the denial's rule: `refused` is the
+        // Run's harness answering this model (`run_model_unavailable` and the other deterministic
+        // answers), so it is not sent again until the session changes model. Any other outcome, such
+        // as an `unavailable` guest that was busy or past its deadline, leaves it to the next report.
+        if (outcome?.denial.rule === "refused") this.#settled = key;
       }
-      if (!await this.#reported({ runId: this.runId, activity })) this.#reporting = false;
+      if ((await this.#reported({ runId: this.runId, activity }))?.ok !== true) this.#reporting = false;
     }).catch(() => { this.#reporting = false; });
   }
 
-  async #reported(input: { runId: string; activity: OmpActivity; model?: RunModel }): Promise<boolean> {
+  async #reported(input: { runId: string; activity: OmpActivity; model?: RunModel }): Promise<ResultFrame["outcome"] | undefined> {
     this.#result = undefined;
     await this.runner.reportActivity(input);
-    return (this.#result as ResultFrame | undefined)?.outcome.ok === true;
+    return (this.#result as ResultFrame | undefined)?.outcome;
   }
 
   #schedule(expiresAt: number): void {
