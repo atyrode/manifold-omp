@@ -67,9 +67,12 @@ function modelRefusal(text: string, status: number | undefined, model: Model<Api
     if (envelope?.type === "error" && envelope.error?.type === "not_found_error" && envelope.error.message === `model: ${requested}`)
       return { kind: "model_not_found", status };
   }
-  // The SDK's own exact test for Codex refusing the requested model to a ChatGPT account's plan.
-  // Its WebSocket form arrives with no status; the HTTP form of the same denial is a 400.
-  if (isCodexChatGPTAccountPolicyError(text, model.provider, requested)) return { kind: "model_not_entitled", status: status ?? 400 };
+  // The SDK's own test for Codex refusing the requested model to a ChatGPT account's plan. Note
+  // that it compares the denied and requested ids ignoring case and any `vendor/` namespace.
+  // The denial carries its own status, none over WebSocket and 400 over HTTP; any other status
+  // is a different failure that happens to quote the sentence, and stays opaque.
+  if ((status === undefined || status === 400) && isCodexChatGPTAccountPolicyError(text, model.provider, requested))
+    return { kind: "model_not_entitled", status: 400 };
   return null;
 }
 

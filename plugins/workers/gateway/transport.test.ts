@@ -862,6 +862,10 @@ describe("a provider's answer about the requested model", () => {
       [anthropic, { errorMessage: notFound("model: claude-opus-4-0") }],
       // Codex refusing a model this stream did not ask for.
       [codex, { errorMessage: "Codex error event: The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account. (code=invalid_request_error)" }],
+      // The right sentence under a status the denial never carries: another failure quoting it.
+      [codex, { errorStatus: 503, errorMessage: "Codex error event: The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account. (code=invalid_request_error)" }],
+      // Anthropic's not-found envelope naming this model, but from a model that is not Anthropic's.
+      [codex, { errorStatus: 404, errorMessage: notFound("model: gpt-6-sol") }],
     ];
     for (const [model, reported] of resembling)
       expect(await project(model, reported)).toBe("gateway_unavailable");

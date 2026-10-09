@@ -44,7 +44,8 @@ export function gatewayModelRefusal(kind: GatewayModelRefusal, status: number, a
  */
 function gatewayModelRefusalStatus(error: string, address: string): "not_found" | "client_blocked" | "unresolved" | undefined {
   if (!error.startsWith(`${GATEWAY_MODEL_REFUSED} `)) return undefined;
-  const match = /^\S+ ([a-z_]+) ([1-5][0-9]{2}) /.exec(error);
+  // A refusal is the provider's answer to the request, so only a 4xx status is one.
+  const match = /^\S+ ([a-z_]+) (4[0-9]{2}) /.exec(error);
   if (!match || !Object.hasOwn(gatewayModelRefusals, match[1]!)) return "unresolved";
   const kind = match[1] as GatewayModelRefusal;
   return error === gatewayModelRefusal(kind, Number(match[2]), address) ? gatewayModelRefusals[kind] : "unresolved";

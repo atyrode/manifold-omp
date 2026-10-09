@@ -172,5 +172,9 @@ test("the gateway's word for a provider's answer settles only the model it names
   // provider-wording patterns would otherwise read a `model_not_found` in it.
   expect(status(gatewayModelRefusal("model_not_found", 404, "openrouter/vendor/other"))).toBe("unresolved");
   expect(status("gateway_model_refused model_gone 404 openrouter/vendor/model")).toBe("unresolved");
+  // A kind outside the contract whose name the provider-wording pattern alone would settle.
+  expect(status("gateway_model_refused not_found 404 openrouter/vendor/model")).toBe("unresolved");
+  // Only a 4xx is a provider's answer to the request; a 5xx naming the model is not one.
+  expect(status("gateway_model_refused model_not_found 503 openrouter/vendor/model")).toBe("unresolved");
   expect(status("gateway_unavailable")).toBe("unresolved");
 });
