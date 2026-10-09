@@ -42,6 +42,11 @@ try {
   phase = "pack";
   const bundles = await pack(join(root, "bundles"));
   check(bundles.length === expectedFamily.length && bundles.every((bundle, index) => bundle.id === expectedFamily[index]), "unexpected-packed-family");
+  // The family proven below is byte for byte the family being published.
+  phase = "release-binding";
+  const expectedSums = process.env.OMP_VERIFY_EXPECTED_SUMS;
+  check(expectedSums && isAbsolute(expectedSums) && await readFile(join(root, "bundles", "SHA256SUMS"), "utf8") === await readFile(expectedSums, "utf8"),
+    "packed-family-differs-from-release");
   const policyFile = join(root, "agent-policy.txt");
   await writeFile(policyFile, "Disposable native proof policy A.\n", { mode: 0o600 });
   phase = "server-start";

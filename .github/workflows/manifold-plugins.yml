@@ -16,9 +16,14 @@ jobs:
   plugins:
     # This workflow and MANIFOLD_REV pin the same verified native SDK revision.
     # The reusable job installs only CI containment fixtures; this repository
-    # has no fleet-daemon installation or production/release deployment job.
+    # has no fleet-daemon installation or deployment job. release.yml publishes
+    # a tag's verified bundles as release assets and installs nothing; this gate
+    # packs and verifies the same way, so verify's in-unit pack must reproduce
+    # the host pack's SHA256SUMS on every change, not first at a tag.
     uses: atyrode/manifold/.github/workflows/plugins.yml@cd75fbba6d4601fee14267f17e1594429ae17bc3
     with:
       plugins-dir: plugins
       prepare-command: bun --no-env-file --no-install workers/build.ts --prepare-dependencies && bun --no-env-file --no-install scripts/prepare-ci.ts
-      pack-verify-command: OMP_CONSUMER_SOURCE=github:${{ github.repository }}#${{ github.event.pull_request.head.sha || github.sha }} bun --no-env-file --no-install scripts/verify.ts
+      pack-verify-command: |
+        bun run pack
+        OMP_VERIFY_EXPECTED_SUMS="$PWD/dist/SHA256SUMS" OMP_CONSUMER_SOURCE=github:${{ github.repository }}#${{ github.event.pull_request.head.sha || github.sha }} bun --no-env-file --no-install scripts/verify.ts

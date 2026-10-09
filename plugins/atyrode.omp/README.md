@@ -278,6 +278,7 @@ bun run deps:prepare
 bun run check
 bun test
 bun run pack
+OMP_VERIFY_EXPECTED_SUMS="$PWD/dist/SHA256SUMS" \
 OMP_VERIFY_SYSTEM=/absolute/path/system.json \
 OMP_VERIFY_BWRAP=/absolute/path/bwrap \
 MANIFOLD_TEST_STATIC_BUSYBOX=/absolute/path/static-busybox \
@@ -285,6 +286,23 @@ OMP_VERIFY_SYSTEMD_MODE=user bun run verify
 ```
 
 `system.json` is an explicit native runtime-tool library declaration for the host. Verify creates its own disposable delegated systemd cgroup and, following Manifold's runtime gate, a private user/mount namespace with a 1 MiB, 4,096-inode tmpfs for governed output leases. `unshare` must be available; the reusable CI fixture already supplies static BusyBox. No host-root mount, fleet daemon or real credential value is involved. A failing native gate is not equivalent to successful packaging.
+
+Verify packs the family again inside that unit and proves the bundles it packed. It requires `OMP_VERIFY_EXPECTED_SUMS`, an absolute path to the `SHA256SUMS` of the pack being published: it freezes that file and refuses with `packed-family-differs-from-release` unless its own pack reproduces it byte for byte, so the bundles in `dist/` are the bundles proven. Without it, verify refuses with `invalid-expected-sums` before any work. Hosted CI packs and verifies this way on every change.
+
+## Releases
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`. Tag `v<version>` on a commit `main` has, where `<version>` is the version the three family manifests and the root `package.json` carry. The workflow refuses any other tag before the gate runs.
+
+The `bundles` job checks out the tagged commit beside Manifold at `plugins/MANIFOLD_REV` and runs the gate above with Bun 1.4.2 on the CI fixtures, as hosted CI does: frozen installs, Manifold's real machine-jobs proof, dependency preparation, both typechecks, `bun test`, `bun run pack`, then `scripts/verify.ts` bound to the packed `SHA256SUMS` and installing the public API from GitHub at the tagged commit. This job can only read the repository.
+
+The `release` job is the only one granted `contents: write`, and it runs no repository code. It requires `SHA256SUMS` to verify and to name exactly the packed bundles, every bundle's `manifest.version` to equal the tag's version, and the tag to still name the commit `bundles` built. It then runs `gh release create <tag> --verify-tag --generate-notes` with four assets:
+
+- `atyrode.omp.manifold-plugin.json`
+- `atyrode.omp.accounts.manifold-plugin.json`
+- `atyrode.omp.gateway.manifold-plugin.json`
+- `SHA256SUMS`, which lists the three in installation order: parent, accounts, gateway.
+
+`native-requirements.json` is a pack report and is not attached. The workflow installs nothing on any hub. A refused tag, failed gate or failed check creates no release. Re-run the failed jobs of a transient failure; anything that needs a fix is released under a new tag, because a pushed tag is never moved.
 
 ## Published SDK packaging
 
