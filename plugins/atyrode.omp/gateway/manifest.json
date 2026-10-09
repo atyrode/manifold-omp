@@ -1,6 +1,6 @@
 {
   "id": "atyrode.omp.gateway",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "title": "omp gateway",
   "description": "Independent OMP gateway over governed native Manifold resources.",
   "capabilities": ["containers:read", "containers:write", "jobs:read", "machines:read", "machines:run", "services:read", "services:configure"],

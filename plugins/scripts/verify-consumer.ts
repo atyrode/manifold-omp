@@ -2,6 +2,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import consumerPackage from "../../package.json";
 
 const pluginsRoot = resolve(import.meta.dir, "..");
 const repositoryRoot = resolve(pluginsRoot, "..");
@@ -33,7 +34,7 @@ if (source === undefined) {
   ]);
   if (packCode !== 0)
     throw new Error(`consumer package failed: ${packError.trim()}`);
-  source = `file:${join(root, "atyrode-manifold-omp-0.1.0.tgz")}`;
+  source = `file:${join(root, `atyrode-manifold-omp-${consumerPackage.version}.tgz`)}`;
 }
 try {
   await writeFile(

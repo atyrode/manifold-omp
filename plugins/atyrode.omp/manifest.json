@@ -1,6 +1,6 @@
 {
   "id": "atyrode.omp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "title": "omp",
   "description": "Independent OMP execution over governed native Manifold resources. Restricted automation uses the supported OMP 18.8.6 SDK registry with explicit tool names and no delegation. Operator resume preserves persisted exact model/thinking unless explicitly overridden; missing or incompatible state refuses before inference. Placement independently authorizes its container and terminal.",
   "capabilities": [

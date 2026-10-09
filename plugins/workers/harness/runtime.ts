@@ -449,8 +449,9 @@ export async function runOmpHarness(context: WorkerContext): Promise<boolean> {
  * alone keeps the Run credential, the private control descriptor and a private IPC channel to the
  * child, and never reads or writes terminal bytes. It never acknowledges the Run's policy: the
  * session's model has no Manifold tool, so the Run stays pending and reaches no authority-bearing
- * door, while renewal and activity run on its own credential from launch. Losing the Run stops
- * renewal and reporting, never the operator's TUI.
+ * door, while renewal and activity, with the model the session serves, run on its own credential
+ * from launch. Losing the Run stops renewal and reporting, and a refused model stops neither;
+ * none of them stops the operator's TUI.
  */
 export async function runOmpHarnessTui(context: WorkerContext): Promise<boolean> {
   const { signal } = context;
@@ -496,6 +497,7 @@ export async function runOmpHarnessTui(context: WorkerContext): Promise<boolean>
       const message = TuiChildMessageSchema.safeParse(raw);
       if (!message.success) { stop(); return; }
       if (message.data.type === "tui_ready") ready.resolve();
+      else if (message.data.type === "tui_model") lifecycle.serve(message.data.model);
       else if (message.data.type === "tui_result") {
         pending.get(message.data.id)?.(message.data.outcome);
         pending.delete(message.data.id);

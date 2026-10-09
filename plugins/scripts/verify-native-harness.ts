@@ -5,9 +5,9 @@ import { parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import type { AssistantMessage, AssistantMessageEvent } from "@oh-my-pi/pi-ai/types";
 import {
   AgentPolicyChallengeSchema, CreateRunV2CredentialResultSchema, CreateRunV2ResultSchema, InspectRunV2ResultSchema,
-  JobDeploymentReviewSchema, JobDeploymentSchema, JobDescriptionSchema, LaunchRunResultSchema, ListJobRunsResultSchema,
+  JobDeploymentReviewSchema, JobDeploymentSchema, JobDescriptionSchema, LaunchRunResultSchema, ListJobRunsResultSchema, ListRunsV2ResultSchema,
   MANIFOLD_ROOT_URI, PublicJobSchema, RegisterAgentV2ResultSchema, ServiceConfigurationReadSchema, ServicePolicySchema, canonicalJobJson,
-  formatManifoldUri, type RunActivity, type ServiceConfiguration,
+  formatManifoldUri, type RunActivity, type RunModel, type ServiceConfiguration,
 } from "@manifold/protocol";
 import type { SessionClient } from "@manifold/sdk";
 import { dispatch, ownerAction } from "../../../manifold/packages/plugin-kit/src/hub.ts";
@@ -33,9 +33,10 @@ const HIGH_O3 = /◒ o3\b/;
  * An Agent whose profile selects OMP's own terminal UI, launched as Code launches one: the
  * operator creates its Run, `core.access.launchRun` prepares the packed harness, and the
  * operator opens the returned runtime as a terminal. The harness never acknowledges the Run's
- * policy, so the Run stays `pending_policy` while it renews and reports activity on its own
- * credential (atyrode/manifold#1070). The operator turns the dials through `controlRun`, and
- * the TUI redraws them; an Agent principal is refused. Only inference is synthetic.
+ * policy, so the Run stays `pending_policy` while it renews and reports activity, with the model
+ * its session serves, on its own credential (atyrode/manifold#1070, #1071). The operator turns the
+ * dials through `controlRun`, the TUI redraws them and `Run.model` follows; an Agent principal is
+ * refused. Only inference is synthetic.
  */
 export async function verifyNativeHarness({ root, server, hub, target, broker, client }: {
   root: string;
@@ -203,6 +204,13 @@ export async function verifyNativeHarness({ root, server, hub, target, broker, c
     check(launched.runtime.operationId === HARNESS_OPERATION_ID && launched.runtime.input.tui === true
       && launched.session.harness === OMP_PLUGIN_ID && launched.destination.machineId === target.machineId, "launch-not-tui-harness");
     const inspect = async () => InspectRunV2ResultSchema.parse(await ownerAction(hub, "core.access.inspectRunV2", { runId })).run;
+    check(created.run.model === undefined, "run-model-preset");
+    const { agentId } = agent;
+    /** `Run.model` as inspection and the Agent's Run list both show it, once the harness resolved the session's report. */
+    const model = (expected: RunModel, code: string) => until(async () => {
+      const listed = ListRunsV2ResultSchema.parse(await ownerAction(hub, "core.access.listRunsV2", { agentId })).runs.find(run => run.id === runId);
+      return JSON.stringify((await inspect()).model) === JSON.stringify(expected) && JSON.stringify(listed?.model) === JSON.stringify(expected);
+    }, `model-${code}`);
 
     phase = "terminal";
     canvas = await connect(server, { containerId: target.containerId, token: hub.ownerKey, reconnect: false });
@@ -252,6 +260,8 @@ export async function verifyNativeHarness({ root, server, hub, target, broker, c
     // The TUI opens on the profile's dials. The Run reports `idle` on its own credential before any acknowledgement.
     await until(async () => (await screen()).some(row => LOW_GPT5.test(row)), "status-before-dial", 120_000);
     await activity("idle", "idle-at-launch");
+    // The session's first model, reported once it serves one and accepted by the Run's own harness.
+    await model({ provider: "openai", model: "gpt-5" }, "at-launch");
     const job = await waitFor(async () => {
       const listed = ListJobRunsResultSchema.parse(await ownerAction(hub, "engine.jobs.listRuns", {
         machineId: target.machineId, pluginId: OMP_PLUGIN_ID, operationId: HARNESS_OPERATION_ID }));
@@ -264,8 +274,13 @@ export async function verifyNativeHarness({ root, server, hub, target, broker, c
     const dials = await controlRun(hub.ownerKey, { runId, model: "openai/o3", thinking: "high" });
     check(typeof dials === "object" && dials.model === "openai/o3" && dials.thinking === "high", "dials-not-applied");
     await until(async () => (await screen()).some(row => HIGH_O3.test(row)), "status-after-dial", 10_000);
+    // The confirmed switch reaches `Run.model`, while the Run still awaits its policy and stays idle.
+    await model({ provider: "openai", model: "o3" }, "after-dial");
+    check((await inspect()).state === "pending_policy", "model-report-acknowledged-policy");
+    await activity("idle", "idle-after-dial");
     // A model the session does not serve changes nothing and says so.
     check(await controlRun(hub.ownerKey, { runId, model: "openai/not-served" }) === "omp_model_unavailable", "unserved-model-not-refused");
+    await model({ provider: "openai", model: "o3" }, "after-unserved-dial");
 
     phase = "authority";
     // HUMAN SPONSORSHIP: an Agent principal that Manifold admits to ordinary doors, this Agent's
@@ -303,6 +318,7 @@ export async function verifyNativeHarness({ root, server, hub, target, broker, c
     held.resolve();
     await activity("done", "done-after-renewal");
     check(JSON.stringify(turns.get("NATIVE-HARNESS-TURN-2")) === JSON.stringify({ model: "openai/o3", thinking: "high" }), "dials-lost-on-renewal");
+    await model({ provider: "openai", model: "o3" }, "after-renewal");
 
     phase = "exit";
     // The operator quits the TUI; the harness settles its Run.
