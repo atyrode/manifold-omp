@@ -4,10 +4,10 @@ import { OMP_VERSION, parseBenchmarkObservation, type BenchmarkReceipt, type Pro
 /**
  * What `omp bench` reports of one failed run: the error event's `errorMessage`, or a thrown
  * failure's message, and nothing else. Status, `errorId` and provider never reach the report,
- * so this one string is all the probe can classify. Mirrors `runOnce` in OMP v18.4.12
- * `packages/coding-agent/src/cli/bench-cli.ts`, the probe's pinned binary; that function, the
- * pi-native client and its event stream are byte-identical through 18.8.0, the SDK these tests
- * load, so `streamPiNative` here is the client the binary runs.
+ * so this one string is all the probe can classify. Mirrors `runOnce` in OMP v18.8.6
+ * `packages/coding-agent/src/cli/bench-cli.ts`, the probe's pinned binary; this is the SDK these
+ * tests load, and that function, the pi-native client and its event stream are byte-identical
+ * since 18.4.12, so `streamPiNative` here is the client the binary runs.
  */
 export async function benchFailure(stream: AssistantMessageEventStream): Promise<string | null> {
   try {
