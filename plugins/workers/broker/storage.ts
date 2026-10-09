@@ -68,6 +68,9 @@ export class NativeBrokerStorage extends AuthStorage {
       // A caller supplies the SDK operation, not a native copy of provider
       // dispatch. Retain its raw lifetime beyond the SDK's request deadline.
       refreshOAuthCredential: (...args) => this.#own(() => refresh(...args), true),
+      // That operation exchanges the token in this process, as the stock `omp auth-broker serve`
+      // does, so an auth-recovery refresh may reuse a token minted moments ago (SDK 18.8.5+).
+      refreshOAuthCredentialMints: true,
     });
     this.custodyId = custodyId;
   }
