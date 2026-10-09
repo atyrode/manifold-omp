@@ -280,13 +280,14 @@ function checkOverlay(overlay: Overlay, pool: RuntimeAccountPool) {
 }
 /**
  * Whether a session that registers `registered` serves `provider/id`, as far as this build can
- * establish it: the session registers the provider, and the pinned catalog carries exactly that id
- * under it. That is `checkOverlay`'s catalog question for a model the session already runs, so no
- * thinking suffix applies. A model only a live listing carries cannot be established from the
- * snapshot and is not served here.
+ * confirm it: the session registers the provider, the provider's catalog is the pinned snapshot,
+ * and that snapshot carries exactly that id under it. That is `checkOverlay`'s catalog question
+ * for a model the session already runs, so no thinking suffix applies. For a provider whose
+ * catalog the gateway resolves live (`LIVE_CATALOG_PROVIDERS`), the machine decides what is
+ * served and the snapshot can neither confirm nor rule out an id, so no model of it is confirmed.
  */
 export function servesModel(registered: readonly string[], provider: string, id: string): boolean {
-  return registered.includes(provider) && Object.hasOwn(registry, provider) &&
+  return registered.includes(provider) && LIVE_CATALOG_PROVIDERS[provider] !== true && Object.hasOwn(registry, provider) &&
     registry[provider]!.some(identity => identity.id === id);
 }
 function boundedInput(input: Record<string, string | number | boolean>) {

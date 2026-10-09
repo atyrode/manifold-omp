@@ -382,10 +382,11 @@ test("a Run's model resolves exactly when its own reviewed launch serves it, the
   for (const [provider, model] of [["openai", "gpt-5"], ["anthropic", ABSENT_MODEL_ID], ["anthropic", "claude-sonnet-4-5:high"],
     ["constructor", "claude-sonnet-4-5"], ["anthropic", "constructor"]] as const) for (let attempt = 0; attempt < 2; attempt++)
     expect(await resolve(provider, model)).toBeNull();
-  // A live-listed id is served only by a listing this build cannot read, so it is never established.
+  // A provider whose catalog the gateway resolves live is the machine's to decide, so not even an
+  // id the pinned snapshot carries is confirmed for it, and neither is a live-listed one.
   const pinned = bundledProbeModels().openrouter![0]!.id;
-  expect(servesModel(["openrouter"], "openrouter", pinned)).toBe(true);
-  for (const id of [UNLISTED_MODEL_ID, UNLISTED_PUBLISHED_ID]) expect(servesModel(["openrouter"], "openrouter", id)).toBe(false);
+  for (const id of [pinned, UNLISTED_MODEL_ID, UNLISTED_PUBLISHED_ID]) expect(servesModel(["openrouter"], "openrouter", id)).toBe(false);
+  expect(servesModel(["openrouter", "anthropic"], "anthropic", "claude-sonnet-4-5")).toBe(true);
 });
 
 test("a model resolves for no Run but the one launched: not another Run, Agent, session or launch", async () => {
