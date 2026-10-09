@@ -263,6 +263,20 @@ The provenance CAS is the creator's last step before its hub execute, and nothin
 
 A key with `agentTools` refuses `omp_posting_key_agent_tools_unsupported`: a Run-bound session carries a fresh random session id, so its request cannot be repeated. Calls without a key are unchanged.
 
+## Accounts scope and custody
+
+Every account reference, account pool slot and accounts observation carries a `scope`. The scope names custody of the broker's credential store: SHA-256 over native canonical JSON of `{ serviceId, machineId, custodyId }`. `serviceId` is the broker service `atyrode.omp.accounts.broker`, `machineId` its owner, and `custodyId` a random v4 UUID kept inside the store's own SQLite database, in the native-owned `manifold_custody` table. The broker's metadata read, native ingress's `GET /v1/custody/snapshot`, is the stock snapshot with `custodyId` added, so the id arrives in the same response as the credential ids it qualifies. The stock `/v1/snapshot` that the gateway and existing clients read is unchanged.
+
+- **Kept** across broker restarts, disable and enable, and every `promoteAccountRuntime` over the same store, including the promotion each OMP accounts upgrade needs. Saved references, exclusions and pools keep resolving.
+- **Changed** by a new store, a store the SDK recreates after corruption, a purged, deleted or replaced database, or a broker on another owner machine. A database copied in from another store carries that store's id, or none and receives a new one; a copy forked from this same store is the exception below. Credential ids are unique only within one store, so a reference never resolves against another store's slot.
+- **First start.** A store that predates the id receives one when an upgraded broker first opens it, so every scope changes once, at the promotion that installs this broker. From the moment this OMP version is admitted until that promotion, every read refuses `omp_account_runtime_outdated`. A consumer that rebinds saved references, such as Code's `rebind-scope`, therefore takes its fresh `previous` `accounts` observation **before** this version is admitted and reads `current` after the promotion. Agent harness profiles carry an explicit `accountPool` and have no rebind path: save each one once after the promotion.
+
+The configuration revision is no longer part of the scope. It still binds consistency: reads within one action, session reviews and retained inventory provenance pin the revision, so a promotion between them refuses instead of mixing two brokers' answers. With no ready broker, or a broker that returns no snapshot, an observation is `unavailable` with no accounts, and its scope digests `custodyId: null`, which never equals a store's scope. A broker running a policy promoted by an older OMP version returns no custody id: `accounts`, `usage`, credential actions and every account selection refuse `omp_account_runtime_outdated` until the broker is promoted. Metadata that is not a snapshot object, or a malformed custody id, refuses `omp_invalid_accounts`.
+
+The broker opens the store through the SDK, then reads custody through a second connection by path. OMP sign-in shares the store, and its corruption recovery can replace the file between the two opens. The broker therefore requires the same file identity (device, inode and birth time) before the SDK open and after the custody read. A new store has no file before its first open, and the SDK's own recovery replaces the file it opens, so the broker reopens once; a file that changes again refuses to start.
+
+Any copy forked from this store keeps its custody id: a restored backup, or a copy that diverged elsewhere and returns to the same owner. It is treated as this same store, so an API-key slot created on the other branch of the fork can be issued again under the same scope. Delete the `manifold_custody` row before such a copy's first broker start to give it new custody.
+
 ## Repository gate
 
 The SDK pin and reusable workflow reference advance together. The protocol 57 pin stamps

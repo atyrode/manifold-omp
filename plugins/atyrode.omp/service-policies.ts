@@ -26,7 +26,8 @@ function credentialProxy(method: ServiceProxyOperationPolicy["method"], suffix: 
 export function buildSharedBrokerPolicy(runtime: ServiceRuntime): ServicePolicy {
   if (runtime.scope !== "instance" || runtime.pluginId !== ACCOUNTS_PLUGIN_ID || runtime.operationId !== BROKER_OPERATION_ID)
     throw new Error("Invalid shared broker runtime");
-  const metadata = projected("GET", "/v1/snapshot", [
+  // The store's custody id, the accounts scope's basis, arrives with the credential ids it qualifies.
+  const metadata = projected("GET", "/v1/custody/snapshot", [["custodyId"],
     ["credentials", "*", "id"], ["credentials", "*", "provider"], ["credentials", "*", "identityKey"],
     ["credentials", "*", "credential", "type"], ["credentials", "*", "credential", "email"],
     ["credentials", "*", "blocks", "*", "blockScope"], ["credentials", "*", "blocks", "*", "blockedUntilMs"],

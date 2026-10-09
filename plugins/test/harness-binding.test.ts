@@ -9,6 +9,7 @@ import {
   ACCOUNTS_PLUGIN_ID, BROKER_SERVICE_ID, OMP_PLUGIN_ID, OmpHarnessProfileSchema, PreparedHarnessSessionSchema,
   PreparedResumeSessionSchema, TerminalRuntimeSchema,
 } from "../api/index.ts";
+import { accountsScope } from "../atyrode.omp/broker.ts";
 import { prepareHarnessSession } from "../atyrode.omp/execution.ts";
 import { harness } from "../atyrode.omp/harness.ts";
 import { HarnessLeaseSchema } from "../workers/harness/lifecycle.ts";
@@ -39,6 +40,7 @@ function launchFixture() {
   };
   const owner = { machineId, name: "Fixture", online: true };
   const broker = { serviceId: BROKER_SERVICE_ID, revision: "fixture-broker", machineId };
+  const custodyId = "5c2d8e41-0f3a-4b7c-9d1e-6a8b2c4f0e13";
   let denied: string | undefined;
   let defaults: unknown = null;
   let inventory: unknown = [];
@@ -83,7 +85,7 @@ function launchFixture() {
     services: {
       describeInstance: async () => ({ serviceId: BROKER_SERVICE_ID, owner, defaultOwner: owner, connected: true, state: "ready", reason: null,
         configuration: { revision: broker.revision, pluginId: ACCOUNTS_PLUGIN_ID, enabled: true, policySha256: "c".repeat(64) } }),
-      readInstance: async () => ({ ok: true, result: { credentials } }),
+      readInstance: async () => ({ ok: true, result: { custodyId, credentials } }),
       describe: async () => ({ connected: true, machineId, services: [{ serviceId: "omp", revision: "1", policySha256: "d".repeat(64), operations: ["models", "stream"].map(operationId => ({ operationId, ready: true })) }] }),
     },
   } as unknown as OmpContext;
@@ -95,7 +97,7 @@ function launchFixture() {
     setDefaults: (overlay: unknown) => { defaults = { revision: 0, overlay, updatedAt: null, updatedBy: null }; },
     setInventory: (value: unknown) => { inventory = value; },
     input: { containerId: "fixture-container", machineId, expectedDefaultsRevision: 0,
-      accountPool: { anthropic: [{ scope: digestOf(broker), credentialId: 7, identityKey: "fixture-identity" }] },
+      accountPool: { anthropic: [{ scope: accountsScope(machineId, custodyId), credentialId: 7, identityKey: "fixture-identity" }] },
       overlay: { modelRoles: { default: "anthropic/claude-sonnet-4-5" } }, prompt: "Review the project", planYolo: false },
   };
 }

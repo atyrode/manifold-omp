@@ -9,7 +9,6 @@ import {
   accountActionSchemas,
   ACCOUNTS_PLUGIN_ID,
   BROKER_OPERATION_ID,
-  BROKER_SERVICE_ID,
   SIGN_IN_OPERATION_ID,
   type AccountAction,
   type ActionInput,
@@ -17,6 +16,7 @@ import {
 } from "../../api/index.ts";
 import {
   accountObservation,
+  accountsScope,
   describeSharedBroker,
   mutateCredential,
   usageObservation,
@@ -24,7 +24,6 @@ import {
 import {
   authorizeContainer,
   authorizeOwner,
-  digestOf,
   observeNative,
   operationReadiness,
   OmpRefusal,
@@ -136,12 +135,9 @@ async function observeAccounts(
     !description.connected ||
     description.state !== "ready"
   ) {
+    // No broker answers, so no custody is observed: this scope never names a store.
     return {
-      scope: digestOf({
-        serviceId: BROKER_SERVICE_ID,
-        revision: description.configuration?.revision ?? null,
-        machineId: description.owner?.machineId ?? null,
-      }),
+      scope: accountsScope(description.owner?.machineId ?? null, null),
       observedAt: null,
       status: "unavailable",
       accounts: [],

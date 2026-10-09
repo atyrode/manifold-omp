@@ -23,6 +23,7 @@ import {
   type JobInputBinding,
   type PublicJob,
 } from "../api/index.ts";
+import { accountsScope } from "../atyrode.omp/broker.ts";
 import { digestOf, type OmpContext } from "../atyrode.omp/machine-server.ts";
 import { handlers as rootHandlers } from "../atyrode.omp/server.ts";
 import rootManifest from "../atyrode.omp/manifest.json";
@@ -76,7 +77,8 @@ const broker = {
   revision: "fixture-broker",
   machineId: owner.machineId,
 };
-const scope = digestOf(broker);
+const custodyId = "9a3f1c7e-2b6d-4e8a-b5c0-7d1e3f9a2b46";
+const scope = accountsScope(broker.machineId, custodyId);
 const session = {
   ...target,
   expectedDefaultsRevision: 0,
@@ -397,6 +399,7 @@ function fixture(options: { sdk?: boolean } = {}): Fixture {
       readInstance: async () => ({
         ok: true,
         result: {
+          custodyId,
           credentials: [
             {
               id: 7,
@@ -785,7 +788,7 @@ test("a session that served under a model it was not configured with is refused"
  */
 test("a one-shot pins its configured live-listed model, so discovery timing cannot substitute another", async () => {
   const f = fixture();
-  f.ctx.services.readInstance = async () => ({ type: "service_result", requestId: "fixture-request", ok: true, result: { credentials: [
+  f.ctx.services.readInstance = async () => ({ type: "service_result", requestId: "fixture-request", ok: true, result: { custodyId, credentials: [
     { id: 7, provider: "anthropic", identityKey: "fixture-identity", credential: { type: "oauth", email: "fixture@example.invalid" } },
     { id: 8, provider: "openrouter", identityKey: null, credential: { type: "api_key" } },
   ] } });
@@ -835,7 +838,7 @@ test("a one-shot pins its configured live-listed model, so discovery timing cann
  */
 test("a one-shot registers and hands its gateway only the providers its configuration names", async () => {
   const f = fixture();
-  f.ctx.services.readInstance = async () => ({ type: "service_result", requestId: "fixture-request", ok: true, result: { credentials: [
+  f.ctx.services.readInstance = async () => ({ type: "service_result", requestId: "fixture-request", ok: true, result: { custodyId, credentials: [
     { id: 7, provider: "anthropic", identityKey: "fixture-identity", credential: { type: "oauth", email: "fixture@example.invalid" } },
     { id: 8, provider: "openrouter", identityKey: null, credential: { type: "api_key" } },
   ] } });

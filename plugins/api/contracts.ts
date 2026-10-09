@@ -44,6 +44,10 @@ export const AccountRecordSchema = z.strictObject({
   blocks: z.array(z.strictObject({ scope: z.string().max(128), until: epochMilliseconds })).max(64),
 });
 export type AccountRecord = z.infer<typeof AccountRecordSchema>;
+/** `scope` names custody of the broker's credential store, not its configuration revision:
+ * promotion, restart and disable/enable over one store keep it; a new, replaced or purged
+ * store or another owner machine changes it. Credential ids and identity keys resolve only
+ * within their scope. An `unavailable` observation's scope never equals a store's. */
 export const AccountsObservationSchema = z.strictObject({
   scope: accountScope,
   observedAt: epochMilliseconds.nullable(),
