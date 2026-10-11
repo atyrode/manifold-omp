@@ -1,8 +1,8 @@
 diff --git a/dist/types/auth/refresh.d.ts b/dist/types/auth/refresh.d.ts
-index 63384532929dcfebc80d04a59a163972960ac982..8cc33d0d99a67cfb4e14ebe83d0f9b5b7c45c742 100644
+index b3724f3ffaab010ea64cd0b50d353736e21474e5..87fe3ee936bf6b3ea74c1c95cb2352cda9da2e71 100644
 --- a/dist/types/auth/refresh.d.ts
 +++ b/dist/types/auth/refresh.d.ts
-@@ -38,6 +38,8 @@ export interface OAuthRefresherDeps {
+@@ -36,6 +36,8 @@ export interface OAuthRefresherDeps {
  export declare class OAuthRefresher {
      #private;
      constructor(deps: OAuthRefresherDeps);
@@ -120,10 +120,10 @@ index fdaace778a605c39987872b4a5bf2cfd7358acf1..6f500964231bfdde9b2bc37381652599
  }
  /** Boot the broker. Caller owns lifecycle; `handle.close()` to stop. */
 diff --git a/dist/types/auth-storage.d.ts b/dist/types/auth-storage.d.ts
-index a80566264b1e3b3e359c044477c726e84f1a8540..21431b595353e7ff1249df15cac740fe8a4a47fc 100644
+index 54f4f6190fcb9a59100c131552ed2f8bf8c31972..9f28bf438c88d2a24d924a6939cdcd8140303e84 100644
 --- a/dist/types/auth-storage.d.ts
 +++ b/dist/types/auth-storage.d.ts
-@@ -57,6 +57,8 @@ export declare class AuthStorage {
+@@ -58,6 +58,8 @@ export declare class AuthStorage {
      static create(dbPath: string, options?: AuthStorageOptions): Promise<AuthStorage>;
      /** Close the underlying credential store; the instance must not be reused. */
      close(): void;
@@ -157,10 +157,10 @@ index 3b6b4b8f7fd3f3adf6e5a8abc1b5e97984bea9bd..42e785a9e72c49cf61d6f4d5bb0b19af
  	const onAbort = (): void => abort.reject(new AIError.AbortError(message));
  	signal.addEventListener("abort", onAbort, { once: true });
 diff --git a/src/auth/refresh.ts b/src/auth/refresh.ts
-index fef0691ab12f76abb30ee33ec3c29829ad6227f7..b6cce4c13209fa7baa26286ef0282a3e1c4cb9a2 100644
+index 60cfc5264a5e60bc9d4b7afbfecbdaea47fd808d..ac699e96689b17ee0a1bf72fff1fafc798ae6b83 100644
 --- a/src/auth/refresh.ts
 +++ b/src/auth/refresh.ts
-@@ -108,6 +108,11 @@ export class OAuthRefresher {
+@@ -106,6 +106,11 @@ export class OAuthRefresher {
  		this.#deps = deps;
  	}
  
@@ -172,7 +172,7 @@ index fef0691ab12f76abb30ee33ec3c29829ad6227f7..b6cce4c13209fa7baa26286ef0282a3e
  	/**
  	 * Return the stored row while it still holds a usable token this refresher
  	 * minted within {@link OAUTH_REMINT_COOLDOWN_MS}.
-@@ -466,7 +471,10 @@ export class OAuthRefresher {
+@@ -463,7 +468,10 @@ export class OAuthRefresher {
  		if (credentialId === undefined) {
  			return this.#refreshOAuthCredentialUnshared(provider, credential, undefined, signal, reason);
  		}
@@ -1007,10 +1007,10 @@ index 5615b2f846958d1890291c826e85d65497a6cffd..88fca4d9df4b02bd92d6a8af7127b8bf
  	};
  }
 diff --git a/src/auth-storage.ts b/src/auth-storage.ts
-index a63b9d4b29cd2d23c1732090d15611ea60cd8a3c..2f9cd3ee39b4a46fdd74ec868d840310889df27c 100644
+index cd5c16dc907ae8d27d5a619c1a175a65da61a9c2..94533965b43368ffa18de1cb2c9bf675970c47e1 100644
 --- a/src/auth-storage.ts
 +++ b/src/auth-storage.ts
-@@ -72,6 +72,7 @@ interface AuthStorageModules {
+@@ -74,6 +74,7 @@ interface AuthStorageModules {
  	limits: RateLimits;
  	resets: ResetCredits;
  	blocks: CredentialBlocks;
@@ -1018,7 +1018,7 @@ index a63b9d4b29cd2d23c1732090d15611ea60cd8a3c..2f9cd3ee39b4a46fdd74ec868d840310
  }
  
  /**
-@@ -259,6 +260,7 @@ export class AuthStorage {
+@@ -261,6 +262,7 @@ export class AuthStorage {
  			limits,
  			resets: new ResetCredits({ store, pool, oauth, usage, usageCache, blocks }),
  			blocks,
@@ -1026,7 +1026,7 @@ index a63b9d4b29cd2d23c1732090d15611ea60cd8a3c..2f9cd3ee39b4a46fdd74ec868d840310
  		};
  	}
  
-@@ -273,6 +275,25 @@ export class AuthStorage {
+@@ -275,6 +277,25 @@ export class AuthStorage {
  		this.#modules.pool.close();
  	}
  
