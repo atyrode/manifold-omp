@@ -213,7 +213,7 @@ for (const graph of ["", "sdk-host"]) for (const dependency of ["@oh-my-pi/pi-ai
 for (const [filename, refusal] of [
   ["bun.lock", "Unreviewed bun.lock"],
   ["sdk-host/bun.lock", "Unreviewed bun.lock"],
-  ["patches/@oh-my-pi%2Fpi-ai@18.12.3.patch", "Unreviewed pi-ai patch"],
+  ["patches/@oh-my-pi%2Fpi-ai@18.12.5.patch", "Unreviewed pi-ai patch"],
 ] as const) {
   test(`${filename} drift refuses the previously prepared graph`, async () => {
     const destination = join(scratch, "changed-input");
