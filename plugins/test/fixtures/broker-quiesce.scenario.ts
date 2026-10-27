@@ -8,6 +8,7 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
   const { NativeBrokerStorage } = await import("../../workers/broker/storage.ts");
   const { startNativeBroker } = await import("../../workers/broker/server.ts");
   const { registerOAuthProvider, unregisterOAuthProvider } = await import("@oh-my-pi/pi-ai/registry/oauth/index");
+  const { AuthStorage } = await import("@oh-my-pi/pi-ai/auth-storage");
   const nativeBearer = "synthetic-native-control-bearer-private-only";
   const peerBearer = "synthetic-other-plaintext-bearer-no-control";
   const oldBearer = "synthetic-old-client-bearer-no-control";
@@ -200,7 +201,17 @@ await runSdkScenario(async (ctx: SdkScenarioContext) => {
           if (state === "active") await Bun.sleep(5);
         }
         ctx.check(state === "draining" && !completed, "quiesce-forgot-timed-out-provider");
+        // Since SDK 18.13 the timed-out exchange keeps running and still persists the provider's
+        // rotation. Native accounting owns only the raw provider call, so the patched SDK drain
+        // itself must join the exchange through its compare-and-set write.
+        let sdkDrained = false;
+        const sdkDrain = AuthStorage.prototype.drainRefreshes.call(storage).then(() => { sdkDrained = true; });
+        await Bun.sleep(20);
+        ctx.check(!sdkDrained, "quiesce-sdk-drain-skipped-detached-exchange");
         release.resolve();
+        await sdkDrain;
+        const rotated = storage.credentials.list().find(entry => entry.id === row.id)?.credential;
+        ctx.check(rotated?.type === "oauth" && rotated.refresh === "synthetic-late-refresh", "quiesce-sdk-drain-before-persistence");
       }
       const response = await draining;
       const result = await response.json() as { state: string };

@@ -157,22 +157,27 @@ index 3b6b4b8f7fd3f3adf6e5a8abc1b5e97984bea9bd..42e785a9e72c49cf61d6f4d5bb0b19af
  	const onAbort = (): void => abort.reject(new AIError.AbortError(message));
  	signal.addEventListener("abort", onAbort, { once: true });
 diff --git a/src/auth/refresh.ts b/src/auth/refresh.ts
-index 4599aa419314d98b2c82bdbe8d45b78577596485..1e1d91e7a1f7a313318b652fbf8a0feac42f0a04 100644
+index 2ac68d48f2729f76845d8de247312bd0dd70d5ec..f7eebe03de501ced6661cd0bde9b92235382e38e 100644
 --- a/src/auth/refresh.ts
 +++ b/src/auth/refresh.ts
-@@ -109,6 +109,11 @@ export class OAuthRefresher {
+@@ -122,6 +122,16 @@ export class OAuthRefresher {
  		this.#deps = deps;
  	}
  
 +	/** Every refresh this refresher currently owns, for a caller draining after admission stops. */
 +	pendingRefreshes(): Promise<unknown>[] {
-+		return [...this.#oauthRefreshInFlight.values(), ...this.#oauthCredentialRefreshInFlight.values()];
++		// Includes leased exchanges that outlive their caller's budget and still persist a rotated token.
++		return [
++			...this.#pendingRefreshes,
++			...this.#oauthRefreshInFlight.values(),
++			...this.#oauthCredentialRefreshInFlight.values(),
++		];
 +	}
 +
  	/**
  	 * Return the stored row while it still holds a usable token this refresher
  	 * minted within {@link OAUTH_REMINT_COOLDOWN_MS}.
-@@ -496,7 +501,10 @@ export class OAuthRefresher {
+@@ -605,7 +615,10 @@ export class OAuthRefresher {
  		if (credentialId === undefined) {
  			return this.#refreshOAuthCredentialUnshared(provider, credential, undefined, signal, reason);
  		}

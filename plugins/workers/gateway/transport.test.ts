@@ -710,7 +710,7 @@ describe("a provider's answer about the requested model", () => {
     const provider = new SyntheticProvider();
     provider.mode = "unknown-model";
     const fixture = await gatewayFixture(provider);
-    const model = poolModels(accountPool).get("anthropic/claude-opus-4-0")!;
+    const model = poolModels(accountPool).get("anthropic/claude-opus-4-5")!;
     try {
       const error = await benchFailure(
         streamPiNative(
@@ -721,7 +721,7 @@ describe("a provider's answer about the requested model", () => {
       );
       expect(provider.requests).toHaveLength(1);
       expect(error).toBe(
-        gatewayModelRefusal("model_not_found", 404, "anthropic/claude-opus-4-0"),
+        gatewayModelRefusal("model_not_found", 404, "anthropic/claude-opus-4-5"),
       );
       const receipt = benchReceipt(model, error!);
       expect(receipt.results[0]!.status).toBe("not_found");
@@ -838,7 +838,7 @@ describe("a provider's answer about the requested model", () => {
   }, 15000);
 
   test("only an answer naming the requested model crosses; one resembling it stays opaque", async () => {
-    const anthropic = poolModels(accountPool).get("anthropic/claude-opus-4-0")!;
+    const anthropic = poolModels(accountPool).get("anthropic/claude-opus-4-5")!;
     const codex = poolModels(codexPool).get("openai-codex/gpt-6-sol")!;
     const project = async (model: Model<Api>, reported: Record<string, unknown>) => {
       const frame = { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", ...reported } };
@@ -853,13 +853,13 @@ describe("a provider's answer about the requested model", () => {
     };
     const notFound = (message: string) =>
       `404 ${JSON.stringify({ type: "error", error: { type: "not_found_error", message }, request_id: "req_fixture" })}`;
-    expect(await project(anthropic, { errorStatus: 404, errorMessage: notFound("model: claude-opus-4-0") }))
-      .toBe(gatewayModelRefusal("model_not_found", 404, "anthropic/claude-opus-4-0"));
+    expect(await project(anthropic, { errorStatus: 404, errorMessage: notFound("model: claude-opus-4-5") }))
+      .toBe(gatewayModelRefusal("model_not_found", 404, "anthropic/claude-opus-4-5"));
     const resembling: [Model<Api>, Record<string, unknown>][] = [
       // A 404 about something else the request named, another model's 404, and no status at all.
       [anthropic, { errorStatus: 404, errorMessage: notFound("File not found: file_fixture") }],
-      [anthropic, { errorStatus: 404, errorMessage: notFound("model: claude-opus-4-1") }],
-      [anthropic, { errorMessage: notFound("model: claude-opus-4-0") }],
+      [anthropic, { errorStatus: 404, errorMessage: notFound("model: claude-opus-4-6") }],
+      [anthropic, { errorMessage: notFound("model: claude-opus-4-5") }],
       // Codex refusing a model this stream did not ask for.
       [codex, { errorMessage: "Codex error event: The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account. (code=invalid_request_error)" }],
       // The right sentence under a status the denial never carries: another failure quoting it.
