@@ -1327,7 +1327,7 @@ test("cost review prices the served model rather than its thinking suffix", asyn
   if ("refused" in admitted) throw new Error(admitted.refused);
   expect(admitted.limits?.inference?.costMicros).toBe(20_000);
   expect(await f.client.call("reviewSession", { ...input,
-    overlay: { modelRoles: { default: "anthropic/claude-opus-4-1:high" } } }))
+    overlay: { modelRoles: { default: "anthropic/claude-opus-4-6:high" } } }))
     .toEqual({ refused: "omp_inference_price_unknown" });
 });
 
