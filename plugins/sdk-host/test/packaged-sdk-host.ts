@@ -221,7 +221,7 @@ function checkBlockedCollision(messages: readonly { role: string }[]) {
 }
 
 try {
-  check(process.cwd() === "/inputs" && process.env.HOME === "/home/job" && Bun.version === "1.4.2", "private-environment");
+  check(process.cwd() === "/inputs" && process.env.HOME === "/home/job" && Bun.version === "1.4.4", "private-environment");
   check(!Object.keys(process.env).some(key => /^(?:MANIFOLD_|AWS_|OPENAI_|ANTHROPIC_|CODE_)/.test(key)), "ambient-environment");
   const routes = (await readFile("/proc/net/route", "utf8")).trim().split("\n").slice(1);
   check(routes.every(line => line.split(/\s+/)[0] === "lo"), "network-namespace");

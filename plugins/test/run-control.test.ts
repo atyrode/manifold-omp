@@ -129,7 +129,7 @@ test("a dial reply fits one progress line and reads back exactly, never truncate
   for (const message of [undefined, "", "refused not_a_reason", "applied", "applied high fixture/x extra"]) expect(readControlProgress(message)).toBeNull();
 });
 
-/** Lets the replies already released run. Never `advanceTimersByTime(0)`: Bun 1.4.2 moves its fake clock 1 ms on it. */
+/** Lets the replies already released run. Never `advanceTimersByTime(0)`: Bun 1.4.4 moves its fake clock 1 ms on it. */
 async function settle() {
   const settled = Promise.withResolvers<void>();
   setImmediate(settled.resolve);

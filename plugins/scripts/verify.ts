@@ -443,7 +443,7 @@ try {
   const expectedSums = process.env.OMP_VERIFY_EXPECTED_SUMS;
   check(expectedSums !== undefined && isAbsolute(expectedSums), "invalid-expected-sums");
   if (!process.env.OMP_VERIFY_UNIT) await verifyConsumer();
-  check(Bun.version === "1.4.2", "pinned-bun-required");
+  check(Bun.version === "1.4.4", "pinned-bun-required");
   check(
     process.platform === "linux" && process.arch === "x64",
     "linux-x64-native-fixture-required",

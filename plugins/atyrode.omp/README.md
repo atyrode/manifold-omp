@@ -307,7 +307,7 @@ installed bundles as `repack_required`, so the three bundles are replaced togeth
 host; no earlier stamp is retained. The local native gate below still has to prove the newly
 packed family, not just the host.
 
-Use Bun **1.4.2** and a clean sibling `manifold` checkout at the revision in `plugins/MANIFOLD_REV`. From `plugins/`:
+Use Bun **1.4.4** and a clean sibling `manifold` checkout at the revision in `plugins/MANIFOLD_REV`. From `plugins/`:
 
 ```sh
 bun install --frozen-lockfile
@@ -330,7 +330,7 @@ Verify packs the family again inside that unit and proves the bundles it packed.
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`. Tag `v<version>` on a commit `main` has, where `<version>` is the version the three family manifests and the root `package.json` carry. The workflow refuses any other tag before the gate runs.
 
-The `bundles` job checks out the tagged commit beside Manifold at `plugins/MANIFOLD_REV` and runs the gate above with Bun 1.4.2 on the CI fixtures, as hosted CI does: frozen installs, Manifold's real machine-jobs proof, dependency preparation, both typechecks, `bun test`, `bun run pack`, then `scripts/verify.ts` bound to the packed `SHA256SUMS` and installing the public API from GitHub at the tagged commit. This job can only read the repository.
+The `bundles` job checks out the tagged commit beside Manifold at `plugins/MANIFOLD_REV` and runs the gate above with Bun 1.4.4 on the CI fixtures, as hosted CI does: frozen installs, Manifold's real machine-jobs proof, dependency preparation, both typechecks, `bun test`, `bun run pack`, then `scripts/verify.ts` bound to the packed `SHA256SUMS` and installing the public API from GitHub at the tagged commit. This job can only read the repository.
 
 The `release` job is the only one granted `contents: write`, and it runs no repository code. It requires `SHA256SUMS` to verify and to name exactly the packed bundles, every bundle's `manifest.version` to equal the tag's version, and the tag to still name the commit `bundles` built. It then runs `gh release create <tag> --verify-tag --generate-notes` with four assets:
 
@@ -347,7 +347,7 @@ The credential SDK baseline is published **18.14.1**; the ordinary CLI remains *
 
 The separately invoked `sdkHost` alone uses unpatched published **18.8.6**, under the independent `plugins/sdk-host/` package and frozen lock. Stock print and RPC implementations are public deep exports from `@oh-my-pi/pi-coding-agent`. Its TUI kinds set `tuiTranscript`, as the stock interactive CLI does, so only they are told they can draw Mermaid, SVG and table charts. Explicit optional peer imports are closed by `proxy-agent@8.0.1`, `supports-color@7.2.0` and `yauzl@3.4.0`; the PAC dependency is pinned to `quickjs-wasi@2.2.0`. This graph has no `patchedDependencies`; any such declaration refuses preparation.
 
-`bun run deps:prepare` prepares both graphs independently with Bun 1.4.2, fresh caches, frozen locks, disabled lifecycle scripts, and private copied dependency trees. Each graph owns its full-tree receipt, lock pin, SDK version, loader digest and native artifact identity. Cross-graph receipt reuse, dependency escape and installed-byte changes refuse packaging. There is no workspace hoisting between roots. Packaging is install-free and credential-free; it reads only prepared trees, owned sources and committed runtime data. The baseline and SDK-host compiler projects resolve their respective actual package graphs; SDK-only type paths are scoped to the SDK project, never global aliases.
+`bun run deps:prepare` prepares both graphs independently with Bun 1.4.4, fresh caches, frozen locks, disabled lifecycle scripts, and private copied dependency trees. Each graph owns its full-tree receipt, lock pin, SDK version, loader digest and native artifact identity. Cross-graph receipt reuse, dependency escape and installed-byte changes refuse packaging. There is no workspace hoisting between roots. Packaging is install-free and credential-free; it reads only prepared trees, owned sources and committed runtime data. The baseline and SDK-host compiler projects resolve their respective actual package graphs; SDK-only type paths are scoped to the SDK project, never global aliases.
 
 Worker compilation uses whitespace compaction without syntax or identifier minification. A matching SDK pin does not waive byte equality: the package regression rebuilds from a private dependency copy and a separate process, compares every published byte, and reports the first differing SDK-host source span when an archive changes. Disabling only identifier minification did not hold that boundary under the protocol-48 SDK; both optional transformations remain off. Native declarations and the final artifact-size budgets still apply unchanged.
 

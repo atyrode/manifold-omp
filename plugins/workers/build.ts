@@ -101,7 +101,7 @@ export async function replaceDirectory(staged: string, destination: string): Pro
 
 async function dependencyInputs(name: GraphName, directory = graphs[name].root) {
   const graph = graphs[name];
-  if (Bun.version !== "1.4.2" || runtime.bunVersion !== "1.4.2" || sdkRuntime.bunVersion !== "1.4.2") throw new Error("Dependency preparation and packaging require pinned Bun 1.4.2");
+  if (Bun.version !== "1.4.4" || runtime.bunVersion !== "1.4.4" || sdkRuntime.bunVersion !== "1.4.4") throw new Error("Dependency preparation and packaging require pinned Bun 1.4.4");
   const [lock, manifest] = await Promise.all([
     readFile(join(directory, "bun.lock")),
     readFile(join(directory, "package.json"), "utf8").then(text => JSON.parse(text)),
@@ -171,7 +171,7 @@ export async function verifyPreparedDependencies(name?: GraphName): Promise<stri
     if (await dependencyTree(directory) !== treeSha256) throw new Error("Installed SDK dependency tree changed after frozen preparation");
     return treeSha256;
   } catch (error) {
-    throw new Error("Missing, stale or tampered SDK preparation; run `bun run deps:prepare` with Bun 1.4.2 before packaging", { cause: error });
+    throw new Error("Missing, stale or tampered SDK preparation; run `bun run deps:prepare` with Bun 1.4.4 before packaging", { cause: error });
   }
 }
 
