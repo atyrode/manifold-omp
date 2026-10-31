@@ -298,14 +298,16 @@ Any copy forked from this store keeps its custody id: a restored backup, or a co
 ## Repository gate
 
 The SDK pin and reusable workflow reference advance together. The pin, Manifold
-`82605419` ([atyrode/manifold#1078](https://github.com/atyrode/manifold/pull/1078)), stamps
-every packed bundle `builtAgainst["manifold:protocol"] = "57"` under hardened contract 13,
-the contract that adds the harness `resolveModel`. A hub older than `82605419` does not admit a
-contract-13 stamp, so the 0.2.0 bundles need a hub at Manifold `82605419` or later: upgrade the
-hub first. A protocol 57 host admits only bundles stamped 57 and holds older
-installed bundles as `repack_required`, so the three bundles are replaced together with the
-host; no earlier stamp is retained. The local native gate below still has to prove the newly
-packed family, not just the host.
+`a7c2237b` ([atyrode/manifold#1091](https://github.com/atyrode/manifold/pull/1091)), runs the
+reusable workflow on Bun 1.4.4 and stamps every packed bundle
+`builtAgainst["manifold:protocol"] = "59"` under hardened contract 13, the contract that adds the
+harness `resolveModel`. Protocol 59 arrived at Manifold `40d1f7c6`
+([atyrode/manifold#1088](https://github.com/atyrode/manifold/pull/1088), release v0.36.0) and
+changes only first-party terminal image admission, not a plugin call signature. A protocol 59
+host admits bundles stamped 57 or 59, but a protocol 57 host admits only 57, so these bundles
+need a hub at Manifold `40d1f7c6` or later: upgrade the hub first. The three bundles are replaced
+together with the host; no earlier stamp is retained. The local native gate below still has to
+prove the newly packed family, not just the host.
 
 Use Bun **1.4.4** and a clean sibling `manifold` checkout at the revision in `plugins/MANIFOLD_REV`. From `plugins/`:
 

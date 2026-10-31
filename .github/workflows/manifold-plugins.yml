@@ -20,7 +20,7 @@ jobs:
     # a tag's verified bundles as release assets and installs nothing; this gate
     # packs and verifies the same way, so verify's in-unit pack must reproduce
     # the host pack's SHA256SUMS on every change, not first at a tag.
-    uses: atyrode/manifold/.github/workflows/plugins.yml@df07907608e2355747287bb368b495a119629e82
+    uses: atyrode/manifold/.github/workflows/plugins.yml@a7c2237b7cf8829ca93928339703c699300d6937
     with:
       plugins-dir: plugins
       prepare-command: bun --no-env-file --no-install workers/build.ts --prepare-dependencies && bun --no-env-file --no-install scripts/prepare-ci.ts
