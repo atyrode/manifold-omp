@@ -912,13 +912,22 @@ test("the broker policy admits every route the pinned gateway client sends, and 
   const sent: URL[] = [];
   const client = new AuthBrokerClient({ url: "http://broker.invalid", token: "fixture", maxRetries: 0,
     fetchImpl: Object.assign(async (input: Parameters<typeof fetch>[0]) => {
-      sent.push(new URL(input instanceof Request ? input.url : String(input)));
-      return Response.json({ ok: true });
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      sent.push(url);
+      return Response.json(url.pathname === "/v1/usage" ? { generatedAt: Date.now(), reports: [] } : { ok: true });
     }, { preconnect: fetch.preconnect }) });
   await client.notifyUsageStale("anthropic");
   expect(sent.map(url => [url.pathname, [...url.searchParams.keys()]])).toEqual([["/v1/usage/stale", ["provider"]]]);
   expect(policy.operations["gateway-usage-stale"]).toMatchObject({
     method: "POST", path: "/v1/usage/stale", query: { provider: { type: "string", required: false, maxBytes: 128 } },
+  });
+  // It scopes a credential's usage lookup to that provider, and only with that query.
+  sent.length = 0;
+  await client.fetchUsage({ provider: "anthropic" });
+  await client.fetchUsage();
+  expect(sent.map(url => [url.pathname, [...url.searchParams.keys()]])).toEqual([["/v1/usage", ["provider"]], ["/v1/usage", []]]);
+  expect(policy.operations["gateway-usage"]).toMatchObject({
+    method: "GET", path: "/v1/usage", query: { provider: { type: "string", required: false, maxBytes: 128 } },
   });
   // The gateway binds exactly the operations the policy declares for it.
   const bound = gatewayManifest.machine.operations["atyrode.omp.gateway.serve"].services[0]!.operationIds;

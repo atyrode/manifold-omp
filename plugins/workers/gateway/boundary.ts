@@ -101,6 +101,10 @@ export function safeNativeStream(body: ReadableStream<Uint8Array>, model: Model<
         if (end > FRAME_LIMIT) throw unavailable();
         const frame = buffered.slice(0, end);
         buffered = buffered.slice(end + 2);
+        // Since 18.14.0 the SDK interleaves this exact SSE comment so a turn that thinks for minutes
+        // keeps bytes on the wire; SSE clients skip it. It carries nothing, so it passes unchanged.
+        // Any other frame that is not data still refuses.
+        if (frame === ": keepalive") { controller.enqueue(encoder.encode(": keepalive\n\n")); continue; }
         if (!frame.startsWith("data: ")) throw unavailable();
         const data = frame.slice(6);
         if (data === "[DONE]") { controller.enqueue(encoder.encode("data: [DONE]\n\n")); continue; }

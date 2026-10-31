@@ -1,5 +1,5 @@
 diff --git a/dist/types/auth/refresh.d.ts b/dist/types/auth/refresh.d.ts
-index b3724f3ffaab010ea64cd0b50d353736e21474e5..87fe3ee936bf6b3ea74c1c95cb2352cda9da2e71 100644
+index 031afef5c21703e40441307f7dab56c681c09dcb..798e324093fcf40a7bbba1b4fddb8b57b4b014a4 100644
 --- a/dist/types/auth/refresh.d.ts
 +++ b/dist/types/auth/refresh.d.ts
 @@ -36,6 +36,8 @@ export interface OAuthRefresherDeps {
@@ -12,10 +12,10 @@ index b3724f3ffaab010ea64cd0b50d353736e21474e5..87fe3ee936bf6b3ea74c1c95cb2352cd
       * Refresh one stored OAuth credential under durable row ownership.
       */
 diff --git a/dist/types/auth/usage.d.ts b/dist/types/auth/usage.d.ts
-index 06f9d2c2966fee79f52e0e732a27a3394c6da75b..f80736ea19192ca6eaa993ae932a0fa753721fe3 100644
+index f90e8a0ddd5f5bf6d8c8e03d0f5bff5f73b8398d..289eea3f4f11ecfcfb4ee9be62ac283f49b8b0ef 100644
 --- a/dist/types/auth/usage.d.ts
 +++ b/dist/types/auth/usage.d.ts
-@@ -40,6 +40,8 @@ export declare class UsageService implements UsageApi {
+@@ -41,6 +41,8 @@ export declare class UsageService implements UsageApi {
      readonly logger: UsageLogger;
      readonly requestTimeoutMs: number;
      constructor(deps: UsageServiceDeps);
@@ -38,7 +38,7 @@ index 397345732706d9fcb8af1dc2328707cce2d0b586..3849857a22bd9284a0f9892c8126245f
      /**
       * Run one sweep. Exposed for tests.
 diff --git a/dist/types/auth-broker/remote-store.d.ts b/dist/types/auth-broker/remote-store.d.ts
-index 320a7440db92703f6c3f0c8252eef244dac8b756..0c1b61f9f4a15bda4028417e9c5077dc88dc54b4 100644
+index b3584d4a09d321cb4ab5093f1f16226268244fb3..9b81e9fba552c3c7c13c7687e4a6978aca3e3fb6 100644
 --- a/dist/types/auth-broker/remote-store.d.ts
 +++ b/dist/types/auth-broker/remote-store.d.ts
 @@ -33,9 +33,9 @@ export interface RemoteAuthCredentialStoreOptions {
@@ -132,35 +132,11 @@ index 54f4f6190fcb9a59100c131552ed2f8bf8c31972..9f28bf438c88d2a24d924a6939cdcd81
      /**
       * Legacy redirect for callers of the pre-namespace flat API (e.g. repo scripts).
       * @deprecated Use {@link AuthStorage.keys}`.get`.
-diff --git a/src/auth/abort.ts b/src/auth/abort.ts
-index 3b6b4b8f7fd3f3adf6e5a8abc1b5e97984bea9bd..42e785a9e72c49cf61d6f4d5bb0b19af33675852 100644
---- a/src/auth/abort.ts
-+++ b/src/auth/abort.ts
-@@ -3,11 +3,17 @@ import * as AIError from "../error";
- /**
-  * Race `promise` against `signal`, rejecting only this caller when the signal
-  * fires. The underlying promise keeps running so other awaiters on the same
-- * single-flight operation aren't punished by a peer's cancel.
-+ * single-flight operation aren't punished by a peer's cancel. A retired
-+ * snapshot acquisition is also released even if its transport ignores abort.
-  */
- export function raceSignal<T>(promise: Promise<T>, signal: AbortSignal | undefined, message: string): Promise<T> {
- 	if (!signal) return promise;
--	if (signal.aborted) return Promise.reject(new AIError.AbortError(message));
-+	if (signal.aborted) {
-+		// This caller stops awaiting; observe a later rejection so it is not reported as
-+		// unhandled. Other awaiters of a shared promise still receive it.
-+		void promise.catch(() => {});
-+		return Promise.reject(new AIError.AbortError(message));
-+	}
- 	const abort = Promise.withResolvers<never>();
- 	const onAbort = (): void => abort.reject(new AIError.AbortError(message));
- 	signal.addEventListener("abort", onAbort, { once: true });
 diff --git a/src/auth/refresh.ts b/src/auth/refresh.ts
-index 2ac68d48f2729f76845d8de247312bd0dd70d5ec..f7eebe03de501ced6661cd0bde9b92235382e38e 100644
+index 468512da4b834ebd214b21162b3428199ae8b38e..b80ceb6555d6e38ec0c8edce901fb74ebb5c0a4b 100644
 --- a/src/auth/refresh.ts
 +++ b/src/auth/refresh.ts
-@@ -122,6 +122,16 @@ export class OAuthRefresher {
+@@ -161,6 +161,16 @@ export class OAuthRefresher {
  		this.#deps = deps;
  	}
  
@@ -177,23 +153,27 @@ index 2ac68d48f2729f76845d8de247312bd0dd70d5ec..f7eebe03de501ced6661cd0bde9b9223
  	/**
  	 * Return the stored row while it still holds a usable token this refresher
  	 * minted within {@link OAUTH_REMINT_COOLDOWN_MS}.
-@@ -605,7 +615,10 @@ export class OAuthRefresher {
+@@ -928,11 +938,14 @@ export class OAuthRefresher {
  		if (credentialId === undefined) {
- 			return this.#refreshOAuthCredentialUnshared(provider, credential, undefined, signal, reason);
+ 			return this.#refreshOAuthCredentialUnshared(provider, credential, undefined, signal, reason, rejectedAccess);
  		}
--		const promise = this.#refreshOAuthCredentialUnshared(provider, credential, credentialId, signal, reason)
 +		// The shared rotation belongs to every waiter and to the stored row, not to the first
 +		// caller: a usage probe's deadline must detach from it, never abort a provider rotation
 +		// mid-flight. Each caller still stops waiting on its own signal below.
-+		const promise = this.#refreshOAuthCredentialUnshared(provider, credential, credentialId, undefined, reason)
- 			.then(refreshed => {
- 				// A delegated refresh may have returned a broker-cached token rather
- 				// than minting one. Only direct local requests can establish mint time.
+ 		const promise = this.#refreshOAuthCredentialUnshared(
+ 			provider,
+ 			credential,
+ 			credentialId,
+-			signal,
++			undefined,
+ 			reason,
+ 			rejectedAccess,
+ 		)
 diff --git a/src/auth/usage.ts b/src/auth/usage.ts
-index cd7b96060611308ebd699a259bf7db99d2e23464..76e15874e56db8b628352f9b1f967f921b60e415 100644
+index 8e6826475a8a08c667cd43da2d528b1740a47f51..f30227ea1cde99551d7092286655fef007bfae5a 100644
 --- a/src/auth/usage.ts
 +++ b/src/auth/usage.ts
-@@ -130,6 +130,14 @@ export class UsageService implements UsageApi {
+@@ -131,6 +131,14 @@ export class UsageService implements UsageApi {
  		this.requestTimeoutMs = deps.requestTimeoutMs;
  	}
  
@@ -281,7 +261,7 @@ index e9a2d3eca2de11545534201dbda87fbcd593ff98..140df149328ab408bb6e51e4abc4c9d8
  	}
  
 diff --git a/src/auth-broker/remote-store.ts b/src/auth-broker/remote-store.ts
-index e68601632715d56e0331b57b025ee2e04b3ea8ea..8b5b290e46f227c9866b7bda9ffdded8f223d12b 100644
+index ded6bdf9173d8d12bd69031820b7e75251308d96..29e490728de3580b606bbe1e73ea0f56ccf984e4 100644
 --- a/src/auth-broker/remote-store.ts
 +++ b/src/auth-broker/remote-store.ts
 @@ -12,12 +12,10 @@ import { getAppName, getInstallId, logger, postmortem } from "@oh-my-pi/pi-utils
@@ -338,7 +318,7 @@ index e68601632715d56e0331b57b025ee2e04b3ea8ea..8b5b290e46f227c9866b7bda9ffdded8
  	readonly #backgroundIdleMs: number;
  	/** Last foreground store use; background sync parks `#backgroundIdleMs` after this. */
  	#lastActivityMs = Date.now();
-@@ -409,10 +403,14 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+@@ -410,10 +404,14 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
  		this.#generation = generation;
  		this.#snapshotReceivedAt = nowMs;
  		this.#rebuildCredentialHashes();
@@ -354,7 +334,7 @@ index e68601632715d56e0331b57b025ee2e04b3ea8ea..8b5b290e46f227c9866b7bda9ffdded8
  		} catch (error) {
  			logger.debug("auth-broker snapshot callback failed", { error: String(error) });
  		}
-@@ -504,20 +502,30 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+@@ -505,20 +503,30 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
  	async #runBackground(): Promise<void> {
  		let backoffMs = BACKGROUND_BACKOFF_INITIAL_MS;
  		while (!this.#closed && !this.#backgroundAbort.signal.aborted) {
@@ -387,7 +367,7 @@ index e68601632715d56e0331b57b025ee2e04b3ea8ea..8b5b290e46f227c9866b7bda9ffdded8
  						if (error instanceof AuthBrokerStreamUnsupportedError) {
  							this.#streamingUnsupported = true;
  							logger.debug("auth-broker snapshot stream unsupported; falling back to long-poll");
-@@ -530,22 +538,29 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+@@ -531,22 +539,29 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
  					continue;
  				}
  				try {
@@ -423,7 +403,7 @@ index e68601632715d56e0331b57b025ee2e04b3ea8ea..8b5b290e46f227c9866b7bda9ffdded8
  			}
  		}
  	}
-@@ -569,9 +584,8 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+@@ -570,9 +585,8 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
  	 * while something else keeps the event loop alive — typically our own
  	 * in-flight broker request, which is exactly what it exists to end.
  	 */
@@ -434,7 +414,7 @@ index e68601632715d56e0331b57b025ee2e04b3ea8ea..8b5b290e46f227c9866b7bda9ffdded8
  		let timer: Timer | undefined;
  		const arm = (): void => {
  			const remainingMs = this.#idleRemainingMs();
-@@ -580,13 +594,12 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+@@ -581,13 +595,12 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
  				timer.unref?.();
  				return;
  			}
@@ -449,7 +429,7 @@ index e68601632715d56e0331b57b025ee2e04b3ea8ea..8b5b290e46f227c9866b7bda9ffdded8
  			stop: () => clearTimeout(timer),
  		};
  	}
-@@ -612,20 +625,22 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+@@ -613,20 +626,22 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
  		}
  	}
  
@@ -477,7 +457,7 @@ index e68601632715d56e0331b57b025ee2e04b3ea8ea..8b5b290e46f227c9866b7bda9ffdded8
  		switch (event.kind) {
  			case "snapshot": {
  				// The first frame of every SSE connection is a full authoritative
-@@ -635,6 +650,8 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+@@ -636,6 +651,8 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
  				// Subsequent entry/removal frames remain guarded against reordering
  				// relative to this new baseline below.
  				const { kind: _kind, ...snapshot } = event;
@@ -486,7 +466,7 @@ index e68601632715d56e0331b57b025ee2e04b3ea8ea..8b5b290e46f227c9866b7bda9ffdded8
  				this.#applySnapshot(snapshot, snapshot.generation);
  				return;
  			}
-@@ -682,6 +699,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+@@ -683,6 +700,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
  		this.#snapshotReceivedAt = nowMs;
  		this.#dirtyCredentialIds.add(incoming.id);
  		this.#refreshCredentialRevision();
@@ -494,7 +474,7 @@ index e68601632715d56e0331b57b025ee2e04b3ea8ea..8b5b290e46f227c9866b7bda9ffdded8
  	}
  
  	#removeStreamCredential(
-@@ -701,16 +719,87 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+@@ -702,16 +720,87 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
  		this.#snapshotReceivedAt = nowMs;
  		this.#dirtyCredentialIds.add(id);
  		this.#refreshCredentialRevision();
@@ -585,7 +565,7 @@ index e68601632715d56e0331b57b025ee2e04b3ea8ea..8b5b290e46f227c9866b7bda9ffdded8
  	/**
  	 * Stateful probe for broker-side credential changes, mirroring
  	 * {@link SqliteAuthCredentialStore.pollExternalChanges} so long-lived broker
-@@ -900,18 +989,13 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+@@ -901,18 +990,13 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
  	}
  
  	/**
@@ -609,7 +589,7 @@ index e68601632715d56e0331b57b025ee2e04b3ea8ea..8b5b290e46f227c9866b7bda9ffdded8
  	}
  
  	async deleteAuthCredential(id: number, disabledCause: string): Promise<boolean> {
-@@ -919,8 +1003,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+@@ -920,8 +1004,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
  		const found = this.#snapshot.credentials.some(entry => entry.id === id);
  		if (!found) return false;
  		await this.#client.disableCredential(id, disabledCause);
@@ -619,7 +599,7 @@ index e68601632715d56e0331b57b025ee2e04b3ea8ea..8b5b290e46f227c9866b7bda9ffdded8
  		return true;
  	}
  
-@@ -936,15 +1019,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+@@ -937,15 +1020,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
  	}
  
  	async waitForFreshSnapshot(maxWaitMs: number, opts: { signal?: AbortSignal } = {}): Promise<boolean> {
@@ -636,7 +616,7 @@ index e68601632715d56e0331b57b025ee2e04b3ea8ea..8b5b290e46f227c9866b7bda9ffdded8
  	}
  
  	async prepareForRequest(credentialId: number, opts: { signal?: AbortSignal } = {}): Promise<boolean> {
-@@ -958,22 +1033,24 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+@@ -959,22 +1034,24 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
  
  	async markCredentialSuspect(credentialId: number, opts: { signal?: AbortSignal } = {}): Promise<void> {
  		this.#noteActivity();
@@ -670,7 +650,7 @@ index e68601632715d56e0331b57b025ee2e04b3ea8ea..8b5b290e46f227c9866b7bda9ffdded8
  		return this.listAuthCredentials(provider);
  	}
  
-@@ -995,21 +1072,16 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+@@ -996,21 +1073,16 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
  				});
  			}
  		}
@@ -695,7 +675,7 @@ index e68601632715d56e0331b57b025ee2e04b3ea8ea..8b5b290e46f227c9866b7bda9ffdded8
  	 */
  	async deleteAuthCredentials(provider: string, disabledCause: string): Promise<void> {
  		const existing = this.listAuthCredentials(provider);
-@@ -1024,56 +1096,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+@@ -1025,56 +1097,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
  				});
  			}
  		}
@@ -753,7 +733,7 @@ index e68601632715d56e0331b57b025ee2e04b3ea8ea..8b5b290e46f227c9866b7bda9ffdded8
  	}
  
  	#removeCredentialById(id: number): void {
-@@ -1291,22 +1314,24 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+@@ -1294,22 +1317,24 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
  	 * Store-level hook consumed by `AuthStorage` — routes refresh through the
  	 * broker so the actual refresh token never leaves the broker host. Returns
  	 * the broker-redacted credential with {@link REMOTE_REFRESH_SENTINEL} in
@@ -785,7 +765,7 @@ index e68601632715d56e0331b57b025ee2e04b3ea8ea..8b5b290e46f227c9866b7bda9ffdded8
  		return {
  			access: refreshed.access,
  			refresh: REMOTE_REFRESH_SENTINEL,
-@@ -1318,38 +1343,6 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+@@ -1321,38 +1346,6 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
  		};
  	}
  
@@ -825,7 +805,7 @@ index e68601632715d56e0331b57b025ee2e04b3ea8ea..8b5b290e46f227c9866b7bda9ffdded8
  	 * Store-level hook consumed by `AuthStorage.usage.reports()` — proxies
  	 * to the broker's `/v1/usage` endpoint. Shared per-credential caches and
 diff --git a/src/auth-broker/server.ts b/src/auth-broker/server.ts
-index 5615b2f846958d1890291c826e85d65497a6cffd..88fca4d9df4b02bd92d6a8af7127b8bf00680ed7 100644
+index fbcaae3db59d42fc34c7b60d93ea0f81ec3d44ee..e45e3d42831b00c491264a1788038f6afd8ef352 100644
 --- a/src/auth-broker/server.ts
 +++ b/src/auth-broker/server.ts
 @@ -91,6 +91,8 @@ export interface AuthBrokerServerHandle {
@@ -935,7 +915,7 @@ index 5615b2f846958d1890291c826e85d65497a6cffd..88fca4d9df4b02bd92d6a8af7127b8bf
  				}
  				if (req.method === "GET" && pathname === "/v1/usage") {
  					try {
-@@ -936,7 +953,9 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
+@@ -939,7 +956,9 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
  					try {
  						const entry = await opts.storage.oauth.refresh(
  							id,
@@ -946,7 +926,7 @@ index 5615b2f846958d1890291c826e85d65497a6cffd..88fca4d9df4b02bd92d6a8af7127b8bf
  							authRecovery ? AUTH_RECOVERY_REFRESH_OPTIONS : undefined,
  						);
  						const body: CredentialRefreshResponse = { entry };
-@@ -1076,9 +1095,39 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
+@@ -1079,9 +1098,39 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
  					error: String(error),
  				});
  				return json(500, { error: "internal error" });
@@ -986,7 +966,7 @@ index 5615b2f846958d1890291c826e85d65497a6cffd..88fca4d9df4b02bd92d6a8af7127b8bf
  
  	const boundHost = server.hostname ?? bind.hostname;
  	const boundPort = server.port ?? bind.port;
-@@ -1086,11 +1135,19 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
+@@ -1089,11 +1138,19 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
  		url: `http://${boundHost}:${boundPort}`,
  		port: boundPort,
  		hostname: boundHost,

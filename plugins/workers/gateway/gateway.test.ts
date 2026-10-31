@@ -341,6 +341,16 @@ describe("native account-pool gateway", () => {
     expect(event.error.errorStatus).toBe(429);
   });
 
+  test("the SDK's keepalive comment passes unchanged, and any other non-data frame still refuses", async () => {
+    const model = [...poolModels(parseInputs(broker, { anthropic: [{ scope: "fixture-scope", credentialId: 1, identityKey: "chosen" }] }, serviceBearer, null).accountPool).values()][0]!;
+    const keepalive = ": keepalive\n\n";
+    const done = "data: [DONE]\n\n";
+    expect(await new Response(safeNativeStream(new Response(keepalive + done).body!, model)).text()).toBe(keepalive + done);
+    for (const frame of [": fixture-comment\n\n", ":keepalive\n\n", ": keepalive\ndata: {}\n\n", "event: ping\n\n"]) {
+      await expect(new Response(safeNativeStream(new Response(frame + done).body!, model)).text()).rejects.toThrow("gateway_unavailable");
+    }
+  });
+
   test("a masked stream refusal still tells the machine which check refused, in a child so fd 2 is real", async () => {
     // `writeSync(2, …)` writes a real descriptor, so the assertion needs a real one: in-process
     // capture would test a stub instead of the thing that reaches the machine's job output.

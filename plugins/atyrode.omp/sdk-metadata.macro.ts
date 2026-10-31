@@ -102,6 +102,6 @@ export function liveListingThinking(): Readonly<Record<string, ThinkingConfig | 
 /** Broker upload and AuthStorage API-key selection accept provider IDs generically.
  * Registry membership does not prove the upstream accepts a given key.
  */
-export function bundledCredentialProviders(): string[] {
+export function bundledCredentialProviders(): readonly string[] {
   return getBundledProviders();
 }
