@@ -72,6 +72,10 @@ export function buildSharedBrokerPolicy(runtime: ServiceRuntime): ServicePolicy 
   snapshotStream.maxResponseBytes = 256 * 1024 * 1024;
   const gatewayUsage = proxy("GET", "/v1/usage");
   gatewayUsage.timeoutMs = 300_000;
+  // The 18.14 client scopes a credential's usage lookup to its provider (`?provider=`), so the
+  // broker answers without waiting on other providers' probes. The undeclared-query refusal
+  // would fail every such lookup.
+  gatewayUsage.query = { provider: { type: "string", required: false, maxBytes: 128 } };
   const json = { kind: "json", disclosure: "full" } as const;
   // OMP 18.4 names an auth-recovery refresh so the broker can reuse a token it minted
   // moments ago. The proxy refuses any undeclared query, so the one value is declared.

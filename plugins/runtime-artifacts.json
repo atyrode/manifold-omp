@@ -1,11 +1,11 @@
 {
-  "bunVersion": "1.4.2",
-  "sdkVersion": "18.13.1",
-  "observedOn": "2026-10-27",
+  "bunVersion": "1.4.4",
+  "sdkVersion": "18.14.1",
+  "observedOn": "2026-10-31",
   "provenance": {
-    "bunRelease": "https://github.com/oven-sh/bun/releases/tag/bun-v1.4.2",
+    "bunRelease": "https://github.com/oven-sh/bun/releases/tag/bun-v1.4.4",
     "ompRelease": "https://github.com/can1357/oh-my-pi/releases/tag/v18.8.6",
-    "sdkRelease": "https://github.com/can1357/oh-my-pi/releases/tag/v18.13.1",
+    "sdkRelease": "https://github.com/can1357/oh-my-pi/releases/tag/v18.14.1",
     "caBundle": {
       "version": "2026.1.4",
       "observedOn": "2026-09-12",
@@ -75,29 +75,29 @@
     },
     "bun": {
       "linux-x64": {
-        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64-baseline.zip",
-        "sha256": "c678040f14fe0440eb839d37cbd0ce4c051a32da72806ac97de6a6aab6bf728f",
+        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-x64-baseline.zip",
+        "sha256": "e0446eb55995772eb9894bebae9a6be368d985a8b9271ee124486f9946eedd76",
         "format": "zip",
         "entry": [
           "bun-linux-x64-baseline",
           "bun"
         ],
-        "entrySha256": "a83d263767d839e4d2649ca8e35d07159c7afc99afdc96d731ced29e056dda0c",
-        "maxBytes": 36646949,
-        "maxExpandedBytes": 79500640,
+        "entrySha256": "10702245766b225e70bbf6235fd6b47214fd94b4760d00ffaed8ab0df57ac235",
+        "maxBytes": 51794559,
+        "maxExpandedBytes": 107308936,
         "maxMembers": 2
       },
       "linux-arm64": {
-        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-aarch64.zip",
-        "sha256": "54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7",
+        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-aarch64.zip",
+        "sha256": "baa6bb36f51d6e58561e02bbea825038a9df454f673d6d776e8bbf86f8c7850e",
         "format": "zip",
         "entry": [
           "bun-linux-aarch64",
           "bun"
         ],
-        "entrySha256": "616f267a34278ff5ac282df37ffdfba1d7141f4f6926bca99af2cd6ef3ad32b1",
-        "maxBytes": 36602920,
-        "maxExpandedBytes": 79420872,
+        "entrySha256": "354c2b049c716aca07b2e5cddb887928ac58950675d1258bb6312083917793b6",
+        "maxBytes": 51644673,
+        "maxExpandedBytes": 107339768,
         "maxMembers": 2
       }
     },
@@ -129,16 +129,16 @@
     },
     "pi-natives": {
       "linux-x64": {
-        "url": "https://registry.npmjs.org/@oh-my-pi/pi-natives-linux-x64/-/pi-natives-linux-x64-18.13.1.tgz",
-        "sha256": "82639bdbea669e517ae48fa40b50cbe236aac2ff35e62cc0a999686dfaf514d4",
+        "url": "https://registry.npmjs.org/@oh-my-pi/pi-natives-linux-x64/-/pi-natives-linux-x64-18.14.1.tgz",
+        "sha256": "e63bd846f516f8b29cd46ea6f29ab0a86365a820409445868e1db049a777e5a8",
         "format": "tar.gz",
         "entry": [
           "package",
           "pi_natives.linux-x64-baseline.node"
         ],
-        "entrySha256": "b6c9f01221780f487735b217e2756754db4b9c84d57e32f8dd3d331f1542d1be",
-        "maxBytes": 93378695,
-        "maxExpandedBytes": 234124800,
+        "entrySha256": "e6485a426805a3bb44b7ba7cb273fc137de3bdaee57d7bc65be1c19ddbc09b94",
+        "maxBytes": 97677052,
+        "maxExpandedBytes": 244873728,
         "maxMembers": 6,
         "files": {
           "pi-natives-license": {
@@ -157,7 +157,7 @@
               "package",
               "THIRD-PARTY-NOTICES.txt"
             ],
-            "sha256": "768612d40a4d1788813b997b011290d0f08c426add452de6560bf227cd1fc29d",
+            "sha256": "a30f302aa403f7ecb1009caf8e565876b10d03782d420689e91ff0092b041ddf",
             "relativeTarget": [
               "pi-natives-licenses",
               "THIRD-PARTY-NOTICES.txt"
@@ -166,16 +166,16 @@
         }
       },
       "linux-arm64": {
-        "url": "https://registry.npmjs.org/@oh-my-pi/pi-natives-linux-arm64/-/pi-natives-linux-arm64-18.13.1.tgz",
-        "sha256": "7e67f77372291800982ae28b94778b1bea70c6e15dba6cfe1dc400d98b45ccc6",
+        "url": "https://registry.npmjs.org/@oh-my-pi/pi-natives-linux-arm64/-/pi-natives-linux-arm64-18.14.1.tgz",
+        "sha256": "d61f1727b2046e86700a4651db0e14dfc9c6ce08810aed65a76749cf1cfdaac1",
         "format": "tar.gz",
         "entry": [
           "package",
           "pi_natives.linux-arm64.node"
         ],
-        "entrySha256": "3a0a317fb71f0e4610f98f311401b9cae10587785db552322bbf614b5acdc593",
-        "maxBytes": 44319043,
-        "maxExpandedBytes": 107893760,
+        "entrySha256": "bc1032f43caca800609a2625e0dbe43d6a4e3b9236d809a8dd699d684e64c861",
+        "maxBytes": 46521511,
+        "maxExpandedBytes": 113022976,
         "maxMembers": 5,
         "files": {
           "pi-natives-license": {
@@ -194,7 +194,7 @@
               "package",
               "THIRD-PARTY-NOTICES.txt"
             ],
-            "sha256": "768612d40a4d1788813b997b011290d0f08c426add452de6560bf227cd1fc29d",
+            "sha256": "a30f302aa403f7ecb1009caf8e565876b10d03782d420689e91ff0092b041ddf",
             "relativeTarget": [
               "pi-natives-licenses",
               "THIRD-PARTY-NOTICES.txt"
@@ -236,8 +236,8 @@
   "rejectedMusl": {
     "reason": "Published musl assets are dynamically linked; SDK native npm artifacts are glibc-only. Musl assets cannot remove the reviewed system closure requirement.",
     "bun": {
-      "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64-musl-baseline.zip",
-      "sha256": "76e1db84e98f22f78de0a87e309bfbbf297732847f9720db36750646c85c8c18",
+      "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-x64-musl-baseline.zip",
+      "sha256": "6e9c37098b293920aed28bfb51ab240e26d23bfdd9bbfecb3ad428ac166549bc",
       "interpreter": [
         "/lib/ld-musl-x86_64.so.1"
       ],

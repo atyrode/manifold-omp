@@ -2,9 +2,9 @@
   "name": "omp-manifold-plugins",
   "private": true,
   "type": "module",
-  "packageManager": "bun@1.4.2",
+  "packageManager": "bun@1.4.4",
   "engines": {
-    "bun": "1.4.2"
+    "bun": "1.4.4"
   },
   "scripts": {
     "check": "tsc -p . && tsc -p sdk-host",
@@ -15,9 +15,9 @@
     "deps:prepare": "bun --no-install workers/build.ts --prepare-dependencies"
   },
   "dependencies": {
-    "@oh-my-pi/pi-ai": "18.13.1",
-    "@oh-my-pi/pi-catalog": "18.13.1",
-    "@oh-my-pi/pi-utils": "18.13.1",
+    "@oh-my-pi/pi-ai": "18.14.1",
+    "@oh-my-pi/pi-catalog": "18.14.1",
+    "@oh-my-pi/pi-utils": "18.14.1",
     "zod": "4.4.3"
   },
   "devDependencies": {
@@ -27,6 +27,6 @@
     "typescript": "^5.9.3"
   },
   "patchedDependencies": {
-    "@oh-my-pi/pi-ai@18.13.1": "patches/@oh-my-pi%2Fpi-ai@18.13.1.patch"
+    "@oh-my-pi/pi-ai@18.14.1": "patches/@oh-my-pi%2Fpi-ai@18.14.1.patch"
   }
 }
