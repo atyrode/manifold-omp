@@ -78,9 +78,11 @@ export function buildSharedBrokerPolicy(runtime: ServiceRuntime): ServicePolicy 
   gatewayUsage.query = { provider: { type: "string", required: false, maxBytes: 128 } };
   const json = { kind: "json", disclosure: "full" } as const;
   // OMP 18.4 names an auth-recovery refresh so the broker can reuse a token it minted
-  // moments ago. The proxy refuses any undeclared query, so the one value is declared.
+  // moments ago, and since 18.15 a usage probe's refresh (`usage-probe`) so the broker leaves a
+  // dead grant for an interactive request to disable. The proxy refuses any undeclared query,
+  // so exactly those two values are declared.
   const refresh = credentialProxy("POST", "refresh");
-  refresh.query = { reason: { type: "string", required: false, maxBytes: 16, enum: ["auth-recovery"] } };
+  refresh.query = { reason: { type: "string", required: false, maxBytes: 16, enum: ["auth-recovery", "usage-probe"] } };
   // The 18.8.6 client names the provider of a usage invalidation (`?provider=`), so the broker
   // drops only that provider's reports. The undeclared-query refusal would lose the notice.
   const usageStale = proxy("POST", "/v1/usage/stale");

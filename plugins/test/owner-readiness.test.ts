@@ -899,10 +899,10 @@ test("the broker policy admits every route the pinned gateway client sends, and 
     scope: "instance", pluginId: ACCOUNTS_PLUGIN_ID, operationId: BROKER_OPERATION_ID, ...pins,
     input: { clientAccess: { literal: "{}" } },
   });
-  // An auth-recovery refresh carries `?reason=auth-recovery`; the proxy refuses undeclared queries.
+  // A refresh names why it was requested (`?reason=`); the proxy refuses undeclared queries.
   expect(policy.operations["gateway-refresh"]).toMatchObject({
     method: "POST", path: "/v1/credential/{credentialId}/refresh",
-    query: { reason: { type: "string", required: false, enum: ["auth-recovery"] } },
+    query: { reason: { type: "string", required: false, enum: ["auth-recovery", "usage-probe"] } },
   });
   // A healed block is cleared by exact scope, separately from clearing every block.
   expect(policy.operations["gateway-clear-block"]).toMatchObject({
@@ -914,7 +914,10 @@ test("the broker policy admits every route the pinned gateway client sends, and 
     fetchImpl: Object.assign(async (input: Parameters<typeof fetch>[0]) => {
       const url = new URL(input instanceof Request ? input.url : String(input));
       sent.push(url);
-      return Response.json(url.pathname === "/v1/usage" ? { generatedAt: Date.now(), reports: [] } : { ok: true });
+      return Response.json(url.pathname === "/v1/usage" ? { generatedAt: Date.now(), reports: [] }
+        : url.pathname === "/v1/credential/1/refresh"
+          ? { entry: { id: 1, provider: "anthropic", credential: { type: "api_key", key: "fixture" }, identityKey: null } }
+          : { ok: true });
     }, { preconnect: fetch.preconnect }) });
   await client.notifyUsageStale("anthropic");
   expect(sent.map(url => [url.pathname, [...url.searchParams.keys()]])).toEqual([["/v1/usage/stale", ["provider"]]]);
@@ -929,6 +932,16 @@ test("the broker policy admits every route the pinned gateway client sends, and 
   expect(policy.operations["gateway-usage"]).toMatchObject({
     method: "GET", path: "/v1/usage", query: { provider: { type: "string", required: false, maxBytes: 128 } },
   });
+  // It names exactly the declared reasons on a refresh, and sends none for an ordinary one.
+  sent.length = 0;
+  await client.refreshCredential(1, undefined, "auth-recovery");
+  await client.refreshCredential(1, undefined, "usage-probe");
+  await client.refreshCredential(1);
+  expect(sent.map(url => [url.pathname, [...url.searchParams.entries()]])).toEqual([
+    ["/v1/credential/1/refresh", [["reason", "auth-recovery"]]],
+    ["/v1/credential/1/refresh", [["reason", "usage-probe"]]],
+    ["/v1/credential/1/refresh", []],
+  ]);
   // The gateway binds exactly the operations the policy declares for it.
   const bound = gatewayManifest.machine.operations["atyrode.omp.gateway.serve"].services[0]!.operationIds;
   expect([...bound].sort()).toEqual(Object.keys(policy.operations).filter(id => id.startsWith("gateway-")).sort());
