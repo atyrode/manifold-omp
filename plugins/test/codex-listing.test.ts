@@ -2,7 +2,10 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import { bundledProbeModels } from "../atyrode.omp/sdk-metadata.macro.ts" with { type: "macro" };
-import { inventoryAdmits, OMP_VERSION, parseBenchmarkObservation, parseInventoryObservation, type InventoryModel } from "../api/probe.ts";
+import {
+  inventoryAdmits, LISTED_PROVIDER_ROWS, OMP_VERSION, parseBenchmarkObservation, parseInventoryObservation, PROBE_MODEL_LIMIT, type InventoryModel,
+} from "../api/probe.ts";
+import { inventoryPermission } from "../atyrode.omp/execution.ts";
 import { startPrivateBoundary, type PrivateBoundary } from "../workers/gateway/boundary.ts";
 import { inventoryModelOf } from "../workers/gateway/projection.ts";
 import { poolModels, publishedModels, resolvePublished } from "../workers/gateway/storage.ts";
@@ -192,11 +195,26 @@ describe("inventory reports a listed provider from the gateway's listing", () =>
       .toThrow("probe_invalid_observation");
   });
 
-  test("a listing larger than a receipt keeps every smaller provider whole", () => {
+  test("a listing too long for the receipt is refused by its bound, and a named model past any cutoff is kept", () => {
     const many = Array.from({ length: 300 }, (_, index) => fact(`gpt-fixture-${String(index).padStart(3, "0")}`));
-    const receipt = parseInventoryObservation(cli, [sonnet], 1, OMP_VERSION, quotaTierOf, { providers: ["openai-codex"], listing: listing(...many) });
-    expect(receipt.models).toHaveLength(256);
-    expect(receipt.models.some(model => model.provider === "anthropic")).toBe(true);
+    // Lexically last, so any truncation of the listing would have dropped it.
+    const required = fact("gpt-fixture-299");
+    expect(() => parseInventoryObservation(cli, [sonnet], 1, OMP_VERSION, quotaTierOf, { providers: ["openai-codex"], listing: listing(...many) }))
+      .toThrow("probe_output_limit");
+    const named = parseInventoryObservation(cli, [sonnet, { provider: required.provider, id: required.id, api: required.api }], 1, OMP_VERSION,
+      quotaTierOf, { providers: ["openai-codex"], listing: listing(...many) });
+    expect(named.models.map(model => `${model.provider}/${model.id}`)).toEqual(["anthropic/claude-sonnet-4-5", "openai-codex/gpt-fixture-299"]);
+  });
+
+  test("a default inventory leaves each listed provider its room in the receipt", () => {
+    const slot = [{ scope: "scope", credentialId: 1, identityKey: null }];
+    // OpenRouter alone bundles more chat rows than a receipt holds.
+    const pool = { openrouter: slot, anthropic: slot, "openai-codex": slot };
+    const { identities, listedProviders } = inventoryPermission(bundledProbeModels(), pool, undefined);
+    expect(listedProviders).toEqual(["openai-codex"]);
+    expect(identities).toHaveLength(PROBE_MODEL_LIMIT - LISTED_PROVIDER_ROWS);
+    expect(identities.some(identity => identity.provider === "openai-codex")).toBe(false);
+    expect(identities.some(identity => identity.provider === "anthropic")).toBe(true);
   });
 
   test("a benchmark of a listed model measures the gateway's row the CLI names by its listing id", () => {

@@ -10,7 +10,7 @@ import { readSealedJSON as readBrokerSealedJSON } from "../broker/inputs.ts";
 
 // Runtime imports must follow the same logging barrier as the private worker.
 setTransports({ file: false, console: false });
-const { openPoolStorage, poolModels, PoolBrokerClient } = await import("./storage.ts");
+const { openPoolStorage, poolModels, publishedModels, PoolBrokerClient } = await import("./storage.ts");
 const { safeNativeStream } = await import("./boundary.ts");
 const { startPoolGateway } = await import("./runtime.ts");
 const { resolveCredentialIdentityKey } = await import("@oh-my-pi/pi-ai/auth/sqlite-credential-store");
@@ -487,4 +487,47 @@ describe("native account-pool gateway", () => {
       expect(listings).toHaveLength(1);
     } finally { controller.abort(); await gateway.close(); }
   });
+
+  /**
+   * Resolving the accounts a listing is read with goes back to the broker: a snapshot refresh, and a
+   * token refresh for an expired account. A broker that stalls there must cost the listing its
+   * budget and nothing more: gateway startup waits on this read, and every request it started has
+   * to end with it rather than run on in the background.
+   */
+  test("a broker that stalls while the listing's accounts resolve costs the listing its budget, and nothing outlives it", async () => {
+    for (const stall of ["snapshot", "refresh"] as const) {
+      const entry = credential(3, "chosen", "openai-codex");
+      const fixture = new FixtureBroker([stall === "refresh"
+        ? { ...entry, credential: { ...entry.credential, expires: Date.now() - 60_000 } as SnapshotEntry["credential"] } : entry]);
+      let snapshots = 0;
+      const stalled: AbortSignal[] = [];
+      const listings: string[] = [];
+      const routed: typeof fetch = Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        if (url.hostname === "chatgpt.com") { listings.push(url.href); return Response.json({ models: [] }); }
+        const stalls = stall === "snapshot" ? url.pathname === "/v1/snapshot" && ++snapshots > 1 : url.pathname.endsWith("/refresh");
+        if (!stalls) return fixture.fetch(input, init);
+        const signal = init!.signal!;
+        stalled.push(signal);
+        const { promise, reject } = Promise.withResolvers<Response>();
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        return promise;
+      }, { preconnect: fetch.preconnect });
+      const owner = new AbortController();
+      const pool = { "openai-codex": [{ scope: "fixture-scope", credentialId: 3, identityKey: "chosen" }] };
+      const storage = await openPoolStorage(broker, pool, owner.signal, routed);
+      try {
+        const started = performance.now();
+        const { models, unreadable } = await publishedModels(pool, AbortSignal.timeout(300), routed,
+          (provider, deadline) => storage.listingAccounts(provider, deadline));
+        expect(performance.now() - started).toBeLessThan(2_000);
+        expect(Object.keys(unreadable)).toEqual(["openai-codex"]);
+        expect([...models.keys()]).toEqual([...poolModels(pool).keys()]);
+        expect(listings).toEqual([]);
+        // The stalled broker request was reached, and the listing's deadline ended it.
+        expect(stalled.length).toBeGreaterThan(0);
+        expect(stalled.every(signal => signal.aborted)).toBe(true);
+      } finally { owner.abort(); storage.close(); }
+    }
+  }, 15_000);
 });

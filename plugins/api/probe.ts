@@ -95,6 +95,12 @@ export const ProbeIdentitiesSchema = z.array(ProbeIdentitySchema).min(1).max(PRO
  * release does not bundle only by name.
  */
 export const ACCOUNT_LISTED_PROVIDERS: readonly string[] = ["openai-codex"];
+/**
+ * The rows a default inventory leaves free in its receipt for each listed provider's listing.
+ * A listing longer than the room left is refused `output_limit`, never truncated. Codex lists
+ * about ten models to an account.
+ */
+export const LISTED_PROVIDER_ROWS = 64;
 /** The providers an inventory reports from the gateway's listing; see `inventoryAdmits`. */
 export const ListedProvidersSchema = z.array(identifier).max(16)
   .refine(value => new Set(value).size === value.length);
@@ -222,25 +228,6 @@ export interface ListedObservation { readonly providers: readonly string[]; read
 function sortedLevels(levels: readonly z.infer<typeof ThinkingLevelSchema>[]) {
   return [...levels].sort((a, b) => ThinkingLevelSchema.options.indexOf(a) - ThinkingLevelSchema.options.indexOf(b));
 }
-/**
- * A receipt's rows within its bound. Every row of an unlisted provider answers one sealed identity,
- * and sealed identities never exceed the bound, so only a listed provider's whole listing can push
- * past it. When it does, providers with fewer rows go first, as `defaultInventoryIdentities` orders
- * them, so one large listing cannot crowd every other provider out.
- */
-function withinLimit(models: readonly InventoryModel[]): InventoryModel[] {
-  if (models.length <= PROBE_MODEL_LIMIT) return [...models];
-  const byProvider = new Map<string, InventoryModel[]>();
-  for (const model of models) byProvider.set(model.provider, [...(byProvider.get(model.provider) ?? []), model]);
-  const kept: InventoryModel[] = [];
-  for (const [, group] of [...byProvider].sort(([a, left], [b, right]) => left.length - right.length || compare(a, b))) {
-    for (const model of group.sort((a, b) => compare(a.id, b.id))) {
-      if (kept.length === PROBE_MODEL_LIMIT) return kept;
-      kept.push(model);
-    }
-  }
-  return kept;
-}
 export function parseInventoryObservation(raw: unknown, identitiesValue: unknown, observedAt: number, version: string, quotaTierOf: QuotaTierOf,
   listed: ListedObservation = { providers: [], listing: null }): InventoryReceipt {
   if (version !== OMP_VERSION) throw new ProbeError("unsupported_version");
@@ -276,8 +263,12 @@ export function parseInventoryObservation(raw: unknown, identitiesValue: unknown
     }
   }
   unique(models);
-  const receipt = withinLimit(models).sort((a, b) => compare(probeAddress(a), probeAddress(b)));
-  return parse(InventoryReceiptSchema, { schemaVersion: 1, kind: "inventory", ompVersion: OMP_VERSION, observedAt, models: receipt });
+  // Every unlisted row answers one sealed identity, and sealed identities never exceed the bound, so
+  // only a listed provider's whole listing can push past it. Such a receipt is refused by the bound's
+  // name rather than truncated: dropping rows would silently drop models from a successful inventory.
+  if (models.length > PROBE_MODEL_LIMIT) throw new ProbeError("output_limit");
+  models.sort((a, b) => compare(probeAddress(a), probeAddress(b)));
+  return parse(InventoryReceiptSchema, { schemaVersion: 1, kind: "inventory", ompVersion: OMP_VERSION, observedAt, models });
 }
 
 const RawRunSchema = z.discriminatedUnion("ok", [

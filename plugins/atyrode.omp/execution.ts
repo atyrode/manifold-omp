@@ -37,6 +37,7 @@ import {
   SealedIdentitiesSchema,
   ListedProvidersSchema,
   ACCOUNT_LISTED_PROVIDERS,
+  LISTED_PROVIDER_ROWS,
   inventoryAdmits,
   ThinkingLevelSchema,
   GATEWAY_DISCOVERY_TIMEOUT_MS,
@@ -84,6 +85,7 @@ const listingThinking = liveListingThinking();
 export function defaultInventoryIdentities(
   catalog: Readonly<Record<string, readonly ProbeIdentity[]>>,
   pool: RuntimeAccountPool,
+  limit: number = PROBE_MODEL_LIMIT,
 ): ProbeIdentity[] {
   // Smaller provider catalogs go first so one large aggregator cannot crowd every direct provider out.
   const providers = Object.keys(pool).sort((left, right) => {
@@ -95,7 +97,7 @@ export function defaultInventoryIdentities(
   for (const provider of providers) {
     for (const identity of catalog[provider] ?? []) {
       identities.push(identity);
-      if (identities.length === PROBE_MODEL_LIMIT) return identities;
+      if (identities.length === limit) return identities;
     }
   }
   return identities;
@@ -105,20 +107,25 @@ export function defaultInventoryIdentities(
  *
  * A listed provider's catalog is the pooled account's own listing (`ACCOUNT_LISTED_PROVIDERS`),
  * which only the machine reads, so this build can neither name its models nor rule one out. A
- * default inventory reports such a provider's listing as the gateway serves it, in the room its
- * bundled rows would have taken; an explicit request names its identities and receives exactly
- * those the listing carries. Every other provider's catalog is the pinned snapshot, and an
- * identity it lacks is refused.
+ * default inventory reports such a provider's listing as the gateway serves it, and leaves
+ * `LISTED_PROVIDER_ROWS` of the receipt free for it; a listing that does not fit is refused by the
+ * probe, never truncated. An explicit request names its identities and receives exactly those the
+ * listing carries. Every other provider's catalog is the pinned snapshot, and an identity it lacks
+ * is refused.
  */
 export function inventoryPermission(
   catalog: Readonly<Record<string, readonly ProbeIdentity[]>>,
   pool: RuntimeAccountPool,
   requested: readonly ProbeIdentity[] | undefined,
 ): { identities: ProbeIdentity[]; listedProviders: string[] } {
-  if (requested === undefined) return {
-    identities: defaultInventoryIdentities(catalog, pool).filter(identity => !ACCOUNT_LISTED_PROVIDERS.includes(identity.provider)),
-    listedProviders: ACCOUNT_LISTED_PROVIDERS.filter(provider => (pool[provider]?.length ?? 0) > 0),
-  };
+  if (requested === undefined) {
+    const listedProviders = ACCOUNT_LISTED_PROVIDERS.filter(provider => (pool[provider]?.length ?? 0) > 0);
+    const unlisted = Object.fromEntries(Object.entries(pool).filter(([provider]) => !ACCOUNT_LISTED_PROVIDERS.includes(provider)));
+    return {
+      identities: defaultInventoryIdentities(catalog, unlisted, PROBE_MODEL_LIMIT - LISTED_PROVIDER_ROWS * listedProviders.length),
+      listedProviders,
+    };
+  }
   const seen = new Set<string>();
   for (const identity of requested) {
     const key = probeAddress(identity).toLowerCase();

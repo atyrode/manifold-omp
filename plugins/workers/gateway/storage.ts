@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { writeSync } from "node:fs";
 import { z } from "zod";
 import { AuthBrokerClient, type AuthBrokerClientOptions, type FetchSnapshotOptions, type FetchSnapshotResult } from "@oh-my-pi/pi-ai/auth-broker/client";
@@ -12,6 +13,20 @@ import type { RuntimeAccountPool } from "../../api/contracts.ts";
 import { unavailable } from "./inputs.ts";
 import { OPENROUTER_LISTING_TEMPLATE } from "./template.ts";
 import { NamespaceViews } from "../sdk-namespace.ts";
+
+/**
+ * The deadline of the listing read a broker request is made for, if any.
+ *
+ * Resolving the accounts a listing is read with refreshes the broker snapshot and, for an expired
+ * token, the credential, and neither SDK call takes a signal of its own. Scoped to the async
+ * context of that one read, the deadline reaches every broker request the read causes, so the read
+ * ends at its budget and leaves no broker request running behind it; any other request is unbound.
+ */
+const listingDeadline = new AsyncLocalStorage<AbortSignal>();
+function withListingDeadline(signal: AbortSignal | undefined): AbortSignal | undefined {
+  const deadline = listingDeadline.getStore();
+  return deadline && signal ? AbortSignal.any([signal, deadline]) : deadline ?? signal;
+}
 
 /** The SDK's identity-only pool leaves API keys and missing providers unrestricted.
  * Enforce the native launch's concrete provider/id/identity tuples at every ingress
@@ -42,7 +57,8 @@ export class PoolBrokerClient extends AuthBrokerClient {
     this.#activeIds = activeIds;
   }
   override async fetchSnapshot(options: FetchSnapshotOptions = {}): Promise<FetchSnapshotResult> {
-    const result = await super.fetchSnapshot(options);
+    const signal = withListingDeadline(options.signal);
+    const result = await super.fetchSnapshot(signal ? { ...options, signal } : options);
     if (result.status === 304) return result;
     return { ...result, snapshot: { ...result.snapshot, credentials: result.snapshot.credentials.filter(entry => this.admits(entry)) } };
   }
@@ -63,7 +79,7 @@ export class PoolBrokerClient extends AuthBrokerClient {
   }
   override async refreshCredential(id: number, signal?: AbortSignal, reason?: OAuthRefreshReason) {
     if (!this.#activeIds.has(id) || this.#slots.get(id)?.identityKey === null) throw unavailable();
-    const result = await super.refreshCredential(id, signal, reason);
+    const result = await super.refreshCredential(id, withListingDeadline(signal), reason);
     if (!this.#activeIds.has(id) || result.entry.id !== id || !this.admits(result.entry)) {
       throw unavailable();
     }
@@ -105,16 +121,20 @@ export class PoolAuthStorage extends AuthStorage {
    * provider's whole catalog and hide what the missing account is offered. It passes the guard
    * every key does, so an account outside this pool, or one revoked while it resolves, never
    * reaches the listing request.
+   *
+   * `deadline` is the listing's: the snapshot refresh, every token refresh and the broker requests
+   * behind them are ended by it, so a slow broker costs the listing its budget and nothing more.
    */
-  async listingAccounts(provider: string): Promise<OpenAICodexAccount[] | null> {
-    const accounts = await this.#guarded(provider, async () => {
+  async listingAccounts(provider: string, deadline: AbortSignal): Promise<OpenAICodexAccount[] | null> {
+    const accounts = await listingDeadline.run(deadline, () => this.#guarded(provider, async () => {
       const resolved: OpenAICodexAccount[] = [];
-      for (const access of await this.oauth.accessAll(provider)) {
+      for (const access of await this.oauth.accessAll(provider, { signal: deadline })) {
         if (!access.ok) return undefined;
         resolved.push(access.accountId ? { accessToken: access.accessToken, accountId: access.accountId } : { accessToken: access.accessToken });
       }
       return resolved;
-    });
+    }));
+    deadline.throwIfAborted();
     return accounts && accounts.length > 0 ? accounts : null;
   }
   async #guarded<T>(provider: string, resolve: () => Promise<T | undefined>): Promise<T | undefined> {
@@ -226,10 +246,15 @@ type Listing<T> = { readonly value: T } | { readonly reason: string };
 async function withinBudget<T>(signal: AbortSignal, read: (deadline: AbortSignal) => Promise<Listing<T>>): Promise<Listing<T>> {
   let reason = "unattempted";
   const deadline = AbortSignal.any([signal, AbortSignal.timeout(CATALOG_TIMEOUT_MS)]);
+  // The wait ends at the deadline even if one step of a read were slow to honor it; every step is
+  // also handed the deadline, so nothing it started outlives it.
+  const { promise: ended, reject: end } = Promise.withResolvers<never>();
+  ended.catch(() => {});
+  deadline.addEventListener("abort", () => end(deadline.reason), { once: true });
   for (let attempt = 0; attempt < CATALOG_ATTEMPTS && !deadline.aborted; attempt += 1) {
     if (attempt > 0) await Bun.sleep(CATALOG_RETRY_MS);
     try {
-      const listing = await read(deadline);
+      const listing = await Promise.race([read(deadline), ended]);
       if ("value" in listing) return listing;
       reason = listing.reason;
     } catch (error) {
@@ -280,9 +305,10 @@ async function openRouterListing(deadline: AbortSignal, fetchImpl: typeof fetch)
  * the last refusal or failure it met is kept as the reason when the listing was not read.
  */
 async function codexListing(deadline: AbortSignal, fetchImpl: typeof fetch,
-  accounts: () => Promise<readonly OpenAICodexAccount[] | null>): Promise<Listing<Model<Api>[]>> {
-  // A pool whose accounts cannot all be resolved, or holds no OAuth account, has no listing to read.
-  const resolved = await accounts().catch(() => null);
+  accounts: (deadline: AbortSignal) => Promise<readonly OpenAICodexAccount[] | null>): Promise<Listing<Model<Api>[]>> {
+  // A pool whose accounts cannot all be resolved within the budget, or holds no OAuth account,
+  // has no listing to read.
+  const resolved = await accounts(deadline).catch(() => null);
   if (!resolved) return { reason: "account_unavailable" };
   let observed = "listing_unreadable";
   const bounded = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -334,7 +360,7 @@ export async function publishedModels(
   pool: RuntimeAccountPool,
   signal: AbortSignal,
   fetchImpl: typeof fetch = fetch,
-  accounts: (provider: string) => Promise<readonly OpenAICodexAccount[] | null> = async () => null,
+  accounts: (provider: string, deadline: AbortSignal) => Promise<readonly OpenAICodexAccount[] | null> = async () => null,
 ): Promise<PublishedCatalog> {
   const models = poolModels(pool);
   const unreadable: Record<string, string> = {};
@@ -344,7 +370,7 @@ export async function publishedModels(
   const [openrouter, codex] = await Promise.all([
     pool.openrouter?.length && template ? withinBudget(signal, deadline => openRouterListing(deadline, fetchImpl)) : undefined,
     pool["openai-codex"]?.length
-      ? withinBudget(signal, deadline => codexListing(deadline, fetchImpl, () => accounts("openai-codex")))
+      ? withinBudget(signal, deadline => codexListing(deadline, fetchImpl, bound => accounts("openai-codex", bound)))
       : undefined,
   ]);
   if (codex && "reason" in codex) unreadable["openai-codex"] = degraded(models, "openai-codex", codex.reason);
