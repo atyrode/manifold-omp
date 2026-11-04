@@ -33,7 +33,8 @@ export async function startPoolGateway(inputs: GatewayInputs, ownerSignal: Abort
     signal.throwIfAborted();
     storage = await openPoolStorage(inputs.broker, inputs.accountPool, signal, fetchImpl);
     signal.throwIfAborted();
-    const catalog = await publishedModels(inputs.accountPool, signal, fetchImpl);
+    const pooled = storage;
+    const catalog = await publishedModels(inputs.accountPool, signal, fetchImpl, provider => pooled.listingAccounts(provider));
     const models = catalog.models;
     if (inputs.requestLimits !== null) transport = boundedTransport(inputs.requestLimits, signal, fetchImpl);
     // The SDK exposes diagnostic routes without a hook to disable them. Its

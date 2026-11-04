@@ -21,6 +21,7 @@ import {
   type ActionReply,
   type OmpAction,
   type JobInputBinding,
+  type InventoryModel,
   type PublicJob,
 } from "../api/index.ts";
 import { accountsScope } from "../atyrode.omp/broker.ts";
@@ -62,6 +63,8 @@ interface Fixture {
   seal(jobId: string, archive: Buffer): void;
   /** What the session process wrote to its standard error, as the owner sealed it. */
   said(jobId: string, stderr: string): void;
+  /** What a probe wrote to its standard output, its receipt, as the owner sealed it. */
+  printed(jobId: string, stdout: string): void;
   amend(jobId: string, overrides: JobOverrides): void;
   state: { gatewayRevision: string };
 }
@@ -444,6 +447,19 @@ function fixture(options: { sdk?: boolean } = {}): Fixture {
         files: 1,
       });
     },
+    printed(jobId, stdout) {
+      const job = jobs.get(jobId)!;
+      const outputId = `${jobId}-stdout`;
+      const bytes = Buffer.from(stdout, "utf8");
+      archives.set(outputId, bytes);
+      job.result!.outputs.push({
+        outputId,
+        name: "stdout",
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        bytes: bytes.length,
+        files: 1,
+      });
+    },
     amend: advance,
     state,
   };
@@ -803,6 +819,91 @@ test("a one-shot pins its configured live-listed model, so discovery timing cann
   const terminal = await f.client.call("prepareSession", { ...live, reviewDigest });
   if ("refused" in terminal) throw new Error(terminal.refused);
   expect(JSON.parse(String(terminal.runtime.input.config)).enabledModels).toBeUndefined();
+});
+
+/** A broker holding a Codex OAuth account beside the fixture's Anthropic one, and a pool of both. */
+function codexFixture() {
+  const f = fixture();
+  f.ctx.services.readInstance = async () => ({ type: "service_result", requestId: "fixture-request", ok: true, result: { custodyId, credentials: [
+    { id: 7, provider: "anthropic", identityKey: "fixture-identity", credential: { type: "oauth", email: "fixture@example.invalid" } },
+    { id: 9, provider: "openai-codex", identityKey: "fixture-codex-identity", credential: { type: "oauth", email: "codex@example.invalid" } },
+  ] } });
+  const accountPool = { ...session.accountPool, "openai-codex": [{ scope, credentialId: 9, identityKey: "fixture-codex-identity" }] };
+  return { f, accountPool };
+}
+/** The account's live Codex listing carries this model; the pinned SDK does not bundle it. */
+const CODEX_LISTED_ONLY = "gpt-6.1-terra";
+
+/**
+ * Codex lists its models per account, and the gateway publishes that listing. The pinned snapshot
+ * can neither confirm nor rule out a Codex id, so review leaves the decision to the machine, which
+ * refuses an id the listing lacks by name (`model_not_published`) rather than substituting one.
+ */
+test("a Codex model only the account's listing carries is admitted, with the provider's ladder for its level", async () => {
+  const { f, accountPool } = codexFixture();
+  // The premise: the pinned SDK catalog does not carry it, only the account's live listing does.
+  expect(getBundledModels("openai-codex").some(model => model.id === CODEX_LISTED_ONLY)).toBe(false);
+  const configured = `openai-codex/${CODEX_LISTED_ONLY}:high`;
+  const live = { ...session, accountPool, overlay: { modelRoles: { default: configured }, retry: { enabled: true, modelFallback: false } } };
+  const reviewDigest = await reviewDigestOf(f.client, live);
+  const job = await f.client.call("runSession", { ...live, reviewDigest });
+  if ("refused" in job) throw new Error(job.refused);
+  const models: { providers: Record<string, object> } = JSON.parse(String(f.posted[0]!.input.models));
+  expect(Object.keys(models.providers)).toEqual(["openai-codex"]);
+  // The listing names the model but not how it reasons, so its `:high` is pinned with the one
+  // ladder every reasoning Codex model the SDK bundles carries.
+  const ladder = getBundledModels("openai-codex").find(model => model.reasoning && model.thinking)!.thinking!;
+  expect(ladder.efforts.map(String)).toContain("high");
+  expect(models.providers["openai-codex"]).toMatchObject({
+    modelOverrides: { [`openai-codex/${CODEX_LISTED_ONLY}`]: { reasoning: true, thinking: ladder } },
+  });
+  const bearer = "fixture-native-service-bearer-0000000000000001";
+  expect(ProbeModelsConfigSchema.safeParse({ providers: Object.fromEntries(Object.entries(models.providers).map(
+    ([name, provider]) => [name, { ...provider, baseUrl: "http://127.0.0.1:42123", apiKey: bearer }])) }).success).toBe(true);
+  // An id no catalog carries is not refused by this build either: only the listing can say.
+  const absent = await f.client.call("reviewSession", { ...live, overlay: { modelRoles: { default: "openai-codex/gpt-5.3-codex-spark" } } });
+  expect("refused" in absent).toBe(false);
+  // Providers other than OpenRouter and Codex keep the pinned snapshot's verdict.
+  expect(await f.client.call("reviewSession", { ...live, overlay: { modelRoles: { default: "anthropic/claude-sonnet-9-9" } } }))
+    .toEqual({ refused: "omp_model_unavailable" });
+});
+
+test("a default inventory reports Codex from the account's listing, and an explicit one only what it names", async () => {
+  const { f, accountPool } = codexFixture();
+  const row = (provider: string, id: string, api: string, quotaTier: string | null): InventoryModel => ({ provider, id, api,
+    inputCostPerMillion: 1, outputCostPerMillion: 5, contextWindow: 500_000, maxTokens: 128_000, reasoning: true,
+    thinkingLevels: ["low", "medium", "high"], images: true, quotaTier });
+  const receipt = (...models: InventoryModel[]) =>
+    JSON.stringify({ schemaVersion: 1, kind: "inventory", ompVersion: "18.8.6", observedAt: 1, models });
+  const listed = row("openai-codex", CODEX_LISTED_ONLY, "openai-codex-responses", "chat");
+  const pinned = row("anthropic", "claude-sonnet-4-5", "anthropic-messages", null);
+
+  const started = await f.client.call("startInventory", { ...target, expectedDefaultsRevision: 0, accountPool });
+  if ("refused" in started) throw new Error(started.refused);
+  const sealed = f.posted.at(-1)!.input;
+  // Codex is covered as a provider, from the gateway's listing; every other provider by identity.
+  expect(JSON.parse(String(sealed.listedProviders))).toEqual(["openai-codex"]);
+  const identities: { provider: string }[] = JSON.parse(String(sealed.modelIdentities));
+  expect(identities.length).toBeGreaterThan(0);
+  expect(identities.every(identity => identity.provider === "anthropic")).toBe(true);
+  f.printed(started.jobId, receipt(pinned, listed));
+  const read = await f.client.call("readInventory", { ...target, jobId: started.jobId });
+  if ("refused" in read) throw new Error(read.refused);
+  expect(read.inventory.models.map(model => `${model.provider}/${model.id}:${String(model.quotaTier)}`))
+    .toEqual(["anthropic/claude-sonnet-4-5:null", `openai-codex/${CODEX_LISTED_ONLY}:chat`]);
+
+  // Named Codex identities need no bundled row, and restrict Codex to exactly themselves.
+  const named = await f.client.call("startInventory", { ...target, expectedDefaultsRevision: 0, accountPool,
+    modelIdentities: [{ provider: "openai-codex", id: CODEX_LISTED_ONLY, api: "openai-codex-responses" }] });
+  if ("refused" in named) throw new Error(named.refused);
+  expect(JSON.parse(String(f.posted.at(-1)!.input.listedProviders))).toEqual(["openai-codex"]);
+  f.printed(named.jobId, receipt(listed, row("openai-codex", "gpt-6-luna", "openai-codex-responses", "chat")));
+  expect(await f.client.call("readInventory", { ...target, jobId: named.jobId })).toEqual({ refused: "omp_invalid_observation" });
+
+  // Every other provider is still the pinned snapshot's to vouch for.
+  expect(await f.client.call("startInventory", { ...target, expectedDefaultsRevision: 0, accountPool,
+    modelIdentities: [{ provider: "anthropic", id: "claude-sonnet-9-9", api: "anthropic-messages" }] }))
+    .toEqual({ refused: "omp_invalid_model_identity" });
 });
 
 /**

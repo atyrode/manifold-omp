@@ -29,7 +29,7 @@ describe("the gateway publishes what its provider serves", () => {
     expect(models.size).toBeGreaterThan(poolModels(pool).size);
     // A listing that WAS read reports nothing unreadable, which is what lets the boundary
     // answer 404 for a model that genuinely is not published.
-    expect(unreadable).toBeNull();
+    expect(unreadable).toEqual({});
   });
 
   test("a listing this gateway cannot read leaves the pinned catalog in place", async () => {
@@ -39,7 +39,7 @@ describe("the gateway publishes what its provider serves", () => {
     expect(models.size).toBeGreaterThan(0);
     // And it says WHICH failure left it pinned-only, rather than looking like a live read that
     // happened to carry fewer models.
-    expect(unreadable).toBe("Error");
+    expect(unreadable).toEqual({ openrouter: "Error" });
   });
 
   test("a bundled model is never replaced by its listed row", async () => {
@@ -66,7 +66,7 @@ describe("the gateway publishes what its provider serves", () => {
     expect(models.get(UNLISTED_PUBLISHED_ID)?.id).toBe(UNLISTED_MODEL_ID);
     // Read on the third attempt, so nothing is degraded: a transient refusal that recovered is
     // not a catalog this gateway could not read.
-    expect(unreadable).toBeNull();
+    expect(unreadable).toEqual({});
   });
 });
 

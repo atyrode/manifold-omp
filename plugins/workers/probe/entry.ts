@@ -68,7 +68,7 @@ export async function runProbe(kind: "inventory" | "benchmark"): Promise<never> 
     // cancelling the inventory job; Manifold still owns the complete cgroup.
     context.close();
     context = undefined;
-    const result = kind === "inventory" ? await inventoryTarget(input.identities, controller.signal) : await benchmarkTarget(input.benchmark!, controller.signal);
+    const result = kind === "inventory" ? await inventoryTarget(input.identities, input.listed, input.listing, controller.signal) : await benchmarkTarget(input.benchmark!, controller.signal);
     emit(result);
     success = true;
   } catch (error) {

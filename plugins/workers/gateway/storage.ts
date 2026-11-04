@@ -5,6 +5,8 @@ import { RemoteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-broker/remote-st
 import type { SnapshotResponse, SnapshotStreamEvent } from "@oh-my-pi/pi-ai/auth-broker/types";
 import { AuthStorage, type AuthCredentialSnapshotEntry, type KeysApi, type OAuthRefreshReason } from "@oh-my-pi/pi-ai/auth-storage";
 import { getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
+import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { openaiCodexModelManagerOptions, type OpenAICodexAccount } from "@oh-my-pi/pi-catalog/provider-models/special";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import type { RuntimeAccountPool } from "../../api/contracts.ts";
 import { unavailable } from "./inputs.ts";
@@ -96,6 +98,25 @@ export class PoolAuthStorage extends AuthStorage {
       getWithCredential: (provider, ...rest) => this.#guarded(provider, () => source.getWithCredential(provider, ...rest)),
     }));
   }
+  /**
+   * Every pooled OAuth account of `provider`, refreshed, for reading that provider's own model
+   * listing; null when there is none or any one cannot be resolved. OMP abandons its own Codex
+   * discovery the same way: a listing read for only some of the accounts would stand for the
+   * provider's whole catalog and hide what the missing account is offered. It passes the guard
+   * every key does, so an account outside this pool, or one revoked while it resolves, never
+   * reaches the listing request.
+   */
+  async listingAccounts(provider: string): Promise<OpenAICodexAccount[] | null> {
+    const accounts = await this.#guarded(provider, async () => {
+      const resolved: OpenAICodexAccount[] = [];
+      for (const access of await this.oauth.accessAll(provider)) {
+        if (!access.ok) return undefined;
+        resolved.push(access.accountId ? { accessToken: access.accessToken, accountId: access.accountId } : { accessToken: access.accessToken });
+      }
+      return resolved;
+    });
+    return accounts && accounts.length > 0 ? accounts : null;
+  }
   async #guarded<T>(provider: string, resolve: () => Promise<T | undefined>): Promise<T | undefined> {
     this.signal.throwIfAborted();
     if (!this.#providers.has(provider)) return undefined;
@@ -165,20 +186,21 @@ const ListedModelsSchema = z.object({
   ),
 });
 
-/** A session is waiting on this call, so the catalog either answers inside this budget or is skipped. */
+/** A session is waiting on this call, so each listing either answers inside this budget or is skipped. */
 const CATALOG_TIMEOUT_MS = 8_000;
 /** Enough to ride out one transient refusal; the budget above still bounds the total. */
 const CATALOG_ATTEMPTS = 3;
 const CATALOG_RETRY_MS = 400;
 
 /**
- * The published models, and WHY THE LIVE LISTING IS NOT BEHIND THEM when it is not.
+ * The published models, and WHY A LIVE LISTING IS NOT BEHIND THEM when it is not.
  *
- * `unreadable` is the reason a read was attempted and failed, or null when there is nothing to
- * report — the listing was read, or this pool holds no credential it would be read for. The
- * distinction is the point: "the listing does not contain your model" and "I could not read
- * the listing your model would be in" are different answers, and only one of them is the
- * caller's fault.
+ * `unreadable` names, per provider, the reason a listing read was attempted and failed. A
+ * provider is absent from it when its listing was read, or when this pool holds no credential
+ * it would be read for. The distinction is the point: "the listing does not contain your model"
+ * and "I could not read the listing your model would be in" are different answers, and only one
+ * of them is the caller's fault. It is per provider because the listings are: one provider's
+ * unreadable listing says nothing about a model another provider's listing lacks.
  *
  * A fallback indistinguishable from success is how this stayed unnoticed. One line of stderr
  * said the catalog was pinned-only and nothing else did, so a preview served a stale model list
@@ -187,20 +209,97 @@ const CATALOG_RETRY_MS = 400;
  */
 export interface PublishedCatalog {
   readonly models: Map<string, Model<Api>>;
-  readonly unreadable: string | null;
+  readonly unreadable: Readonly<Record<string, string>>;
+}
+
+/** One provider's listing, or the reason this gateway could not read it. */
+type Listing<T> = { readonly value: T } | { readonly reason: string };
+
+/**
+ * One provider's listing within its budget.
+ *
+ * One transient failure must not unpublish a model: a session that drew a 429 or a timeout here
+ * got a named 404 for a model its credential serves, while the next session ran fine. The
+ * attempts share the budget, so retrying never makes the gateway slower to start than a single
+ * slow read would.
+ */
+async function withinBudget<T>(signal: AbortSignal, read: (deadline: AbortSignal) => Promise<Listing<T>>): Promise<Listing<T>> {
+  let reason = "unattempted";
+  const deadline = AbortSignal.any([signal, AbortSignal.timeout(CATALOG_TIMEOUT_MS)]);
+  for (let attempt = 0; attempt < CATALOG_ATTEMPTS && !deadline.aborted; attempt += 1) {
+    if (attempt > 0) await Bun.sleep(CATALOG_RETRY_MS);
+    try {
+      const listing = await read(deadline);
+      if ("value" in listing) return listing;
+      reason = listing.reason;
+    } catch (error) {
+      reason = error instanceof Error ? error.name : typeof error;
+    }
+  }
+  return { reason };
 }
 
 /**
- * Reports publishing less than the credential can reach, and returns the pinned catalog.
+ * Reports publishing less than the credential can reach for `provider`, whose pinned rows stay
+ * published, and returns the reason.
  *
  * Silence here is what made an unlisted model look like a caller's mistake: the session gets a
  * named 404 for a model the provider serves, and nothing upstream says the catalog was the
  * reason. One line on this worker's stderr is where the machine reads it; the returned reason
  * is how the boundary refuses by the right name instead of blaming the caller.
  */
-function degraded(models: Map<string, Model<Api>>, reason: string): PublishedCatalog {
-  writeSync(2, `catalog_pinned_only ${reason} ${String(models.size)}\n`);
-  return { models, unreadable: reason };
+function degraded(models: ReadonlyMap<string, Model<Api>>, provider: string, reason: string): string {
+  let pinned = 0;
+  for (const model of models.values()) if (model.provider === provider) pinned += 1;
+  writeSync(2, `catalog_pinned_only ${provider} ${reason} ${String(pinned)}\n`);
+  return reason;
+}
+
+async function openRouterListing(deadline: AbortSignal, fetchImpl: typeof fetch): Promise<Listing<z.infer<typeof ListedModelsSchema>>> {
+  const response = await fetchImpl(OPENROUTER_CATALOG, { redirect: "error", signal: deadline });
+  if (!response.ok) {
+    await response.body?.cancel();
+    return { reason: `status_${response.status}` };
+  }
+  return { value: ListedModelsSchema.parse(await response.json()) };
+}
+
+/**
+ * CODEX'S CATALOG AS OMP RESOLVES IT: the SDK's own Codex discovery, for every pooled account.
+ *
+ * The SDK sends `GET https://chatgpt.com/backend-api/codex/models?client_version=<its Codex client
+ * version>` (then `/models` if that route fails) with each account's OAuth access token and
+ * ChatGPT account id, and unions the accounts' listings. Its resolution makes the listing the
+ * provider's whole catalog (`dynamic-models-authoritative`): a model the account is offered is
+ * published with the prices, limits and effort ladder OMP gives it, before any SDK release
+ * bundles it, and a bundled model the account is not offered is no longer published. Nothing is
+ * cached across reads: the SDK's model cache is pointed at an in-memory database that is gone
+ * when the read ends, so every gateway start reads the listing afresh and no file is written.
+ *
+ * The SDK's own requests carry no deadline, so each one is given this read's budget here, and
+ * the last refusal or failure it met is kept as the reason when the listing was not read.
+ */
+async function codexListing(deadline: AbortSignal, fetchImpl: typeof fetch,
+  accounts: () => Promise<readonly OpenAICodexAccount[] | null>): Promise<Listing<Model<Api>[]>> {
+  // A pool whose accounts cannot all be resolved, or holds no OAuth account, has no listing to read.
+  const resolved = await accounts().catch(() => null);
+  if (!resolved) return { reason: "account_unavailable" };
+  let observed = "listing_unreadable";
+  const bounded = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    try {
+      const response = await fetchImpl(input, { ...init, redirect: "error", signal: deadline });
+      if (!response.ok) observed = `status_${response.status}`;
+      return response;
+    } catch (error) {
+      observed = error instanceof Error ? error.name : typeof error;
+      throw error;
+    }
+  };
+  const result = await resolveProviderModels({
+    ...openaiCodexModelManagerOptions({ resolveAccounts: async () => resolved, fetch: bounded }),
+    cacheDbPath: ":memory:",
+  }, "online");
+  return result.source === "provider" ? { value: result.models } : { reason: observed };
 }
 
 /** Per-million cost from a per-token price string; an unparseable price is not a free model. */
@@ -211,79 +310,74 @@ function perMillion(price: string | undefined): number | null {
 }
 
 /**
- * The models this gateway publishes: the pinned SDK catalog, plus the ones the provider lists
- * that the SDK does not carry.
+ * The models this gateway publishes: the pinned SDK catalog, with each live-listed provider's
+ * listing applied the way that provider's listing means.
  *
  * The bundled catalog is a snapshot of the SDK release, so every model a provider added since
- * — including every unlisted id, which is how OpenRouter ships its stealth models — was
- * unreachable through the governed path while working normally in local omp. A session
- * discovers models through this gateway, so the absence was total.
+ * — including every unlisted id, which is how OpenRouter ships its stealth models, and every
+ * model Codex offers an account before an SDK release bundles it — was unreachable through the
+ * governed path while working normally in local omp. A session discovers models through this
+ * gateway, so the absence was total.
  *
- * A listed model is admitted only when its provider is in the account pool, and it is built
- * from a bundled model of the SAME provider and api: the dialect flags belong to the provider,
- * not to the individual model, and the listing states only identity, size and price. A bundled
- * id always wins, so nothing the SDK pins is overridden by a fetched document.
+ * A listing is read only for a provider the account pool holds a credential for, and the two
+ * listings are read side by side, each within its own budget. A listing this gateway cannot read
+ * leaves that provider's pinned rows in place; it never empties them.
+ *
+ * - **OpenRouter** lists publicly, without a credential, and adds to the pinned catalog. A listed
+ *   model is built from a bundled model of the SAME provider and api: the dialect flags belong to
+ *   the provider, not to the individual model, and the listing states only identity, size and
+ *   price. A bundled id always wins, so nothing the SDK pins is overridden by a fetched document.
+ * - **Codex** lists per account, and its listing replaces the pinned rows (`codexListing`).
+ *   `accounts` supplies the pool's Codex accounts for it (`PoolAuthStorage.listingAccounts`).
  */
 export async function publishedModels(
   pool: RuntimeAccountPool,
   signal: AbortSignal,
   fetchImpl: typeof fetch = fetch,
+  accounts: (provider: string) => Promise<readonly OpenAICodexAccount[] | null> = async () => null,
 ): Promise<PublishedCatalog> {
   const models = poolModels(pool);
-  // No OpenRouter credential means no listing this pool would be served from: publishing
-  // exactly what the credentials reach is the whole answer, not a degradation of one.
-  if (!pool.openrouter?.length) return { models, unreadable: null };
+  const unreadable: Record<string, string> = {};
   const template = OPENROUTER_LISTING_TEMPLATE;
-  if (!template) return { models, unreadable: null };
-  // One transient failure must not unpublish a model: a session that drew a 429 or a timeout
-  // here got a named 404 for a model its credential serves, while the next session ran fine.
-  // The attempts share the budget below, so retrying never makes the gateway slower to start
-  // than a single slow fetch would.
-  let listed: z.infer<typeof ListedModelsSchema> | undefined;
-  let reason = "unattempted";
-  const deadline = AbortSignal.any([signal, AbortSignal.timeout(CATALOG_TIMEOUT_MS)]);
-  for (let attempt = 0; attempt < CATALOG_ATTEMPTS && !deadline.aborted; attempt += 1) {
-    if (attempt > 0) await Bun.sleep(CATALOG_RETRY_MS);
-    try {
-      const response = await fetchImpl(OPENROUTER_CATALOG, { redirect: "error", signal: deadline });
-      if (!response.ok) {
-        await response.body?.cancel();
-        reason = `status_${response.status}`;
-        continue;
-      }
-      listed = ListedModelsSchema.parse(await response.json());
-      break;
-    } catch (error) {
-      reason = error instanceof Error ? error.name : typeof error;
+  // No credential for a provider means no listing this pool would be served from: publishing
+  // exactly what the credentials reach is the whole answer, not a degradation of one.
+  const [openrouter, codex] = await Promise.all([
+    pool.openrouter?.length && template ? withinBudget(signal, deadline => openRouterListing(deadline, fetchImpl)) : undefined,
+    pool["openai-codex"]?.length
+      ? withinBudget(signal, deadline => codexListing(deadline, fetchImpl, () => accounts("openai-codex")))
+      : undefined,
+  ]);
+  if (codex && "reason" in codex) unreadable["openai-codex"] = degraded(models, "openai-codex", codex.reason);
+  else if (codex) {
+    for (const [key, model] of models) if (model.provider === "openai-codex") models.delete(key);
+    for (const model of codex.value) models.set(`${model.provider}/${model.id}`, model);
+  }
+  if (openrouter && "reason" in openrouter) unreadable.openrouter = degraded(models, "openrouter", openrouter.reason);
+  else if (openrouter && template) {
+    // A model that does not accept a reasoning parameter carries no thinking config at all,
+    // rather than an empty one: a level on a model that has none is what made a configured id
+    // resolve to something else.
+    const { thinking: templateThinking, ...dialect } = template;
+    for (const entry of openrouter.value.data) {
+      const key = `openrouter/${entry.id}`;
+      if (models.has(key)) continue;
+      const input = perMillion(entry.pricing?.prompt);
+      const output = perMillion(entry.pricing?.completion);
+      if (input === null || output === null || !entry.context_length) continue;
+      const reasoning = (entry.supported_parameters ?? []).includes("reasoning");
+      models.set(key, {
+        ...dialect,
+        ...(reasoning && templateThinking ? { thinking: templateThinking } : {}),
+        id: entry.id,
+        name: entry.name ?? entry.id,
+        contextWindow: entry.context_length,
+        maxTokens: entry.top_provider?.max_completion_tokens ?? template.maxTokens,
+        cost: { input, output, cacheRead: 0, cacheWrite: 0 },
+        reasoning,
+      });
     }
   }
-  // A catalog this gateway could not read leaves the pinned one in place; it never empties it.
-  // But the degradation is the difference between a model being serveable and not, so it says
-  // so rather than quietly publishing less than the credential can reach.
-  if (!listed) return degraded(models, reason);
-  // A model that does not accept a reasoning parameter carries no thinking config at all,
-  // rather than an empty one: a level on a model that has none is what made a configured id
-  // resolve to something else.
-  const { thinking: templateThinking, ...dialect } = template;
-  for (const entry of listed.data) {
-    const key = `openrouter/${entry.id}`;
-    if (models.has(key)) continue;
-    const input = perMillion(entry.pricing?.prompt);
-    const output = perMillion(entry.pricing?.completion);
-    if (input === null || output === null || !entry.context_length) continue;
-    const reasoning = (entry.supported_parameters ?? []).includes("reasoning");
-    models.set(key, {
-      ...dialect,
-      ...(reasoning && templateThinking ? { thinking: templateThinking } : {}),
-      id: entry.id,
-      name: entry.name ?? entry.id,
-      contextWindow: entry.context_length,
-      maxTokens: entry.top_provider?.max_completion_tokens ?? template.maxTokens,
-      cost: { input, output, cacheRead: 0, cacheWrite: 0 },
-      reasoning,
-    });
-  }
-  return { models, unreadable: null };
+  return { models, unreadable };
 }
 
 export async function openPoolStorage(broker: { url: string; token: string }, pool: RuntimeAccountPool, signal: AbortSignal, fetchImpl: typeof fetch = fetch) {

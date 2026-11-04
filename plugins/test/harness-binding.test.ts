@@ -386,6 +386,9 @@ test("a Run's model resolves exactly when its own reviewed launch serves it, the
   // id the pinned snapshot carries is confirmed for it, and neither is a live-listed one.
   const pinned = bundledProbeModels().openrouter![0]!.id;
   for (const id of [pinned, UNLISTED_MODEL_ID, UNLISTED_PUBLISHED_ID]) expect(servesModel(["openrouter"], "openrouter", id)).toBe(false);
+  // Codex's catalog is each account's own listing, so the same holds for every Codex id.
+  const codex = bundledProbeModels()["openai-codex"]![0]!.id;
+  for (const id of [codex, "gpt-6.1-terra"]) expect(servesModel(["openai-codex"], "openai-codex", id)).toBe(false);
   expect(servesModel(["openrouter", "anthropic"], "anthropic", "claude-sonnet-4-5")).toBe(true);
 });
 

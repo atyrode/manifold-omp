@@ -34,6 +34,10 @@ import {
   parseSessionArchive,
   type SessionSilence,
   ProbeIdentitiesSchema,
+  SealedIdentitiesSchema,
+  ListedProvidersSchema,
+  ACCOUNT_LISTED_PROVIDERS,
+  inventoryAdmits,
   ThinkingLevelSchema,
   GATEWAY_DISCOVERY_TIMEOUT_MS,
   exactModelScope,
@@ -96,6 +100,42 @@ export function defaultInventoryIdentities(
   }
   return identities;
 }
+/**
+ * WHAT AN INVENTORY MAY REPORT: exact identities, and the providers whose whole listing it reports.
+ *
+ * A listed provider's catalog is the pooled account's own listing (`ACCOUNT_LISTED_PROVIDERS`),
+ * which only the machine reads, so this build can neither name its models nor rule one out. A
+ * default inventory reports such a provider's listing as the gateway serves it, in the room its
+ * bundled rows would have taken; an explicit request names its identities and receives exactly
+ * those the listing carries. Every other provider's catalog is the pinned snapshot, and an
+ * identity it lacks is refused.
+ */
+export function inventoryPermission(
+  catalog: Readonly<Record<string, readonly ProbeIdentity[]>>,
+  pool: RuntimeAccountPool,
+  requested: readonly ProbeIdentity[] | undefined,
+): { identities: ProbeIdentity[]; listedProviders: string[] } {
+  if (requested === undefined) return {
+    identities: defaultInventoryIdentities(catalog, pool).filter(identity => !ACCOUNT_LISTED_PROVIDERS.includes(identity.provider)),
+    listedProviders: ACCOUNT_LISTED_PROVIDERS.filter(provider => (pool[provider]?.length ?? 0) > 0),
+  };
+  const seen = new Set<string>();
+  for (const identity of requested) {
+    const key = probeAddress(identity).toLowerCase();
+    if (
+      seen.has(key) ||
+      !pool[identity.provider]?.length ||
+      (!ACCOUNT_LISTED_PROVIDERS.includes(identity.provider) &&
+        !(catalog[identity.provider] ?? []).some((value) => digestOf(value) === digestOf(identity)))
+    )
+      throw new OmpRefusal("invalid_model_identity");
+    seen.add(key);
+  }
+  return {
+    identities: [...requested],
+    listedProviders: ACCOUNT_LISTED_PROVIDERS.filter(provider => requested.some(identity => identity.provider === provider)),
+  };
+}
 const provenanceSchema = z.strictObject({
   target: TargetSchema,
   operationId: z.string(),
@@ -108,7 +148,10 @@ const provenanceSchema = z.strictObject({
   accountPool: RuntimeAccountPoolSchema,
   broker: BrokerReferenceSchema,
   gateway: ServicePinSchema,
-  modelIdentities: ProbeIdentitiesSchema.nullable(),
+  // Empty only when listed providers cover the whole inventory (`inventoryPermission`).
+  modelIdentities: SealedIdentitiesSchema.nullable(),
+  // Only an inventory's provenance names listed providers; one retained before they existed has none.
+  listedProviders: ListedProvidersSchema.optional(),
   inventoryJobId: z.string().nullable(),
   candidates: BenchmarkInputSchema.nullable(),
   // Absent in provenance retained before bound inputs existed, which is no bindings at all.
@@ -212,9 +255,9 @@ export function oneShotModelConfiguration(pool: RuntimeAccountPool, overlay: Ove
  * A session learns a live-listed model from the gateway's listing, which names it and says
  * nothing of how it reasons, so OMP builds it as a model that does not and quietly runs a
  * configured `:medium` with thinking off. The gateway serves that model with its provider's
- * pinned thinking ladder when it reasons; this hands the session the same ladder, for exactly
- * the configured models that name a level. It patches a model the listing supplies and never
- * creates one, so it cannot make an unpublished id resolve.
+ * thinking ladder when it reasons (`liveListingThinking`); this hands the session that ladder, for
+ * exactly the configured models that name a level. It patches a model the listing supplies and
+ * never creates one, so it cannot make an unpublished id resolve.
  *
  * The gateway lists every model it publishes under each provider a session discovers through it,
  * as `<provider>/<id>`, so every provider in the pool carries the same entries.
@@ -236,9 +279,11 @@ function pinnedThinking(overlay: Overlay): Record<string, { reasoning: true; thi
 
 /**
  * Providers whose catalog the gateway resolves from the provider itself rather than from the
- * pinned SDK snapshot, so the machine rather than this build decides what can be served.
+ * pinned SDK snapshot, so the machine rather than this build decides what can be served:
+ * OpenRouter's public listing, and the Codex listing each pooled account is offered
+ * (`ACCOUNT_LISTED_PROVIDERS`).
  */
-const LIVE_CATALOG_PROVIDERS: Readonly<Record<string, true>> = { openrouter: true };
+const LIVE_CATALOG_PROVIDERS: Readonly<Record<string, true>> = { openrouter: true, "openai-codex": true };
 /**
  * A configured model this machine cannot serve REFUSES; it is never quietly replaced.
  *
@@ -371,27 +416,15 @@ async function inventoryPreparation(
   const operationId = `${OMP_PLUGIN_ID}.inventory`;
   const current = await currentOperation(ctx, args.machineId, operationId);
   const gateway = await currentGateway(ctx, args.machineId);
-  const identities = ProbeIdentitiesSchema.parse(
-    args.modelIdentities ?? defaultInventoryIdentities(registry, pool),
-  );
-  const seen = new Set<string>();
-  for (const identity of identities) {
-    const key = probeAddress(identity).toLowerCase();
-    if (
-      seen.has(key) ||
-      !pool[identity.provider]?.length ||
-      !(registry[identity.provider] ?? []).some(
-        (value) => digestOf(value) === digestOf(identity),
-      )
-    )
-      throw new OmpRefusal("invalid_model_identity");
-    seen.add(key);
-  }
+  const { identities, listedProviders } = inventoryPermission(registry, pool, args.modelIdentities);
+  // An inventory with nothing to report is refused as it always was.
+  if (listedProviders.length === 0) ProbeIdentitiesSchema.parse(identities);
   const native = nativeModelConfiguration(pool);
   const input = boundedInput({
     models: JSON.stringify(native.models),
     config: JSON.stringify(native.config),
     modelIdentities: JSON.stringify(identities),
+    listedProviders: JSON.stringify(listedProviders),
     accountPool: JSON.stringify(pool),
   });
   const provenance = provenanceSchema.parse({
@@ -407,6 +440,7 @@ async function inventoryPreparation(
     broker: reference,
     gateway,
     modelIdentities: identities,
+    listedProviders,
     inventoryJobId: null,
     candidates: null,
   });
@@ -550,15 +584,7 @@ export async function readInventory(
   const seen = new Set<string>();
   for (const model of inventory.models) {
     const address = probeAddress(model).toLowerCase();
-    if (
-      seen.has(address) ||
-      !provenance.modelIdentities.some(
-        (identity) =>
-          identity.provider === model.provider &&
-          identity.id === model.id &&
-          identity.api === model.api,
-      )
-    )
+    if (seen.has(address) || !inventoryAdmits(provenance.modelIdentities, provenance.listedProviders ?? [], model))
       throw new OmpRefusal("invalid_observation");
     seen.add(address);
   }

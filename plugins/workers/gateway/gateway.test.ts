@@ -445,4 +445,46 @@ describe("native account-pool gateway", () => {
     await eventually(() => fixture.streams.size === 0);
     await expect(fetch(url + "/v1/models")).rejects.toThrow();
   });
+
+  /**
+   * The gateway reads Codex's listing with the pool's own Codex account, through the same guard as
+   * every key it hands out, and publishes what that account is offered. A Codex account the broker
+   * holds outside the pool reads nothing.
+   */
+  test("the pool's Codex account, and only it, reads the account's listing, which the gateway then publishes", async () => {
+    const fixture = new FixtureBroker([credential(1, "chosen"), credential(3, "chosen", "openai-codex"), credential(4, "other", "openai-codex")]);
+    const listings: { url: string; method: string; authorization: string | null; account: string | null }[] = [];
+    const entry = (slug: string, context_window: number) => ({ slug, display_name: slug, context_window, default_reasoning_level: "medium",
+      supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }, { effort: "high" }], input_modalities: ["text", "image"], visibility: "list" });
+    const routed: typeof fetch = Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const request = new Request(input, init);
+      if (new URL(request.url).hostname !== "chatgpt.com") return fixture.fetch(input, init);
+      listings.push({ url: request.url, method: request.method, authorization: request.headers.get("authorization"),
+        account: request.headers.get("chatgpt-account-id") });
+      return Response.json({ models: [entry("gpt-6.1-terra", 500_000), entry("gpt-5.6-terra", 272_000)] });
+    }, { preconnect: fetch.preconnect });
+    const controller = new AbortController();
+    const gateway = await startPoolGateway(parseInputs(broker, { "openai-codex": [{ scope: "fixture-scope", credentialId: 3, identityKey: "chosen" }] },
+      serviceBearer, null), controller.signal, routed);
+    const url = `http://127.0.0.1:${gateway.port}`;
+    try {
+      expect(listings).toEqual([{ url: "https://chatgpt.com/backend-api/codex/models?client_version=0.159.0", method: "GET",
+        authorization: "Bearer fixture-access-3", account: "fixture-account-3" }]);
+      const headers = { Authorization: `Bearer ${serviceBearer}`, "x-omp-install-id": "00000000-0000-4000-8000-000000000001" };
+      const listed: { data: { id: string; owned_by: string; inventory?: { quotaTier: string | null; inputCostPerMillion: number; contextWindow: number } }[] } =
+        await (await fetch(url + "/v1/models", { headers })).json();
+      const ids = listed.data.map(row => row.id);
+      expect(ids).toContain("openai-codex/gpt-6.1-terra");
+      // Authoritative, as OMP resolves it: a bundled model this account is not offered is gone.
+      expect(ids).not.toContain("openai-codex/gpt-6-astra");
+      expect(listed.data.every(row => row.owned_by === "openai-codex")).toBe(true);
+      expect(listed.data.find(row => row.id === "openai-codex/gpt-6.1-terra")?.inventory)
+        .toMatchObject({ quotaTier: "chat", inputCostPerMillion: 1, contextWindow: 500_000 });
+      // Refused by name before any provider hop, never substituted.
+      const refused = await fetch(url + "/v1/pi/stream", { method: "POST", headers,
+        body: JSON.stringify({ modelId: "openai-codex/gpt-6-astra", context: { messages: [] } }) });
+      expect(refused.status).toBe(404);
+      expect(listings).toHaveLength(1);
+    } finally { controller.abort(); await gateway.close(); }
+  });
 });

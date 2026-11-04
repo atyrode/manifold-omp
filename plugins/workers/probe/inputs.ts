@@ -1,7 +1,10 @@
 import { accessSync, closeSync, constants, fstatSync, mkdirSync, openSync, readSync, readdirSync } from "node:fs";
 import { z } from "zod";
 import { identifier, modelId, ThinkingLevelSchema } from "../../api/contracts.ts";
-import { GATEWAY_DISCOVERY_TIMEOUT_MS, PROBE_MODEL_LIMIT, ProbeError, ProbeIdentitiesSchema, parseBenchmarkInput, type BenchmarkInput, type ProbeIdentity } from "../../api/probe.ts";
+import {
+  GATEWAY_DISCOVERY_TIMEOUT_MS, PROBE_MODEL_LIMIT, ProbeError, ListedProvidersSchema, SealedIdentitiesSchema, inventoryAdmits, parseBenchmarkInput,
+  type BenchmarkInput, type ProbeIdentity,
+} from "../../api/probe.ts";
 
 export const PROBE_HOME = "/home/job";
 export const PROBE_AGENT = `${PROBE_HOME}/.omp/agent`;
@@ -35,7 +38,7 @@ export const ProbeConfigSchema = z.strictObject({
   startup: z.strictObject({ setupWizard: z.literal(false) }),
 });
 
-export function readProbeInput(name: "models" | "config" | "modelIdentities" | "candidates"): unknown {
+export function readProbeInput(name: "models" | "config" | "modelIdentities" | "listedProviders" | "candidates"): unknown {
   const path = name === "models" || name === "config" ? `${PROBE_AGENT}/${name}.yml` : `/inputs/${name}`;
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   let bytes: Buffer | undefined;
@@ -54,8 +57,22 @@ export function readProbeInput(name: "models" | "config" | "modelIdentities" | "
   } catch { throw new ProbeError("invalid_input"); }
   finally { bytes?.fill(0); closeSync(fd); }
 }
-export function prepareProbeInputs(kind: "inventory" | "benchmark"): { identities: ProbeIdentity[]; benchmark?: BenchmarkInput } {
-  const expected = kind === "benchmark" ? ["modelIdentities", "candidates"] : ["modelIdentities"];
+/**
+ * Where the job reaches its gateway's `models` listing: the service endpoint and bearer the owner
+ * sealed into its models configuration for every registered provider, addressed as the CLI's own
+ * proxy discovery addresses it.
+ */
+export interface GatewayListingAddress { readonly url: string; readonly bearer: string }
+export interface ProbeInputs {
+  identities: ProbeIdentity[];
+  /** The providers inventory reports from the gateway's listing (`inventoryAdmits`). */
+  listed: string[];
+  /** Present exactly when `listed` is not empty. */
+  listing?: GatewayListingAddress;
+  benchmark?: BenchmarkInput;
+}
+export function prepareProbeInputs(kind: "inventory" | "benchmark"): ProbeInputs {
+  const expected = kind === "benchmark" ? ["modelIdentities", "listedProviders", "candidates"] : ["modelIdentities", "listedProviders"];
   const names = readdirSync("/inputs");
   if (names.length !== expected.length || names.some(name => !expected.includes(name))) throw new ProbeError("invalid_input");
   let writable = false;
@@ -63,18 +80,22 @@ export function prepareProbeInputs(kind: "inventory" | "benchmark"): { identitie
   if (writable) throw new ProbeError("invalid_input");
   const models = ProbeModelsConfigSchema.safeParse(readProbeInput("models"));
   const config = ProbeConfigSchema.safeParse(readProbeInput("config"));
-  const identities = ProbeIdentitiesSchema.safeParse(readProbeInput("modelIdentities"));
-  if (!models.success || !config.success || !identities.success) throw new ProbeError("invalid_input");
+  const identities = SealedIdentitiesSchema.safeParse(readProbeInput("modelIdentities"));
+  const listed = ListedProvidersSchema.safeParse(readProbeInput("listedProviders"));
+  if (!models.success || !config.success || !identities.success || !listed.success ||
+    identities.data.length + listed.data.length === 0) throw new ProbeError("invalid_input");
+  const registered = (provider: string) => Object.hasOwn(models.data.providers, provider) && !config.data.disabledProviders.includes(provider);
+  if (!listed.data.every(registered)) throw new ProbeError("invalid_input");
   const addresses = new Set<string>();
   for (const identity of identities.data) {
     const address = `${identity.provider}/${identity.id}`.toLowerCase();
     if (addresses.has(address)) throw new ProbeError("ambiguous_identity");
-    if (!Object.hasOwn(models.data.providers, identity.provider) || config.data.disabledProviders.includes(identity.provider)) throw new ProbeError("invalid_input");
+    if (!registered(identity.provider)) throw new ProbeError("invalid_input");
     addresses.add(address);
   }
   const benchmark = kind === "benchmark" ? parseBenchmarkInput(readProbeInput("candidates")) : undefined;
   for (const candidate of benchmark?.candidates ?? []) {
-    if (!identities.data.some(identity => identity.provider === candidate.provider && identity.id === candidate.id && identity.api === candidate.api)) throw new ProbeError("invalid_input");
+    if (!inventoryAdmits(identities.data, listed.data, candidate)) throw new ProbeError("invalid_input");
   }
   // Native Manifold owns this fresh private home. Config capabilities stay in
   // their sealed homePath mounts; the worker never copies or rewrites them.
@@ -83,7 +104,12 @@ export function prepareProbeInputs(kind: "inventory" | "benchmark"): { identitie
   for (const directory of ["tmp", "work"]) {
     mkdirSync(`${PROBE_HOME}/${directory}`, { mode: 0o700, recursive: true });
   }
-  return { identities: identities.data, ...(benchmark ? { benchmark } : {}) };
+  const gateway = listed.data.length > 0 ? models.data.providers[listed.data[0]!]! : undefined;
+  return {
+    identities: identities.data, listed: listed.data,
+    ...(gateway ? { listing: { url: `${gateway.baseUrl.endsWith("/v1") ? gateway.baseUrl : `${gateway.baseUrl}/v1`}/models`, bearer: gateway.apiKey } } : {}),
+    ...(benchmark ? { benchmark } : {}),
+  };
 }
 
 export function isolateProbeEnvironment(environment: NodeJS.ProcessEnv): void {
