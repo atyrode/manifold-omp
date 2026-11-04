@@ -1,11 +1,11 @@
 {
   "bunVersion": "1.4.4",
-  "sdkVersion": "18.14.1",
-  "observedOn": "2026-10-31",
+  "sdkVersion": "18.16.0",
+  "observedOn": "2026-11-04",
   "provenance": {
     "bunRelease": "https://github.com/oven-sh/bun/releases/tag/bun-v1.4.4",
     "ompRelease": "https://github.com/can1357/oh-my-pi/releases/tag/v18.8.6",
-    "sdkRelease": "https://github.com/can1357/oh-my-pi/releases/tag/v18.14.1",
+    "sdkRelease": "https://github.com/can1357/oh-my-pi/releases/tag/v18.16.0",
     "caBundle": {
       "version": "2026.1.4",
       "observedOn": "2026-09-12",
@@ -129,16 +129,16 @@
     },
     "pi-natives": {
       "linux-x64": {
-        "url": "https://registry.npmjs.org/@oh-my-pi/pi-natives-linux-x64/-/pi-natives-linux-x64-18.14.1.tgz",
-        "sha256": "e63bd846f516f8b29cd46ea6f29ab0a86365a820409445868e1db049a777e5a8",
+        "url": "https://registry.npmjs.org/@oh-my-pi/pi-natives-linux-x64/-/pi-natives-linux-x64-18.16.0.tgz",
+        "sha256": "9f0ad4990330aba3c545af4b382b6f32f1d2d9559b7dd98a51774be7db9dc2da",
         "format": "tar.gz",
         "entry": [
           "package",
           "pi_natives.linux-x64-baseline.node"
         ],
-        "entrySha256": "e6485a426805a3bb44b7ba7cb273fc137de3bdaee57d7bc65be1c19ddbc09b94",
-        "maxBytes": 97677052,
-        "maxExpandedBytes": 244873728,
+        "entrySha256": "33ff4e88c1640abb09a481aa9b5eaa87c9b9daed902ee4fb8565a9bd5e20ef3e",
+        "maxBytes": 97785071,
+        "maxExpandedBytes": 245071872,
         "maxMembers": 6,
         "files": {
           "pi-natives-license": {
@@ -166,16 +166,16 @@
         }
       },
       "linux-arm64": {
-        "url": "https://registry.npmjs.org/@oh-my-pi/pi-natives-linux-arm64/-/pi-natives-linux-arm64-18.14.1.tgz",
-        "sha256": "d61f1727b2046e86700a4651db0e14dfc9c6ce08810aed65a76749cf1cfdaac1",
+        "url": "https://registry.npmjs.org/@oh-my-pi/pi-natives-linux-arm64/-/pi-natives-linux-arm64-18.16.0.tgz",
+        "sha256": "97dcd74aa2460eafaeee74f0613c0d05330d30fdc9ca59564c76c072f25840da",
         "format": "tar.gz",
         "entry": [
           "package",
           "pi_natives.linux-arm64.node"
         ],
-        "entrySha256": "bc1032f43caca800609a2625e0dbe43d6a4e3b9236d809a8dd699d684e64c861",
-        "maxBytes": 46521511,
-        "maxExpandedBytes": 113022976,
+        "entrySha256": "be88ff61976674ba198fad649f68db9881fa8b944d11d04b2c441354f5186661",
+        "maxBytes": 46340870,
+        "maxExpandedBytes": 112519680,
         "maxMembers": 5,
         "files": {
           "pi-natives-license": {

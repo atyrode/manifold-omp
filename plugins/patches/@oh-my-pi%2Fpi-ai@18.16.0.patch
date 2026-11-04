@@ -1,5 +1,5 @@
 diff --git a/dist/types/auth/refresh.d.ts b/dist/types/auth/refresh.d.ts
-index 031afef5c21703e40441307f7dab56c681c09dcb..798e324093fcf40a7bbba1b4fddb8b57b4b014a4 100644
+index 885f4a92e8904d64d6ebbe14cbe745dbfcc3e7a0..3480ca6496981632d7ecfe2086b7c0df2b290d71 100644
 --- a/dist/types/auth/refresh.d.ts
 +++ b/dist/types/auth/refresh.d.ts
 @@ -36,6 +36,8 @@ export interface OAuthRefresherDeps {
@@ -120,12 +120,12 @@ index fdaace778a605c39987872b4a5bf2cfd7358acf1..6f500964231bfdde9b2bc37381652599
  }
  /** Boot the broker. Caller owns lifecycle; `handle.close()` to stop. */
 diff --git a/dist/types/auth-storage.d.ts b/dist/types/auth-storage.d.ts
-index 54f4f6190fcb9a59100c131552ed2f8bf8c31972..9f28bf438c88d2a24d924a6939cdcd8140303e84 100644
+index 27ba9b1d09a4bf2b90e789e2103f5ffa751def01..94469f7595d9332c11b2298ccd84c1c4f61d4189 100644
 --- a/dist/types/auth-storage.d.ts
 +++ b/dist/types/auth-storage.d.ts
-@@ -58,6 +58,8 @@ export declare class AuthStorage {
-     static create(dbPath: string, options?: AuthStorageOptions): Promise<AuthStorage>;
-     /** Close the underlying credential store; the instance must not be reused. */
+@@ -63,6 +63,8 @@ export declare class AuthStorage {
+      * keeps the store open until it has saved the rotated token.
+      */
      close(): void;
 +    /** Join owned usage/refresh work after the caller has stopped request/sweep admission. */
 +    drainRefreshes(): Promise<void>;
@@ -133,7 +133,7 @@ index 54f4f6190fcb9a59100c131552ed2f8bf8c31972..9f28bf438c88d2a24d924a6939cdcd81
       * Legacy redirect for callers of the pre-namespace flat API (e.g. repo scripts).
       * @deprecated Use {@link AuthStorage.keys}`.get`.
 diff --git a/src/auth/refresh.ts b/src/auth/refresh.ts
-index 468512da4b834ebd214b21162b3428199ae8b38e..b80ceb6555d6e38ec0c8edce901fb74ebb5c0a4b 100644
+index 6edc62f044ced69f1ab758a12294ab6834f25e74..702e82cb8d7907e1c2adcb98796ae11ad8f7851d 100644
 --- a/src/auth/refresh.ts
 +++ b/src/auth/refresh.ts
 @@ -161,6 +161,16 @@ export class OAuthRefresher {
@@ -153,7 +153,7 @@ index 468512da4b834ebd214b21162b3428199ae8b38e..b80ceb6555d6e38ec0c8edce901fb74e
  	/**
  	 * Return the stored row while it still holds a usable token this refresher
  	 * minted within {@link OAUTH_REMINT_COOLDOWN_MS}.
-@@ -928,11 +938,14 @@ export class OAuthRefresher {
+@@ -960,11 +970,14 @@ export class OAuthRefresher {
  		if (credentialId === undefined) {
  			return this.#refreshOAuthCredentialUnshared(provider, credential, undefined, signal, reason, rejectedAccess);
  		}
@@ -170,7 +170,7 @@ index 468512da4b834ebd214b21162b3428199ae8b38e..b80ceb6555d6e38ec0c8edce901fb74e
  			rejectedAccess,
  		)
 diff --git a/src/auth/usage.ts b/src/auth/usage.ts
-index 8e6826475a8a08c667cd43da2d528b1740a47f51..f30227ea1cde99551d7092286655fef007bfae5a 100644
+index 3183dac8f1dcdc538964b13657a2881cdcd03a02..cf92bd6dbdc79c442804d9daad322c9c6a64fccd 100644
 --- a/src/auth/usage.ts
 +++ b/src/auth/usage.ts
 @@ -131,6 +131,14 @@ export class UsageService implements UsageApi {
@@ -805,10 +805,10 @@ index ded6bdf9173d8d12bd69031820b7e75251308d96..29e490728de3580b606bbe1e73ea0f56
  	 * Store-level hook consumed by `AuthStorage.usage.reports()` — proxies
  	 * to the broker's `/v1/usage` endpoint. Shared per-credential caches and
 diff --git a/src/auth-broker/server.ts b/src/auth-broker/server.ts
-index fbcaae3db59d42fc34c7b60d93ea0f81ec3d44ee..e45e3d42831b00c491264a1788038f6afd8ef352 100644
+index 51ce913681ddf7ec5d3e7364548ee509217148b2..49eef3019a28d0c1355de0afd0fce3ab23299c52 100644
 --- a/src/auth-broker/server.ts
 +++ b/src/auth-broker/server.ts
-@@ -91,6 +91,8 @@ export interface AuthBrokerServerHandle {
+@@ -92,6 +92,8 @@ export interface AuthBrokerServerHandle {
  	url: string;
  	port: number;
  	hostname: string;
@@ -817,7 +817,7 @@ index fbcaae3db59d42fc34c7b60d93ea0f81ec3d44ee..e45e3d42831b00c491264a1788038f6a
  	close(): Promise<void>;
  }
  
-@@ -480,6 +482,7 @@ async function serveSnapshot(
+@@ -481,6 +483,7 @@ async function serveSnapshot(
  	source: SnapshotSource,
  	gate: GenerationGate,
  	peer: string,
@@ -825,7 +825,7 @@ index fbcaae3db59d42fc34c7b60d93ea0f81ec3d44ee..e45e3d42831b00c491264a1788038f6a
  ): Promise<Response> {
  	await source.reload();
  	const clientSupportsCodexMeterBlockScopes = supportsCodexMeterBlockScopes(req);
-@@ -499,7 +502,7 @@ async function serveSnapshot(
+@@ -500,7 +503,7 @@ async function serveSnapshot(
  
  	const delay = delayResult(waitMs);
  	const waitController = new AbortController();
@@ -834,7 +834,7 @@ index fbcaae3db59d42fc34c7b60d93ea0f81ec3d44ee..e45e3d42831b00c491264a1788038f6a
  	const result = await Promise.race([gate.waitForChange(clientGeneration, waitSignal), delay.promise]);
  	delay.cancel();
  	waitController.abort();
-@@ -721,6 +724,7 @@ function serveSnapshotStream(
+@@ -722,6 +725,7 @@ function serveSnapshotStream(
  	hub: SnapshotStreamHub,
  	peer: string,
  	keepaliveMs: number,
@@ -842,7 +842,7 @@ index fbcaae3db59d42fc34c7b60d93ea0f81ec3d44ee..e45e3d42831b00c491264a1788038f6a
  ): Response {
  	const openedAt = Date.now();
  	let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
-@@ -738,6 +742,7 @@ function serveSnapshotStream(
+@@ -739,6 +743,7 @@ function serveSnapshotStream(
  		hub.delete(subscriber);
  		if (abortHandler) {
  			req.signal.removeEventListener("abort", abortHandler);
@@ -850,7 +850,7 @@ index fbcaae3db59d42fc34c7b60d93ea0f81ec3d44ee..e45e3d42831b00c491264a1788038f6a
  			abortHandler = null;
  		}
  		try {
-@@ -771,7 +776,15 @@ function serveSnapshotStream(
+@@ -772,7 +777,15 @@ function serveSnapshotStream(
  	const stream = new ReadableStream<Uint8Array>({
  		async start(c) {
  			controller = c;
@@ -866,7 +866,7 @@ index fbcaae3db59d42fc34c7b60d93ea0f81ec3d44ee..e45e3d42831b00c491264a1788038f6a
  			const initial = source.build(subscriber.codexMeterBlockScopes);
  			subscriber.lastGeneration = initial.generation;
  			for (const entry of initial.credentials) subscriber.sent.set(entry.id, fingerprintEntry(entry));
-@@ -784,8 +797,6 @@ function serveSnapshotStream(
+@@ -785,8 +798,6 @@ function serveSnapshotStream(
  			// Registered synchronously after the initial build: any later fan-out
  			// builds a snapshot at least as new as the one this client just got.
  			hub.add(subscriber);
@@ -875,7 +875,7 @@ index fbcaae3db59d42fc34c7b60d93ea0f81ec3d44ee..e45e3d42831b00c491264a1788038f6a
  			logger.info("auth-broker stream opened", { peer, generation: initial.generation });
  		},
  		cancel() {
-@@ -820,10 +831,14 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
+@@ -821,10 +832,14 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
  				refreshSkewMs: opts.refreshSkewMs ?? DEFAULT_REFRESH_SKEW_MS,
  				refreshIntervalMs: opts.refreshIntervalMs ?? DEFAULT_REFRESH_INTERVAL_MS,
  			});
@@ -892,7 +892,7 @@ index fbcaae3db59d42fc34c7b60d93ea0f81ec3d44ee..e45e3d42831b00c491264a1788038f6a
  
  	const server = Bun.serve({
  		hostname: bind.hostname,
-@@ -832,7 +847,9 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
+@@ -833,7 +848,9 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
  		fetch: async (req, server): Promise<Response> => {
  			const url = new URL(req.url);
  			const pathname = url.pathname;
@@ -902,7 +902,7 @@ index fbcaae3db59d42fc34c7b60d93ea0f81ec3d44ee..e45e3d42831b00c491264a1788038f6a
  			try {
  				if (req.method === "GET" && pathname === "/v1/healthz") {
  					const body: HealthzResponse = { ok: true, version };
-@@ -848,10 +865,10 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
+@@ -849,10 +866,10 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
  				}
  				const peer = resolvePeer(req, socketPeer, opts.trustProxyHeaders);
  				if (req.method === "GET" && pathname === "/v1/snapshot/stream") {
@@ -915,7 +915,7 @@ index fbcaae3db59d42fc34c7b60d93ea0f81ec3d44ee..e45e3d42831b00c491264a1788038f6a
  				}
  				if (req.method === "GET" && pathname === "/v1/usage") {
  					try {
-@@ -939,7 +956,9 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
+@@ -940,7 +957,9 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
  					try {
  						const entry = await opts.storage.oauth.refresh(
  							id,
@@ -923,10 +923,10 @@ index fbcaae3db59d42fc34c7b60d93ea0f81ec3d44ee..e45e3d42831b00c491264a1788038f6a
 +							// The broker owns this mutation, not the HTTP connection: disconnecting
 +							// must not let shutdown race a provider's already-rotated credential.
 +							undefined,
- 							authRecovery ? AUTH_RECOVERY_REFRESH_OPTIONS : undefined,
- 						);
- 						const body: CredentialRefreshResponse = { entry };
-@@ -1079,9 +1098,39 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
+ 							reason === "auth-recovery"
+ 								? AUTH_RECOVERY_REFRESH_OPTIONS
+ 								: reason === "usage-probe"
+@@ -1084,9 +1103,39 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
  					error: String(error),
  				});
  				return json(500, { error: "internal error" });
@@ -966,7 +966,7 @@ index fbcaae3db59d42fc34c7b60d93ea0f81ec3d44ee..e45e3d42831b00c491264a1788038f6a
  
  	const boundHost = server.hostname ?? bind.hostname;
  	const boundPort = server.port ?? bind.port;
-@@ -1089,11 +1138,19 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
+@@ -1094,11 +1143,19 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
  		url: `http://${boundHost}:${boundPort}`,
  		port: boundPort,
  		hostname: boundHost,
@@ -992,27 +992,11 @@ index fbcaae3db59d42fc34c7b60d93ea0f81ec3d44ee..e45e3d42831b00c491264a1788038f6a
  	};
  }
 diff --git a/src/auth-storage.ts b/src/auth-storage.ts
-index cd5c16dc907ae8d27d5a619c1a175a65da61a9c2..94533965b43368ffa18de1cb2c9bf675970c47e1 100644
+index b718d5eb2dc633a119c023268ce02752a38b0603..6f39ca36f81e400b98a7842ef6fcb29555e627f7 100644
 --- a/src/auth-storage.ts
 +++ b/src/auth-storage.ts
-@@ -74,6 +74,7 @@ interface AuthStorageModules {
- 	limits: RateLimits;
- 	resets: ResetCredits;
- 	blocks: CredentialBlocks;
-+	refresher: OAuthRefresher;
- }
- 
- /**
-@@ -261,6 +262,7 @@ export class AuthStorage {
- 			limits,
- 			resets: new ResetCredits({ store, pool, oauth, usage, usageCache, blocks }),
- 			blocks,
-+			refresher,
- 		};
- 	}
- 
-@@ -275,6 +277,25 @@ export class AuthStorage {
- 		this.#modules.pool.close();
+@@ -282,6 +282,25 @@ export class AuthStorage {
+ 		retire(this.#modules);
  	}
  
 +	/**
