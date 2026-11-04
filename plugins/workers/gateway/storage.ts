@@ -15,18 +15,15 @@ import { OPENROUTER_LISTING_TEMPLATE } from "./template.ts";
 import { NamespaceViews } from "../sdk-namespace.ts";
 
 /**
- * The deadline of the listing read a broker request is made for, if any.
+ * The deadline of the listing read a broker snapshot read is made for, if any.
  *
- * Resolving the accounts a listing is read with refreshes the broker snapshot and, for an expired
- * token, the credential, and neither SDK call takes a signal of its own. Scoped to the async
- * context of that one read, the deadline reaches every broker request the read causes, so the read
- * ends at its budget and leaves no broker request running behind it; any other request is unbound.
+ * The snapshot refresh that guards a listing's account resolution takes no signal of its own.
+ * Scoped to the async context of that one read, the deadline reaches its broker request, so a
+ * stalled snapshot ends with the listing's budget. It never reaches a credential refresh: the SDK
+ * reads a cancelled refresh as an authentication failure and blocks the account on the shared
+ * broker, while the broker finishes a rotation it started whether or not anyone still waits.
  */
 const listingDeadline = new AsyncLocalStorage<AbortSignal>();
-function withListingDeadline(signal: AbortSignal | undefined): AbortSignal | undefined {
-  const deadline = listingDeadline.getStore();
-  return deadline && signal ? AbortSignal.any([signal, deadline]) : deadline ?? signal;
-}
 
 /** The SDK's identity-only pool leaves API keys and missing providers unrestricted.
  * Enforce the native launch's concrete provider/id/identity tuples at every ingress
@@ -57,7 +54,8 @@ export class PoolBrokerClient extends AuthBrokerClient {
     this.#activeIds = activeIds;
   }
   override async fetchSnapshot(options: FetchSnapshotOptions = {}): Promise<FetchSnapshotResult> {
-    const signal = withListingDeadline(options.signal);
+    const deadline = listingDeadline.getStore();
+    const signal = deadline && options.signal ? AbortSignal.any([options.signal, deadline]) : deadline ?? options.signal;
     const result = await super.fetchSnapshot(signal ? { ...options, signal } : options);
     if (result.status === 304) return result;
     return { ...result, snapshot: { ...result.snapshot, credentials: result.snapshot.credentials.filter(entry => this.admits(entry)) } };
@@ -79,7 +77,7 @@ export class PoolBrokerClient extends AuthBrokerClient {
   }
   override async refreshCredential(id: number, signal?: AbortSignal, reason?: OAuthRefreshReason) {
     if (!this.#activeIds.has(id) || this.#slots.get(id)?.identityKey === null) throw unavailable();
-    const result = await super.refreshCredential(id, withListingDeadline(signal), reason);
+    const result = await super.refreshCredential(id, signal, reason);
     if (!this.#activeIds.has(id) || result.entry.id !== id || !this.admits(result.entry)) {
       throw unavailable();
     }
@@ -122,27 +120,30 @@ export class PoolAuthStorage extends AuthStorage {
    * every key does, so an account outside this pool, or one revoked while it resolves, never
    * reaches the listing request.
    *
-   * `deadline` is the listing's: the snapshot refresh, every token refresh and the broker requests
-   * behind them are ended by it, so a slow broker costs the listing its budget and nothing more.
+   * `deadline` is the listing's. It ends the guard's snapshot read. An expired token's refresh is
+   * not cancelled: the listing stops waiting for it at the deadline (`withinBudget`), and the
+   * broker completes the rotation as it would for any caller; cancelling it would have the SDK
+   * record an authentication block on the shared broker for an account that is fine.
    */
   async listingAccounts(provider: string, deadline: AbortSignal): Promise<OpenAICodexAccount[] | null> {
-    const accounts = await listingDeadline.run(deadline, () => this.#guarded(provider, async () => {
+    const accounts = await this.#guarded(provider, async () => {
       const resolved: OpenAICodexAccount[] = [];
-      for (const access of await this.oauth.accessAll(provider, { signal: deadline })) {
+      for (const access of await this.oauth.accessAll(provider)) {
         if (!access.ok) return undefined;
         resolved.push(access.accountId ? { accessToken: access.accessToken, accountId: access.accountId } : { accessToken: access.accessToken });
       }
       return resolved;
-    }));
+    }, deadline);
+    // Accounts resolved after the listing gave up are not read with.
     deadline.throwIfAborted();
     return accounts && accounts.length > 0 ? accounts : null;
   }
-  async #guarded<T>(provider: string, resolve: () => Promise<T | undefined>): Promise<T | undefined> {
+  async #guarded<T>(provider: string, resolve: () => Promise<T | undefined>, snapshotDeadline?: AbortSignal): Promise<T | undefined> {
     this.signal.throwIfAborted();
     if (!this.#providers.has(provider)) return undefined;
     const revocation = this.remote.revocation;
     try {
-      await this.remote.refreshSnapshot();
+      await (snapshotDeadline ? listingDeadline.run(snapshotDeadline, () => this.remote.refreshSnapshot()) : this.remote.refreshSnapshot());
       await this.credentials.reload();
     } catch {
       throw unavailable();
@@ -246,8 +247,8 @@ type Listing<T> = { readonly value: T } | { readonly reason: string };
 async function withinBudget<T>(signal: AbortSignal, read: (deadline: AbortSignal) => Promise<Listing<T>>): Promise<Listing<T>> {
   let reason = "unattempted";
   const deadline = AbortSignal.any([signal, AbortSignal.timeout(CATALOG_TIMEOUT_MS)]);
-  // The wait ends at the deadline even if one step of a read were slow to honor it; every step is
-  // also handed the deadline, so nothing it started outlives it.
+  // The wait ends at the deadline whatever a read is still doing. Reads end their own snapshot and
+  // listing requests with it; a credential refresh is the broker's to finish (`listingAccounts`).
   const { promise: ended, reject: end } = Promise.withResolvers<never>();
   ended.catch(() => {});
   deadline.addEventListener("abort", () => end(deadline.reason), { once: true });

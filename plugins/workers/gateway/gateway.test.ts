@@ -490,44 +490,82 @@ describe("native account-pool gateway", () => {
 
   /**
    * Resolving the accounts a listing is read with goes back to the broker: a snapshot refresh, and a
-   * token refresh for an expired account. A broker that stalls there must cost the listing its
-   * budget and nothing more: gateway startup waits on this read, and every request it started has
-   * to end with it rather than run on in the background.
+   * token refresh for an expired account. Gateway startup waits on this read, so a slow broker must
+   * cost the listing its budget and nothing more. The snapshot read is the gateway's own and ends
+   * with the budget; a token refresh is the broker's rotation, and cancelling it would have the SDK
+   * record an authentication block on the shared broker for an account that is fine.
    */
-  test("a broker that stalls while the listing's accounts resolve costs the listing its budget, and nothing outlives it", async () => {
-    for (const stall of ["snapshot", "refresh"] as const) {
-      const entry = credential(3, "chosen", "openai-codex");
-      const fixture = new FixtureBroker([stall === "refresh"
-        ? { ...entry, credential: { ...entry.credential, expires: Date.now() - 60_000 } as SnapshotEntry["credential"] } : entry]);
-      let snapshots = 0;
-      const stalled: AbortSignal[] = [];
-      const listings: string[] = [];
-      const routed: typeof fetch = Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-        const url = new URL(input instanceof Request ? input.url : String(input));
-        if (url.hostname === "chatgpt.com") { listings.push(url.href); return Response.json({ models: [] }); }
-        const stalls = stall === "snapshot" ? url.pathname === "/v1/snapshot" && ++snapshots > 1 : url.pathname.endsWith("/refresh");
-        if (!stalls) return fixture.fetch(input, init);
-        const signal = init!.signal!;
-        stalled.push(signal);
-        const { promise, reject } = Promise.withResolvers<Response>();
-        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
-        return promise;
-      }, { preconnect: fetch.preconnect });
-      const owner = new AbortController();
-      const pool = { "openai-codex": [{ scope: "fixture-scope", credentialId: 3, identityKey: "chosen" }] };
-      const storage = await openPoolStorage(broker, pool, owner.signal, routed);
-      try {
-        const started = performance.now();
-        const { models, unreadable } = await publishedModels(pool, AbortSignal.timeout(300), routed,
-          (provider, deadline) => storage.listingAccounts(provider, deadline));
-        expect(performance.now() - started).toBeLessThan(2_000);
-        expect(Object.keys(unreadable)).toEqual(["openai-codex"]);
-        expect([...models.keys()]).toEqual([...poolModels(pool).keys()]);
-        expect(listings).toEqual([]);
-        // The stalled broker request was reached, and the listing's deadline ended it.
-        expect(stalled.length).toBeGreaterThan(0);
-        expect(stalled.every(signal => signal.aborted)).toBe(true);
-      } finally { owner.abort(); storage.close(); }
-    }
+  async function listingFixture(entry: SnapshotEntry, answer: (path: string, init: RequestInit | undefined, forward: () => Promise<Response>) => Promise<Response>) {
+    const fixture = new FixtureBroker([entry]);
+    const operations: string[] = [];
+    const listings: string[] = [];
+    const routed: typeof fetch = Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.hostname === "chatgpt.com") { listings.push(url.href); return Response.json({ models: [] }); }
+      operations.push(`${init?.method ?? "GET"} ${url.pathname}`);
+      return answer(url.pathname, init, () => fixture.fetch(input, init));
+    }, { preconnect: fetch.preconnect });
+    const owner = new AbortController();
+    const pool = { "openai-codex": [{ scope: "fixture-scope", credentialId: 3, identityKey: "chosen" }] };
+    const storage = await openPoolStorage(broker, pool, owner.signal, routed);
+    const read = async () => {
+      const started = performance.now();
+      const catalog = await publishedModels(pool, AbortSignal.timeout(300), routed, (provider, deadline) => storage.listingAccounts(provider, deadline));
+      expect(Object.keys(catalog.unreadable)).toEqual(["openai-codex"]);
+      expect([...catalog.models.keys()]).toEqual([...poolModels(pool).keys()]);
+      return performance.now() - started;
+    };
+    return { fixture, operations, listings, storage, read, close() { owner.abort(); storage.close(); } };
+  }
+
+  test("a broker snapshot that stalls while the listing's accounts resolve ends with the listing's budget", async () => {
+    let snapshots = 0;
+    const stalled: AbortSignal[] = [];
+    const f = await listingFixture(credential(3, "chosen", "openai-codex"), (path, init, forward) => {
+      if (path !== "/v1/snapshot" || ++snapshots === 1) return forward();
+      const signal = init!.signal!;
+      stalled.push(signal);
+      const { promise, reject } = Promise.withResolvers<Response>();
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      return promise;
+    });
+    try {
+      expect(await f.read()).toBeLessThan(2_000);
+      expect(f.listings).toEqual([]);
+      expect(stalled.length).toBeGreaterThan(0);
+      expect(stalled.every(signal => signal.aborted)).toBe(true);
+      expect(f.operations.some(operation => operation.includes("/block"))).toBe(false);
+    } finally { f.close(); }
+  }, 15_000);
+
+  test("a valid refresh slower than the listing's budget is left to finish, blocks nothing, and leaves the account usable", async () => {
+    const entry = credential(3, "chosen", "openai-codex");
+    const expired = { ...entry, credential: { ...entry.credential, expires: Date.now() - 60_000 } as SnapshotEntry["credential"] };
+    const rotated: SnapshotEntry = { ...entry, credential: { ...entry.credential, access: "fixture-access-rotated", expires: Date.now() + 3_600_000 } as SnapshotEntry["credential"] };
+    // The broker holds the rotation until the listing has given up on it, so the listing's deadline
+    // always expires mid-refresh; a listing that waited for the refresh would never return.
+    const released = Promise.withResolvers<void>();
+    const refreshed = Promise.withResolvers<boolean>();
+    const f = await listingFixture(expired, async (path, init, forward) => {
+      if (!path.endsWith("/refresh")) return forward();
+      await released.promise;
+      // Still wanted when the broker answers: the listing's deadline never reached it.
+      refreshed.resolve(init?.signal?.aborted ?? false);
+      return forward();
+    });
+    f.fixture.refreshEntry = rotated;
+    try {
+      await f.read();
+      expect(f.operations.filter(operation => operation.includes("/refresh"))).toHaveLength(1);
+      released.resolve();
+      expect(await refreshed.promise).toBe(false);
+      await eventually(() => f.storage.remote.listAuthCredentials("openai-codex").some(item =>
+        item.credential.type === "oauth" && item.credential.access === "fixture-access-rotated"));
+      expect(f.operations.filter(operation => operation.includes("/refresh"))).toHaveLength(1);
+      expect(f.operations.some(operation => operation.includes("/block"))).toBe(false);
+      expect(f.listings).toEqual([]);
+      expect((await f.storage.keys.getWithCredential("openai-codex"))?.apiKey).toBe("fixture-access-rotated");
+      expect(f.operations.some(operation => operation.includes("/block"))).toBe(false);
+    } finally { f.close(); }
   }, 15_000);
 });
