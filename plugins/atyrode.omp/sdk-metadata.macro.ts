@@ -2,13 +2,13 @@ import { createHash } from "node:crypto";
 import { canonicalJobJson, ISOLATE_MAX_FRAME_BYTES } from "@manifold/protocol";
 import type { Model, ThinkingConfig } from "@oh-my-pi/pi-catalog";
 import { quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import {
-  InventoryModelSchema, ModelCatalogSnapshotSchema, ProbeIdentitySchema, ThinkingLevelSchema,
+  ACCOUNT_LISTED_PROVIDERS, ModelCatalogSnapshotSchema, ProbeIdentitySchema,
   type InventoryModel, type ModelCatalogSnapshot, type ProbeIdentity,
 } from "../api/index.ts";
+import { inventoryModelOf } from "../workers/gateway/projection.ts";
 import { OPENROUTER_LISTING_TEMPLATE } from "../workers/gateway/template.ts";
 import runtime from "../runtime-artifacts.json";
 
@@ -50,20 +50,8 @@ export function projectModelCatalog(
 ): ModelCatalogSnapshot {
   const byAddress = new Map<string, InventoryModel | null>();
   for (const model of source) {
-    // The projection describes what inventory can report, which is chat models only.
-    if (modelKind(model) !== "chat") continue;
-    const projected = InventoryModelSchema.safeParse({
-      provider: model.provider, id: model.id, api: model.api,
-      inputCostPerMillion: model.cost.input, outputCostPerMillion: model.cost.output,
-      contextWindow: model.contextWindow, maxTokens: model.maxTokens, reasoning: model.reasoning,
-      thinkingLevels: [...getSupportedEfforts(model)].sort(
-        (a, b) => ThinkingLevelSchema.options.indexOf(a) - ThinkingLevelSchema.options.indexOf(b),
-      ),
-      images: model.input.includes("image"),
-      quotaTier: quotaTierFor(model.provider, model.id) ?? null,
-    });
-    if (!projected.success) continue;
-    const value = projected.data;
+    const value = inventoryModelOf(model);
+    if (!value) continue;
     const address = `${value.provider}/${value.id}`.toLowerCase();
     if (new Set(value.thinkingLevels).size !== value.thinkingLevels.length)
       throw new Error(`Duplicate bundled thinking levels: ${value.provider}/${value.id}`);
@@ -93,10 +81,27 @@ export function bundledModelCatalog(): ModelCatalogSnapshot {
   return projectModelCatalog(getBundledProviders().flatMap(provider => getBundledModels(provider)), runtime.sdkVersion);
 }
 
-/** The thinking ladder the gateway gives a live-listed model that reasons, per provider whose
- * catalog it lists live. Same pinned row as the gateway's, never a second choice of template. */
+/**
+ * The thinking ladder a session gives a configured live-listed model that names a level, per
+ * provider whose catalog the gateway lists live. The session learns such a model from the
+ * gateway's listing, which says nothing of how it reasons.
+ *
+ * OpenRouter's listed rows are built from one pinned row, and the session takes that same row's
+ * ladder, never a second choice of template. A listed provider's rows (`ACCOUNT_LISTED_PROVIDERS`)
+ * are built by the SDK itself from the account's listing, and every reasoning chat model it bundles
+ * for that provider carries one ladder, which the session takes. Packaging refuses a provider whose
+ * bundled models disagree rather than choose among them.
+ */
 export function liveListingThinking(): Readonly<Record<string, ThinkingConfig | undefined>> {
-  return { openrouter: OPENROUTER_LISTING_TEMPLATE?.thinking };
+  const ladders: Record<string, ThinkingConfig | undefined> = { openrouter: OPENROUTER_LISTING_TEMPLATE?.thinking };
+  for (const provider of ACCOUNT_LISTED_PROVIDERS) {
+    const distinct = new Map<string, ThinkingConfig>();
+    for (const model of getBundledModels(provider as Parameters<typeof getBundledModels>[0]))
+      if (modelKind(model) === "chat" && model.reasoning && model.thinking) distinct.set(JSON.stringify(model.thinking), model.thinking);
+    if (distinct.size > 1) throw new Error(`Bundled ${provider} models disagree on their thinking ladder`);
+    ladders[provider] = [...distinct.values()][0];
+  }
+  return ladders;
 }
 
 /** Broker upload and AuthStorage API-key selection accept provider IDs generically.

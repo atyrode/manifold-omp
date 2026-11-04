@@ -124,7 +124,7 @@ test("a model missing while the live listing was unreadable is not the caller's 
     BEARER,
     models,
     AbortSignal.timeout(10_000),
-    "TimeoutError",
+    { openrouter: "TimeoutError" },
   );
   const response = await fetch(`http://127.0.0.1:${boundary.port}/v1/pi/stream`, {
     method: "POST",

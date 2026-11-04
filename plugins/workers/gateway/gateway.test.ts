@@ -10,7 +10,7 @@ import { readSealedJSON as readBrokerSealedJSON } from "../broker/inputs.ts";
 
 // Runtime imports must follow the same logging barrier as the private worker.
 setTransports({ file: false, console: false });
-const { openPoolStorage, poolModels, PoolBrokerClient } = await import("./storage.ts");
+const { openPoolStorage, poolModels, publishedModels, PoolBrokerClient } = await import("./storage.ts");
 const { safeNativeStream } = await import("./boundary.ts");
 const { startPoolGateway } = await import("./runtime.ts");
 const { resolveCredentialIdentityKey } = await import("@oh-my-pi/pi-ai/auth/sqlite-credential-store");
@@ -445,4 +445,127 @@ describe("native account-pool gateway", () => {
     await eventually(() => fixture.streams.size === 0);
     await expect(fetch(url + "/v1/models")).rejects.toThrow();
   });
+
+  /**
+   * The gateway reads Codex's listing with the pool's own Codex account, through the same guard as
+   * every key it hands out, and publishes what that account is offered. A Codex account the broker
+   * holds outside the pool reads nothing.
+   */
+  test("the pool's Codex account, and only it, reads the account's listing, which the gateway then publishes", async () => {
+    const fixture = new FixtureBroker([credential(1, "chosen"), credential(3, "chosen", "openai-codex"), credential(4, "other", "openai-codex")]);
+    const listings: { url: string; method: string; authorization: string | null; account: string | null }[] = [];
+    const entry = (slug: string, context_window: number) => ({ slug, display_name: slug, context_window, default_reasoning_level: "medium",
+      supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }, { effort: "high" }], input_modalities: ["text", "image"], visibility: "list" });
+    const routed: typeof fetch = Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const request = new Request(input, init);
+      if (new URL(request.url).hostname !== "chatgpt.com") return fixture.fetch(input, init);
+      listings.push({ url: request.url, method: request.method, authorization: request.headers.get("authorization"),
+        account: request.headers.get("chatgpt-account-id") });
+      return Response.json({ models: [entry("gpt-6.1-terra", 500_000), entry("gpt-5.6-terra", 272_000)] });
+    }, { preconnect: fetch.preconnect });
+    const controller = new AbortController();
+    const gateway = await startPoolGateway(parseInputs(broker, { "openai-codex": [{ scope: "fixture-scope", credentialId: 3, identityKey: "chosen" }] },
+      serviceBearer, null), controller.signal, routed);
+    const url = `http://127.0.0.1:${gateway.port}`;
+    try {
+      expect(listings).toEqual([{ url: "https://chatgpt.com/backend-api/codex/models?client_version=0.159.0", method: "GET",
+        authorization: "Bearer fixture-access-3", account: "fixture-account-3" }]);
+      const headers = { Authorization: `Bearer ${serviceBearer}`, "x-omp-install-id": "00000000-0000-4000-8000-000000000001" };
+      const listed: { data: { id: string; owned_by: string; inventory?: { quotaTier: string | null; inputCostPerMillion: number; contextWindow: number } }[] } =
+        await (await fetch(url + "/v1/models", { headers })).json();
+      const ids = listed.data.map(row => row.id);
+      expect(ids).toContain("openai-codex/gpt-6.1-terra");
+      // Authoritative, as OMP resolves it: a bundled model this account is not offered is gone.
+      expect(ids).not.toContain("openai-codex/gpt-6-astra");
+      expect(listed.data.every(row => row.owned_by === "openai-codex")).toBe(true);
+      expect(listed.data.find(row => row.id === "openai-codex/gpt-6.1-terra")?.inventory)
+        .toMatchObject({ quotaTier: "chat", inputCostPerMillion: 1, contextWindow: 500_000 });
+      // Refused by name before any provider hop, never substituted.
+      const refused = await fetch(url + "/v1/pi/stream", { method: "POST", headers,
+        body: JSON.stringify({ modelId: "openai-codex/gpt-6-astra", context: { messages: [] } }) });
+      expect(refused.status).toBe(404);
+      expect(listings).toHaveLength(1);
+    } finally { controller.abort(); await gateway.close(); }
+  });
+
+  /**
+   * Resolving the accounts a listing is read with goes back to the broker: a snapshot refresh, and a
+   * token refresh for an expired account. Gateway startup waits on this read, so a slow broker must
+   * cost the listing its budget and nothing more. The snapshot read is the gateway's own and ends
+   * with the budget; a token refresh is the broker's rotation, and cancelling it would have the SDK
+   * record an authentication block on the shared broker for an account that is fine.
+   */
+  async function listingFixture(entry: SnapshotEntry, answer: (path: string, init: RequestInit | undefined, forward: () => Promise<Response>) => Promise<Response>) {
+    const fixture = new FixtureBroker([entry]);
+    const operations: string[] = [];
+    const listings: string[] = [];
+    const routed: typeof fetch = Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.hostname === "chatgpt.com") { listings.push(url.href); return Response.json({ models: [] }); }
+      operations.push(`${init?.method ?? "GET"} ${url.pathname}`);
+      return answer(url.pathname, init, () => fixture.fetch(input, init));
+    }, { preconnect: fetch.preconnect });
+    const owner = new AbortController();
+    const pool = { "openai-codex": [{ scope: "fixture-scope", credentialId: 3, identityKey: "chosen" }] };
+    const storage = await openPoolStorage(broker, pool, owner.signal, routed);
+    const read = async () => {
+      const started = performance.now();
+      const catalog = await publishedModels(pool, AbortSignal.timeout(300), routed, (provider, deadline) => storage.listingAccounts(provider, deadline));
+      expect(Object.keys(catalog.unreadable)).toEqual(["openai-codex"]);
+      expect([...catalog.models.keys()]).toEqual([...poolModels(pool).keys()]);
+      return performance.now() - started;
+    };
+    return { fixture, operations, listings, storage, read, close() { owner.abort(); storage.close(); } };
+  }
+
+  test("a broker snapshot that stalls while the listing's accounts resolve ends with the listing's budget", async () => {
+    let snapshots = 0;
+    const stalled: AbortSignal[] = [];
+    const f = await listingFixture(credential(3, "chosen", "openai-codex"), (path, init, forward) => {
+      if (path !== "/v1/snapshot" || ++snapshots === 1) return forward();
+      const signal = init!.signal!;
+      stalled.push(signal);
+      const { promise, reject } = Promise.withResolvers<Response>();
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      return promise;
+    });
+    try {
+      expect(await f.read()).toBeLessThan(2_000);
+      expect(f.listings).toEqual([]);
+      expect(stalled.length).toBeGreaterThan(0);
+      expect(stalled.every(signal => signal.aborted)).toBe(true);
+      expect(f.operations.some(operation => operation.includes("/block"))).toBe(false);
+    } finally { f.close(); }
+  }, 15_000);
+
+  test("a valid refresh slower than the listing's budget is left to finish, blocks nothing, and leaves the account usable", async () => {
+    const entry = credential(3, "chosen", "openai-codex");
+    const expired = { ...entry, credential: { ...entry.credential, expires: Date.now() - 60_000 } as SnapshotEntry["credential"] };
+    const rotated: SnapshotEntry = { ...entry, credential: { ...entry.credential, access: "fixture-access-rotated", expires: Date.now() + 3_600_000 } as SnapshotEntry["credential"] };
+    // The broker holds the rotation until the listing has given up on it, so the listing's deadline
+    // always expires mid-refresh; a listing that waited for the refresh would never return.
+    const released = Promise.withResolvers<void>();
+    const refreshed = Promise.withResolvers<boolean>();
+    const f = await listingFixture(expired, async (path, init, forward) => {
+      if (!path.endsWith("/refresh")) return forward();
+      await released.promise;
+      // Still wanted when the broker answers: the listing's deadline never reached it.
+      refreshed.resolve(init?.signal?.aborted ?? false);
+      return forward();
+    });
+    f.fixture.refreshEntry = rotated;
+    try {
+      await f.read();
+      expect(f.operations.filter(operation => operation.includes("/refresh"))).toHaveLength(1);
+      released.resolve();
+      expect(await refreshed.promise).toBe(false);
+      await eventually(() => f.storage.remote.listAuthCredentials("openai-codex").some(item =>
+        item.credential.type === "oauth" && item.credential.access === "fixture-access-rotated"));
+      expect(f.operations.filter(operation => operation.includes("/refresh"))).toHaveLength(1);
+      expect(f.operations.some(operation => operation.includes("/block"))).toBe(false);
+      expect(f.listings).toEqual([]);
+      expect((await f.storage.keys.getWithCredential("openai-codex"))?.apiKey).toBe("fixture-access-rotated");
+      expect(f.operations.some(operation => operation.includes("/block"))).toBe(false);
+    } finally { f.close(); }
+  }, 15_000);
 });

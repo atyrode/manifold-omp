@@ -5,8 +5,9 @@ import { AuthGatewayError, classify, isCodexChatGPTAccountPolicyError } from "@o
 import { parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import { unavailable } from "./inputs.ts";
+import { inventoryModelOf } from "./projection.ts";
 import { resolvePublished } from "./storage.ts";
-import { gatewayModelRefusal, probeAddress, type GatewayModelRefusal } from "../../api/probe.ts";
+import { ACCOUNT_LISTED_PROVIDERS, gatewayModelRefusal, probeAddress, type GatewayModelRefusal, type InventoryModel } from "../../api/probe.ts";
 
 const FRAME_LIMIT = 16 * 1024 * 1024;
 const credentialHeader = /^(?:authorization|proxy-authorization|x-api-key|api-key|x-goog-api-key|x-amz-security-token|cookie)$/i;
@@ -172,13 +173,27 @@ export function safeNativeStream(body: ReadableStream<Uint8Array>, model: Model<
 
 export interface PrivateBoundary { port: number; close(): void }
 /**
- * `catalogUnreadable` is the reason the provider's live listing could not be read on this
- * start, or null. It exists so an unresolved model is refused by the right name: a gateway
- * serving only the SDK's bundled snapshot cannot tell a model that does not exist from one it
- * could not look up, and answering the caller 404 for the second case blames them for a name
- * this gateway simply never fetched (atyrode/manifold#751).
+ * `catalogUnreadable` names, per provider, the reason its live listing could not be read on this
+ * start. It exists so an unresolved model is refused by the right name: a gateway serving only
+ * the SDK's bundled snapshot for a provider cannot tell a model that does not exist from one it
+ * could not look up, and answering the caller 404 for the second case blames them for a name this
+ * gateway simply never fetched (atyrode/manifold#751). A provider whose listing was read still
+ * answers 404 for a name it lacks, whatever another provider's listing did.
+ *
+ * The `models` listing passes through as the SDK writes it, with one addition: each row of a
+ * provider whose inventory is the gateway's listing (`ACCOUNT_LISTED_PROVIDERS`) carries
+ * `inventory`, the SDK's own projection of the model this gateway serves under that name. A
+ * session's OMP release knows a model it does not bundle only by the listing's name and size,
+ * so the probe that inventories such a provider reads these facts instead. OMP clients ignore
+ * the field.
  */
-export function startPrivateBoundary(target: { url: string; bearer: string }, bearer: string, models: ReadonlyMap<string, Model<Api>>, signal: AbortSignal, catalogUnreadable: string | null = null): PrivateBoundary {
+export function startPrivateBoundary(target: { url: string; bearer: string }, bearer: string, models: ReadonlyMap<string, Model<Api>>,
+  signal: AbortSignal, catalogUnreadable: Readonly<Record<string, string>> = {}): PrivateBoundary {
+  const facts = new Map<string, InventoryModel>();
+  for (const [key, model] of models) {
+    const projected = ACCOUNT_LISTED_PROVIDERS.includes(model.provider) ? inventoryModelOf(model) : null;
+    if (projected) facts.set(key, projected);
+  }
   const expected = Buffer.from(`Bearer ${bearer}`);
   const server = Bun.serve({
     hostname: "127.0.0.1", port: 0, idleTimeout: 255, maxRequestBodySize: FRAME_LIMIT,
@@ -205,11 +220,17 @@ export function startPrivateBoundary(target: { url: string; bearer: string }, be
             Object.keys(callerHeaders).some(name => credentialHeader.test(name))
           )) return safeFailure(400, "provider_credential_header_refused");
           model = resolvePublished(models, parsed.modelId);
-          if (!model)
-            return catalogUnreadable === null
+          if (!model) {
+            // The listing a name would be found in is its first segment's or, for a name a client
+            // qualified again, its second's (`resolvePublished`); either can be the model's own.
+            const segments = parsed.modelId.split("/");
+            const providers = segments.length < 2 ? [] : segments.length === 2 ? [segments[0]!] : [segments[0]!, segments[1]!];
+            const unread = providers.find(provider => Object.hasOwn(catalogUnreadable, provider));
+            return unread === undefined
               ? safeFailure(404, "model_not_published")
               // 503, not 404: the model may well be serveable and this gateway does not know.
-              : safeFailure(503, `catalog_unreadable_${catalogUnreadable}`);
+              : safeFailure(503, `catalog_unreadable_${catalogUnreadable[unread]!}`);
+          }
         }
         const requestSignal = AbortSignal.any([signal, request.signal]);
         const headers = new Headers(request.headers);
@@ -226,6 +247,12 @@ export function startPrivateBoundary(target: { url: string; bearer: string }, be
         }
         const value = await response.json();
         if (!listing && (!value?.message || ["error", "aborted"].includes(value.message.stopReason))) return safeFailure(503, "upstream_message_error");
+        if (listing && Array.isArray(value?.data)) {
+          for (const row of value.data) {
+            const projected = typeof row?.id === "string" ? facts.get(row.id) : undefined;
+            if (projected) row.inventory = projected;
+          }
+        }
         return Response.json(value, { headers: { "Cache-Control": "no-store" } });
       } catch (error) {
         // The class, never the message: a constructor name says which hop broke without

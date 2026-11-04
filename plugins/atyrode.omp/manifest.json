@@ -271,6 +271,11 @@
             "required": true,
             "maxLength": 65536
           },
+          "listedProviders": {
+            "type": "string",
+            "required": true,
+            "maxLength": 4096
+          },
           "accountPool": {
             "type": "string",
             "required": true,
@@ -328,6 +333,9 @@
           },
           "modelIdentities": {
             "input": "modelIdentities"
+          },
+          "listedProviders": {
+            "input": "listedProviders"
           }
         },
         "services": [
@@ -372,6 +380,11 @@
             "type": "string",
             "required": true,
             "maxLength": 65536
+          },
+          "listedProviders": {
+            "type": "string",
+            "required": true,
+            "maxLength": 4096
           },
           "accountPool": {
             "type": "string",
@@ -436,6 +449,9 @@
           },
           "modelIdentities": {
             "input": "modelIdentities"
+          },
+          "listedProviders": {
+            "input": "listedProviders"
           },
           "candidates": {
             "input": "candidates"

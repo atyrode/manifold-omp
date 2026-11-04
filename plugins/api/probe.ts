@@ -83,6 +83,42 @@ const limit = z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable(
 export const ProbeIdentitySchema = z.strictObject({ provider: identifier, id: modelId, api: identifier });
 export type ProbeIdentity = z.infer<typeof ProbeIdentitySchema>;
 export const ProbeIdentitiesSchema = z.array(ProbeIdentitySchema).min(1).max(PROBE_MODEL_LIMIT);
+/**
+ * PROVIDERS WHOSE CATALOG IS THE POOLED ACCOUNT'S OWN LISTING.
+ *
+ * OMP discovers Codex models per account and takes that listing as the provider's whole catalog
+ * (the SDK's `dynamic-models-authoritative`): a model the account is offered is there before any
+ * SDK release bundles it, and a bundled one the account is not offered is gone. The gateway reads
+ * that listing with the pooled credential, so for these providers the machine, not this build's
+ * snapshot, knows what is served. Inventory reports a listed provider's rows from the gateway's
+ * listing, never from the pinned SDK or from the CLI's view of it, which knows a model its own
+ * release does not bundle only by name.
+ */
+export const ACCOUNT_LISTED_PROVIDERS: readonly string[] = ["openai-codex"];
+/**
+ * The rows a default inventory leaves free in its receipt for each listed provider's listing.
+ * A listing longer than the room left is refused `output_limit`, never truncated. Codex lists
+ * about ten models to an account.
+ */
+export const LISTED_PROVIDER_ROWS = 64;
+/** The providers an inventory reports from the gateway's listing; see `inventoryAdmits`. */
+export const ListedProvidersSchema = z.array(identifier).max(16)
+  .refine(value => new Set(value).size === value.length);
+/** The identities an inventory is sealed with: none at all when its listed providers cover it. */
+export const SealedIdentitiesSchema = z.array(ProbeIdentitySchema).max(PROBE_MODEL_LIMIT);
+/**
+ * Whether an inventory sealed with `identities` and `listed` providers admits `model`.
+ *
+ * A named identity admits exactly itself. A listed provider none of whose identities is named
+ * admits every row the gateway lists for it, which is how a default inventory covers a provider
+ * whose catalog only the machine knows. Naming any identity of a listed provider restricts it to
+ * the named ones, so an explicit request is never widened.
+ */
+export function inventoryAdmits(identities: readonly ProbeIdentity[], listed: readonly string[],
+  model: Pick<ProbeIdentity, "provider" | "id" | "api">): boolean {
+  return identities.some(identity => identity.provider === model.provider && identity.id === model.id && identity.api === model.api) ||
+    (listed.includes(model.provider) && !identities.some(identity => identity.provider === model.provider));
+}
 export const InventoryModelSchema = ProbeIdentitySchema.extend({
   inputCostPerMillion: number, outputCostPerMillion: number, contextWindow: limit, maxTokens: limit,
   reasoning: z.boolean(), thinkingLevels: z.array(ThinkingLevelSchema).max(6), images: z.boolean(),
@@ -179,23 +215,58 @@ const RawInventoryModelSchema = z.object({
 const RawInventorySchema = z.object({
   models: z.array(RawInventoryModelSchema.pick({ provider: true, id: true, selector: true }).passthrough()).max(16384),
 });
-export function parseInventoryObservation(raw: unknown, identitiesValue: unknown, observedAt: number, version: string, quotaTierOf: QuotaTierOf): InventoryReceipt {
+/**
+ * The gateway's `models` listing as inventory reads it. The SDK's row names a model and its size;
+ * the gateway adds `inventory`, the SDK's own projection of the model it serves, to every row of a
+ * listed provider (`ACCOUNT_LISTED_PROVIDERS`). No other field is read.
+ */
+const GatewayListingSchema = z.object({
+  data: z.array(z.object({ id: z.string().min(1).max(650), inventory: InventoryModelSchema.optional() })).max(16384),
+});
+/** The providers an inventory reports from the gateway's listing, and that listing as the gateway answered it. */
+export interface ListedObservation { readonly providers: readonly string[]; readonly listing: unknown }
+function sortedLevels(levels: readonly z.infer<typeof ThinkingLevelSchema>[]) {
+  return [...levels].sort((a, b) => ThinkingLevelSchema.options.indexOf(a) - ThinkingLevelSchema.options.indexOf(b));
+}
+export function parseInventoryObservation(raw: unknown, identitiesValue: unknown, observedAt: number, version: string, quotaTierOf: QuotaTierOf,
+  listed: ListedObservation = { providers: [], listing: null }): InventoryReceipt {
   if (version !== OMP_VERSION) throw new ProbeError("unsupported_version");
-  const identities = unique(parse(ProbeIdentitiesSchema, identitiesValue, "invalid_input"));
+  const sealed = parse(SealedIdentitiesSchema, identitiesValue, "invalid_input");
+  const providers = parse(ListedProvidersSchema, listed.providers, "invalid_input");
+  if (sealed.length === 0 && providers.length === 0) throw new ProbeError("invalid_input");
+  const identities = unique(sealed);
   const rawModels = parse(RawInventorySchema, raw).models;
   unique(rawModels.map(({ provider, id }) => ({ provider, id, api: "unreported" })));
   const models: InventoryModel[] = [];
   for (const rawModel of rawModels) {
     if (rawModel.selector !== probeAddress(rawModel)) throw new ProbeError("ambiguous_identity");
+    // A listed provider's rows are the gateway's. The CLI knows a model its own release does not
+    // bundle only by the name the listing gives it: unpriced, without reasoning, text-only.
+    if (providers.includes(rawModel.provider)) continue;
     const identity = identities.get(rawModel.selector);
     if (!identity) continue; // Inventory is explicitly limited to the sealed permission set.
     const model = parse(RawInventoryModelSchema, rawModel);
     if ((!model.reasoning && (model.thinking?.length ?? 0) > 0) || new Set(model.thinking ?? []).size !== (model.thinking?.length ?? 0)) throw new ProbeError("invalid_observation");
     models.push({ ...identity, inputCostPerMillion: model.cost.input, outputCostPerMillion: model.cost.output,
       contextWindow: model.contextWindow, maxTokens: model.maxTokens, reasoning: model.reasoning,
-      thinkingLevels: [...(model.thinking ?? [])].sort((a, b) => ThinkingLevelSchema.options.indexOf(a) - ThinkingLevelSchema.options.indexOf(b)),
+      thinkingLevels: sortedLevels(model.thinking ?? []),
       images: model.input.includes("image"), quotaTier: quotaTierOf(identity) });
   }
+  if (providers.length > 0) {
+    for (const row of parse(GatewayListingSchema, listed.listing).data) {
+      const model = row.inventory;
+      if (!model || !providers.includes(model.provider)) continue;
+      // The facts describe the row they ride on, or they describe nothing.
+      if (row.id !== probeAddress(model) || (!model.reasoning && model.thinkingLevels.length > 0) ||
+        new Set(model.thinkingLevels).size !== model.thinkingLevels.length) throw new ProbeError("invalid_observation");
+      if (inventoryAdmits(sealed, providers, model)) models.push({ ...model, thinkingLevels: sortedLevels(model.thinkingLevels) });
+    }
+  }
+  unique(models);
+  // Every unlisted row answers one sealed identity, and sealed identities never exceed the bound, so
+  // only a listed provider's whole listing can push past it. Such a receipt is refused by the bound's
+  // name rather than truncated: dropping rows would silently drop models from a successful inventory.
+  if (models.length > PROBE_MODEL_LIMIT) throw new ProbeError("output_limit");
   models.sort((a, b) => compare(probeAddress(a), probeAddress(b)));
   return parse(InventoryReceiptSchema, { schemaVersion: 1, kind: "inventory", ompVersion: OMP_VERSION, observedAt, models });
 }
@@ -224,7 +295,11 @@ export function parseBenchmarkObservation(raw: unknown, inputValue: unknown, sta
   const results = input.candidates.map(candidate => {
     const row = rows.get(probeAddress(candidate));
     const failure = (status: "not_found" | "client_blocked" | "unresolved" | "unmatched") => ({ ...candidate, status, tokensPerSecond: null, timeToFirstTokenMs: null });
-    if (!row || row.model !== probeAddress(candidate)) return failure("unmatched");
+    // A model the CLI's release does not bundle is the gateway's listed row, which the CLI names by
+    // the listing's id, `provider/id`, under the same provider. The gateway serves that name as
+    // exactly the published `provider/id`, so the row measured the candidate and nothing else.
+    if (!row || (row.model !== probeAddress(candidate) && row.model !== `${candidate.provider}/${probeAddress(candidate)}`))
+      return failure("unmatched");
     const run = row.results[0]!;
     if (!run.ok) {
       if (row.stats !== null) throw new ProbeError("invalid_observation");
