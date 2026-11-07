@@ -1,29 +1,3 @@
-diff --git a/dist/types/auth/refresh.d.ts b/dist/types/auth/refresh.d.ts
-index 885f4a92e8904d64d6ebbe14cbe745dbfcc3e7a0..3480ca6496981632d7ecfe2086b7c0df2b290d71 100644
---- a/dist/types/auth/refresh.d.ts
-+++ b/dist/types/auth/refresh.d.ts
-@@ -36,6 +36,8 @@ export interface OAuthRefresherDeps {
- export declare class OAuthRefresher {
-     #private;
-     constructor(deps: OAuthRefresherDeps);
-+    /** Every refresh this refresher currently owns, for a caller draining after admission stops. */
-+    pendingRefreshes(): Promise<unknown>[];
-     /**
-      * Refresh one stored OAuth credential under durable row ownership.
-      */
-diff --git a/dist/types/auth/usage.d.ts b/dist/types/auth/usage.d.ts
-index f90e8a0ddd5f5bf6d8c8e03d0f5bff5f73b8398d..289eea3f4f11ecfcfb4ee9be62ac283f49b8b0ef 100644
---- a/dist/types/auth/usage.d.ts
-+++ b/dist/types/auth/usage.d.ts
-@@ -41,6 +41,8 @@ export declare class UsageService implements UsageApi {
-     readonly logger: UsageLogger;
-     readonly requestTimeoutMs: number;
-     constructor(deps: UsageServiceDeps);
-+    /** Every usage probe this service currently owns, for a caller draining after admission stops. */
-+    pendingReports(): Promise<unknown>[];
-     /** Whether OAuth usage can be fetched via a provider or the store hook. */
-     canFetchOAuthUsage(provider: Provider): boolean;
-     /**
 diff --git a/dist/types/auth-broker/refresher.d.ts b/dist/types/auth-broker/refresher.d.ts
 index 397345732706d9fcb8af1dc2328707cce2d0b586..3849857a22bd9284a0f9892c8126245fa5093163 100644
 --- a/dist/types/auth-broker/refresher.d.ts
@@ -120,10 +94,19 @@ index fdaace778a605c39987872b4a5bf2cfd7358acf1..6f500964231bfdde9b2bc37381652599
  }
  /** Boot the broker. Caller owns lifecycle; `handle.close()` to stop. */
 diff --git a/dist/types/auth-storage.d.ts b/dist/types/auth-storage.d.ts
-index 27ba9b1d09a4bf2b90e789e2103f5ffa751def01..94469f7595d9332c11b2298ccd84c1c4f61d4189 100644
+index 170249078299f4cbaeef493cf424c1fa470ea908..099b49145260c52ba12cd2af77f8cae15f1ac33a 100644
 --- a/dist/types/auth-storage.d.ts
 +++ b/dist/types/auth-storage.d.ts
-@@ -63,6 +63,8 @@ export declare class AuthStorage {
+@@ -41,6 +41,8 @@ export interface AuthStorageBackend {
+     }): Promise<void>;
+     /** See {@link AuthStorage.close}. */
+     close(): void;
++    /** See {@link AuthStorage.drainRefreshes}. */
++    drainRefreshes(): Promise<void>;
+ }
+ /**
+  * Credential management over an {@link AuthCredentialStore}: multi-account
+@@ -102,6 +104,8 @@ export declare class AuthStorage {
       * keeps the store open until it has saved the rotated token.
       */
      close(): void;
@@ -132,62 +115,32 @@ index 27ba9b1d09a4bf2b90e789e2103f5ffa751def01..94469f7595d9332c11b2298ccd84c1c4
      /**
       * Legacy redirect for callers of the pre-namespace flat API (e.g. repo scripts).
       * @deprecated Use {@link AuthStorage.keys}`.get`.
-diff --git a/src/auth/refresh.ts b/src/auth/refresh.ts
-index 6edc62f044ced69f1ab758a12294ab6834f25e74..702e82cb8d7907e1c2adcb98796ae11ad8f7851d 100644
---- a/src/auth/refresh.ts
-+++ b/src/auth/refresh.ts
-@@ -161,6 +161,16 @@ export class OAuthRefresher {
- 		this.#deps = deps;
- 	}
- 
-+	/** Every refresh this refresher currently owns, for a caller draining after admission stops. */
-+	pendingRefreshes(): Promise<unknown>[] {
-+		// Includes leased exchanges that outlive their caller's budget and still persist a rotated token.
-+		return [
-+			...this.#pendingRefreshes,
-+			...this.#oauthRefreshInFlight.values(),
-+			...this.#oauthCredentialRefreshInFlight.values(),
-+		];
-+	}
-+
- 	/**
- 	 * Return the stored row while it still holds a usable token this refresher
- 	 * minted within {@link OAUTH_REMINT_COOLDOWN_MS}.
-@@ -960,11 +970,14 @@ export class OAuthRefresher {
- 		if (credentialId === undefined) {
- 			return this.#refreshOAuthCredentialUnshared(provider, credential, undefined, signal, reason, rejectedAccess);
- 		}
-+		// The shared rotation belongs to every waiter and to the stored row, not to the first
-+		// caller: a usage probe's deadline must detach from it, never abort a provider rotation
-+		// mid-flight. Each caller still stops waiting on its own signal below.
- 		const promise = this.#refreshOAuthCredentialUnshared(
- 			provider,
- 			credential,
- 			credentialId,
--			signal,
-+			undefined,
- 			reason,
- 			rejectedAccess,
- 		)
-diff --git a/src/auth/usage.ts b/src/auth/usage.ts
-index 3183dac8f1dcdc538964b13657a2881cdcd03a02..cf92bd6dbdc79c442804d9daad322c9c6a64fccd 100644
---- a/src/auth/usage.ts
-+++ b/src/auth/usage.ts
-@@ -131,6 +131,14 @@ export class UsageService implements UsageApi {
- 		this.requestTimeoutMs = deps.requestTimeoutMs;
- 	}
- 
-+	/** Every usage probe this service currently owns, for a caller draining after admission stops. */
-+	pendingReports(): Promise<unknown>[] {
-+		return [
-+			...this.#usageReportsInFlight.values(),
-+			...[...this.#usageRequestInFlight.values()].map(flight => flight.promise),
-+		];
-+	}
-+
- 	/** Whether OAuth usage can be fetched via a provider or the store hook. */
- 	canFetchOAuthUsage(provider: Provider): boolean {
- 		return this.providerFor(provider) !== undefined || this.#deps.store.getUsageReport !== undefined;
+diff --git a/dist/types/auth/refresh.d.ts b/dist/types/auth/refresh.d.ts
+index 885f4a92e8904d64d6ebbe14cbe745dbfcc3e7a0..3480ca6496981632d7ecfe2086b7c0df2b290d71 100644
+--- a/dist/types/auth/refresh.d.ts
++++ b/dist/types/auth/refresh.d.ts
+@@ -36,6 +36,8 @@ export interface OAuthRefresherDeps {
+ export declare class OAuthRefresher {
+     #private;
+     constructor(deps: OAuthRefresherDeps);
++    /** Every refresh this refresher currently owns, for a caller draining after admission stops. */
++    pendingRefreshes(): Promise<unknown>[];
+     /**
+      * Refresh one stored OAuth credential under durable row ownership.
+      */
+diff --git a/dist/types/auth/usage.d.ts b/dist/types/auth/usage.d.ts
+index f90e8a0ddd5f5bf6d8c8e03d0f5bff5f73b8398d..289eea3f4f11ecfcfb4ee9be62ac283f49b8b0ef 100644
+--- a/dist/types/auth/usage.d.ts
++++ b/dist/types/auth/usage.d.ts
+@@ -41,6 +41,8 @@ export declare class UsageService implements UsageApi {
+     readonly logger: UsageLogger;
+     readonly requestTimeoutMs: number;
+     constructor(deps: UsageServiceDeps);
++    /** Every usage probe this service currently owns, for a caller draining after admission stops. */
++    pendingReports(): Promise<unknown>[];
+     /** Whether OAuth usage can be fetched via a provider or the store hook. */
+     canFetchOAuthUsage(provider: Provider): boolean;
+     /**
 diff --git a/src/auth-broker/refresher.ts b/src/auth-broker/refresher.ts
 index e9a2d3eca2de11545534201dbda87fbcd593ff98..140df149328ab408bb6e51e4abc4c9d8f7a0f845 100644
 --- a/src/auth-broker/refresher.ts
@@ -992,13 +945,35 @@ index 51ce913681ddf7ec5d3e7364548ee509217148b2..49eef3019a28d0c1355de0afd0fce3ab
  	};
  }
 diff --git a/src/auth-storage.ts b/src/auth-storage.ts
-index b718d5eb2dc633a119c023268ce02752a38b0603..6f39ca36f81e400b98a7842ef6fcb29555e627f7 100644
+index d2a2ba64f722afff58bc82d23092f2025dd17069..6b27a7207e8f22848d0831896e76e35006832113 100644
 --- a/src/auth-storage.ts
 +++ b/src/auth-storage.ts
-@@ -282,6 +282,25 @@ export class AuthStorage {
- 		retire(this.#modules);
+@@ -118,6 +118,8 @@ export interface AuthStorageBackend {
+ 	replaceStore(store: AuthCredentialStore, options?: { sourceLabel?: string }): Promise<void>;
+ 	/** See {@link AuthStorage.close}. */
+ 	close(): void;
++	/** See {@link AuthStorage.drainRefreshes}. */
++	drainRefreshes(): Promise<void>;
+ }
+ 
+ /** A backend has lifecycle methods no credential store declares. */
+@@ -223,6 +225,11 @@ export class AuthStorage {
+ 		this.#backend.close();
  	}
  
++	/** Join owned usage/refresh work after the caller has stopped request/sweep admission. */
++	drainRefreshes(): Promise<void> {
++		return this.#backend.drainRefreshes();
++	}
++
+ 	/**
+ 	 * Legacy redirect for callers of the pre-namespace flat API (e.g. repo scripts).
+ 	 * @deprecated Use {@link AuthStorage.keys}`.get`.
+@@ -401,6 +408,25 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
+ 	close(): void {
+ 		retire(this.#modules);
+ 	}
++
 +	/**
 +	 * Join owned refresh work after the caller has stopped request/sweep admission.
 +	 * Usage cancellation can detach a credential refresh, and serialized usage
@@ -1017,7 +992,62 @@ index b718d5eb2dc633a119c023268ce02752a38b0603..6f39ca36f81e400b98a7842ef6fcb295
 +		}
 +		if (failure) throw failure.reason;
 +	}
+ }
+ 
+ /** Stop store-bound modules: refuse new refreshes, close the store once in-flight ones have saved. */
+diff --git a/src/auth/refresh.ts b/src/auth/refresh.ts
+index 6edc62f044ced69f1ab758a12294ab6834f25e74..702e82cb8d7907e1c2adcb98796ae11ad8f7851d 100644
+--- a/src/auth/refresh.ts
++++ b/src/auth/refresh.ts
+@@ -161,6 +161,16 @@ export class OAuthRefresher {
+ 		this.#deps = deps;
+ 	}
+ 
++	/** Every refresh this refresher currently owns, for a caller draining after admission stops. */
++	pendingRefreshes(): Promise<unknown>[] {
++		// Includes leased exchanges that outlive their caller's budget and still persist a rotated token.
++		return [
++			...this.#pendingRefreshes,
++			...this.#oauthRefreshInFlight.values(),
++			...this.#oauthCredentialRefreshInFlight.values(),
++		];
++	}
 +
  	/**
- 	 * Legacy redirect for callers of the pre-namespace flat API (e.g. repo scripts).
- 	 * @deprecated Use {@link AuthStorage.keys}`.get`.
+ 	 * Return the stored row while it still holds a usable token this refresher
+ 	 * minted within {@link OAUTH_REMINT_COOLDOWN_MS}.
+@@ -960,11 +970,14 @@ export class OAuthRefresher {
+ 		if (credentialId === undefined) {
+ 			return this.#refreshOAuthCredentialUnshared(provider, credential, undefined, signal, reason, rejectedAccess);
+ 		}
++		// The shared rotation belongs to every waiter and to the stored row, not to the first
++		// caller: a usage probe's deadline must detach from it, never abort a provider rotation
++		// mid-flight. Each caller still stops waiting on its own signal below.
+ 		const promise = this.#refreshOAuthCredentialUnshared(
+ 			provider,
+ 			credential,
+ 			credentialId,
+-			signal,
++			undefined,
+ 			reason,
+ 			rejectedAccess,
+ 		)
+diff --git a/src/auth/usage.ts b/src/auth/usage.ts
+index 3183dac8f1dcdc538964b13657a2881cdcd03a02..cf92bd6dbdc79c442804d9daad322c9c6a64fccd 100644
+--- a/src/auth/usage.ts
++++ b/src/auth/usage.ts
+@@ -131,6 +131,14 @@ export class UsageService implements UsageApi {
+ 		this.requestTimeoutMs = deps.requestTimeoutMs;
+ 	}
+ 
++	/** Every usage probe this service currently owns, for a caller draining after admission stops. */
++	pendingReports(): Promise<unknown>[] {
++		return [
++			...this.#usageReportsInFlight.values(),
++			...[...this.#usageRequestInFlight.values()].map(flight => flight.promise),
++		];
++	}
++
+ 	/** Whether OAuth usage can be fetched via a provider or the store hook. */
+ 	canFetchOAuthUsage(provider: Provider): boolean {
+ 		return this.providerFor(provider) !== undefined || this.#deps.store.getUsageReport !== undefined;

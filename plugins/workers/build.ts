@@ -35,9 +35,9 @@ const dependencyMarker = ".omp-prepared-dependencies.json";
 const graphs = {
   baseline: {
     root, version: runtime.sdkVersion, nativeAlias: "pi-natives", native: runtime.tools["pi-natives"],
-    lockSha256: "5898e97d166976882a7030400404b79b5ce4be9d9fe77be2524ac13d2a793b9f",
-    loaderSha256: "a93e489ab8a7a0c26ff88c80f5cd07a04c7295dd9f714aaf2f0fa00583a354e0",
-    patch: { file: "patches/@oh-my-pi%2Fpi-ai@18.16.0.patch", sha256: "a1bb398de16b0cdb85025c7dcdb8076b1913230be76ee55e8dddc34970066600" },
+    lockSha256: "34392e6bca3a52b08cda46c632b69fae5e592e8f14726cda653ec42a09e98850",
+    loaderSha256: "395d21d431121f469ba5a6016c42ac06a5abfa1b8021abc0efbf475dfb0c7ccd",
+    patch: { file: "patches/@oh-my-pi%2Fpi-ai@18.18.0.patch", sha256: "70afb022302f0c2113dbd5122d8a22f16137466024a22931ed2f0a6da22fe36a" },
   },
   sdkHost: {
     root: join(root, "sdk-host"), version: sdkRuntime.sdkVersion, nativeAlias: "sdk-pi-natives", native: sdkRuntime.tools["pi-natives"],
@@ -220,7 +220,7 @@ async function prepareDependencies(name: GraphName): Promise<void> {
  * The owner mounts the verified native artifact at this fixed private path. No package
  * resolution, CPU probing, extraction, cache fallback, source checkout or host PATH.
  * That artifact is the reviewed release for this exact SDK, never a stale workspace
- * build, so `missingNativeExport` keeps an absent export `undefined` for the SDK's
+ * build, so absent function/class exports stay `undefined` for the SDK's
  * `typeof` probes, as the stock loader does for a current addon.
  */
 const pinnedLoader = (graph: DependencyGraph) => `
@@ -236,6 +236,9 @@ export function loadNative() {
   return bindings;
 }
 export function missingNativeExport() {
+  return undefined;
+}
+export function missingNativeClass() {
   return undefined;
 }
 export function missingNativeExportMessage(symbolName) {
