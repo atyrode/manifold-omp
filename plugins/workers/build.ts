@@ -35,9 +35,9 @@ const dependencyMarker = ".omp-prepared-dependencies.json";
 const graphs = {
   baseline: {
     root, version: runtime.sdkVersion, nativeAlias: "pi-natives", native: runtime.tools["pi-natives"],
-    lockSha256: "34392e6bca3a52b08cda46c632b69fae5e592e8f14726cda653ec42a09e98850",
+    lockSha256: "6d2dfd0000da86c9445818abc9a968a78b886af63688645e5723617a54113fa6",
     loaderSha256: "395d21d431121f469ba5a6016c42ac06a5abfa1b8021abc0efbf475dfb0c7ccd",
-    patch: { file: "patches/@oh-my-pi%2Fpi-ai@18.18.0.patch", sha256: "70afb022302f0c2113dbd5122d8a22f16137466024a22931ed2f0a6da22fe36a" },
+    patch: { file: "patches/@oh-my-pi%2Fpi-ai@18.18.1.patch", sha256: "70afb022302f0c2113dbd5122d8a22f16137466024a22931ed2f0a6da22fe36a" },
   },
   sdkHost: {
     root: join(root, "sdk-host"), version: sdkRuntime.sdkVersion, nativeAlias: "sdk-pi-natives", native: sdkRuntime.tools["pi-natives"],
