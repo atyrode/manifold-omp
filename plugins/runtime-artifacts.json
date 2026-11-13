@@ -1,11 +1,11 @@
 {
   "bunVersion": "1.4.4",
-  "sdkVersion": "18.18.8",
-  "observedOn": "2026-11-11",
+  "sdkVersion": "18.20.0",
+  "observedOn": "2026-11-13",
   "provenance": {
     "bunRelease": "https://github.com/oven-sh/bun/releases/tag/bun-v1.4.4",
     "ompRelease": "https://github.com/can1357/oh-my-pi/releases/tag/v18.8.6",
-    "sdkRelease": "https://github.com/can1357/oh-my-pi/releases/tag/v18.18.8",
+    "sdkRelease": "https://github.com/can1357/oh-my-pi/releases/tag/v18.20.0",
     "caBundle": {
       "version": "2026.1.4",
       "observedOn": "2026-09-12",
@@ -129,16 +129,16 @@
     },
     "pi-natives": {
       "linux-x64": {
-        "url": "https://registry.npmjs.org/@oh-my-pi/pi-natives-linux-x64/-/pi-natives-linux-x64-18.18.8.tgz",
-        "sha256": "193ba914a498660c09cd1482095bd112a0f43a6b2d422a5d63572e0ea3cddbf3",
+        "url": "https://registry.npmjs.org/@oh-my-pi/pi-natives-linux-x64/-/pi-natives-linux-x64-18.20.0.tgz",
+        "sha256": "46a6be7c32082b4ae17f7bac3593a5b153453bf5c7eccec0beaa419e02cf7a7d",
         "format": "tar.gz",
         "entry": [
           "package",
           "pi_natives.linux-x64-baseline.node"
         ],
-        "entrySha256": "274235a393d505ca855e9e4dc8b7787aa3a543c6548aa4cc0ff0af6fe45811f0",
-        "maxBytes": 104109250,
-        "maxExpandedBytes": 258355200,
+        "entrySha256": "f834027255aa40eccd402836e7f60b4b12c8c8f8f6ea05f8546193a1acb73872",
+        "maxBytes": 104391114,
+        "maxExpandedBytes": 258923520,
         "maxMembers": 6,
         "files": {
           "pi-natives-license": {
@@ -157,7 +157,7 @@
               "package",
               "THIRD-PARTY-NOTICES.txt"
             ],
-            "sha256": "7db55c5e28099f78637bd562d7c70b700eeb45c6298578417bc249ceae2b7d4d",
+            "sha256": "482eca08a167209b391df83e644d263867e891baab775a493cac2e19c43f1fbd",
             "relativeTarget": [
               "pi-natives-licenses",
               "THIRD-PARTY-NOTICES.txt"
@@ -166,16 +166,16 @@
         }
       },
       "linux-arm64": {
-        "url": "https://registry.npmjs.org/@oh-my-pi/pi-natives-linux-arm64/-/pi-natives-linux-arm64-18.18.8.tgz",
-        "sha256": "0475a002ecbb3c4ecff944e8f1ca54ceab64f1612f9508520eae3325308b66ea",
+        "url": "https://registry.npmjs.org/@oh-my-pi/pi-natives-linux-arm64/-/pi-natives-linux-arm64-18.20.0.tgz",
+        "sha256": "04abca30ff79052ad4546b02d889aab7614f6e264709c6582fad578fd633e5fc",
         "format": "tar.gz",
         "entry": [
           "package",
           "pi_natives.linux-arm64.node"
         ],
-        "entrySha256": "8a566c6b079736ba9473066c4b9afae874ae76cf255451f0d2b1b50abbb03c9e",
-        "maxBytes": 49427392,
-        "maxExpandedBytes": 118495232,
+        "entrySha256": "8818f13af18f11fe84d5b49fd5c46148781505e71340b33dcdbfc802e8c1ce50",
+        "maxBytes": 49624506,
+        "maxExpandedBytes": 119078400,
         "maxMembers": 5,
         "files": {
           "pi-natives-license": {
@@ -194,7 +194,7 @@
               "package",
               "THIRD-PARTY-NOTICES.txt"
             ],
-            "sha256": "7db55c5e28099f78637bd562d7c70b700eeb45c6298578417bc249ceae2b7d4d",
+            "sha256": "482eca08a167209b391df83e644d263867e891baab775a493cac2e19c43f1fbd",
             "relativeTarget": [
               "pi-natives-licenses",
               "THIRD-PARTY-NOTICES.txt"

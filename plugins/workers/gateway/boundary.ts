@@ -1,7 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { writeSync } from "node:fs";
 import { z } from "zod";
-import { AuthGatewayError, classify, isCodexChatGPTAccountPolicyError } from "@oh-my-pi/pi-ai/error";
+import { AuthGatewayError, classify, isModelEntitlementDenial } from "@oh-my-pi/pi-ai/error";
 import { parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import { unavailable } from "./inputs.ts";
@@ -72,7 +72,7 @@ function modelRefusal(text: string, status: number | undefined, model: Model<Api
   // that it compares the denied and requested ids ignoring case and any `vendor/` namespace.
   // The denial carries its own status, none over WebSocket and 400 over HTTP; any other status
   // is a different failure that happens to quote the sentence, and stays opaque.
-  if ((status === undefined || status === 400) && isCodexChatGPTAccountPolicyError(text, model.provider, requested))
+  if (model.provider === "openai-codex" && (status === undefined || status === 400) && isModelEntitlementDenial(text, model.provider, requested))
     return { kind: "model_not_entitled", status: 400 };
   return null;
 }
