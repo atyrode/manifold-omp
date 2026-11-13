@@ -866,6 +866,10 @@ describe("a provider's answer about the requested model", () => {
       [codex, { errorStatus: 503, errorMessage: "Codex error event: The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account. (code=invalid_request_error)" }],
       // Anthropic's not-found envelope naming this model, but from a model that is not Anthropic's.
       [codex, { errorStatus: 404, errorMessage: notFound("model: gpt-6-sol") }],
+      // The SDK's general entitlement helper also admits Cursor; this boundary does not.
+      [{ ...codex, provider: "cursor" }, { errorMessage: "ERROR_RATE_LIMITED_CHANGEABLE: Named models unavailable" }],
+      // Account-wide cyber policy is not a settled fact about this requested model.
+      [codex, { errorMessage: "cyber_policy: trusted access for cyber is required" }],
     ];
     for (const [model, reported] of resembling)
       expect(await project(model, reported)).toBe("gateway_unavailable");
