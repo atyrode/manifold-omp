@@ -328,6 +328,7 @@ test("a one-shot discovers only its configured provider, and nothing it selects 
     const published = poolModels(handed);
     const { registry, settings, calls } = await oneShotRegistry(root, configured, published, native);
     const available = registry.getAvailable();
+    const activeModel = resolveModelFromString(configured, available);
     const credential = (selected: Model | undefined) => selected === undefined ? "none"
       : resolvePublished(published, `${selected.provider}/${selected.id}`)?.provider ?? "unpublished";
     return {
@@ -336,8 +337,9 @@ test("a one-shot discovers only its configured provider, and nothing it selects 
         agentModel: "claude-opus-4-8", settings, activeModelPattern: configured }).patterns, registry, settings).model),
       imageQuestion: credential(resolveImageQuestionModel(
         { modelRegistry: registry, settings, getActiveModelString: () => configured } as unknown as ToolSession).model),
-      compactionLastResort: credential(new SessionMaintenance({ settings, modelRegistry: registry } as unknown as SessionMaintenanceHost)
-        .resolveCompactionModelCandidates(resolveModelFromString(configured, available), available).at(-1)),
+      compactionLastResort: credential(new SessionMaintenance({
+        settings, modelRegistry: registry, model: () => activeModel,
+      } as unknown as SessionMaintenanceHost).resolveCompactionModelCandidates(activeModel, available).at(-1)),
     };
   };
   try {
