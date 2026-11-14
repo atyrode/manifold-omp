@@ -400,3 +400,19 @@ This execution refresh intentionally retains the existing Certifi **2026.1.4** C
 Every embedded worker, asset and notice counts toward the existing **16 MiB aggregate base64 limit**, with duplicate asset rejection and final plugin JSON verification before atomic publication. Arbitrary-cwd packaging remains supported. Successful packaging alone does not establish optional browser/PAC/ML execution, ARM64 runtime behavior or end-to-end native admission; the credential gate and packaged SDK-host strict-refusal proof must both pass.
 
 Credential SDK updates require the preserved authority scenarios (ingress, mutation ordering, restart, quiesce, shutdown) to pass against the private patch. The patch is not ported to the published SDK-host graph.
+
+### Prepared grammar source asset (not a runtime cutover)
+
+`plugins/runtime-data/omp-grammar-assets-v1/grammars-v1.tar.gz` contains all **39** WASM grammars named by OMP **18.20.0**'s published registry, plus the complete, byte-identical `stencil-hq/wasm-grammars` **v1** `manifest.json` and `THIRD-PARTY-NOTICES.txt`. It has **41** sorted flat regular-file members, fixed USTAR ownership/mode/timestamps and a fixed gzip header. Its SHA-256 is `6fd35e6dc87b51c8acc91f1fbe38eec83fb93800dd42e3323ced9d4191039bb3`; the exact archive and complete expanded tar bounds are **6,002,768** and **84,224,000** bytes. `grammars-v1.json` records every member's size/SHA-256, the complete tar hash and exact member/payload counts.
+
+The adjacent `sources.json` pins every compressed and decompressed grammar, the publisher manifest/notices, and the registry at its published OMP commit. It preserves the publisher's missing-license-file statements and license-heading/text discrepancies rather than asserting one uniform license or inventing notices. It also records independent hashes of the existing certifi **2026.1.4** wheel's PEM/license entries; that wheel, the CA pins and CA content are unchanged and are not included in the grammar archive.
+
+From the repository root, a maintainer can reproduce into a separate directory:
+
+```sh
+python3 plugins/scripts/prepare-grammar-assets.py --output-dir /tmp/omp-grammars-reproduced
+```
+
+The reproducer requires Python **3.14.7** with zlib **1.3.2** for the exact gzip bytes and a host `zstd` decompressor (prepared with **1.5.7**). It downloads only the exact size/SHA-256-pinned public inputs into a temporary source cache, verifies both compressed and decompressed hashes and complete registry/manifest membership, and refuses output drift against the reviewed metadata. For offline reproduction, add `--offline --cache-dir /path/to/source-cache`; cache files are named `<sha256>-<source file>` using `sources.json`. No downloaded code or WASM is executed.
+
+This archive is not referenced by a runtime declaration or embedded by the packer. This prerequisite changes no family version, SDK graph, lock, patch or runtime execution graph; the existing CLI/SDK-host versions described above remain intentional. It supplies source bytes for a separately reviewed managed-artifact-group and same-family release-asset integration, not a published download URL, runtime extraction path, deployment or complete compatibility claim.
