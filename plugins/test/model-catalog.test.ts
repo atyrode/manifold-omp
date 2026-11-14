@@ -158,6 +158,14 @@ test("typed root metadata reads are passive and return the actual pinned SDK fac
   );
 });
 
+test("the native passive catalog exposes the pinned Fable 5.2 list-price correction without probe provenance", async () => {
+  const result = await catalog(["anthropic"]);
+  const row = result.models.find(model => model.id === "claude-fable-5-2");
+  expect(row).toMatchObject({ provider: "anthropic", inputCostPerMillion: 8, outputCostPerMillion: 40 });
+  expect(result.source).toBe("bundled");
+  expect(result).not.toHaveProperty("observedAt");
+});
+
 test("provider selection is exact, order-independent and never aliases an unsupported provider", async () => {
   const selected = await catalog(["deepseek", "anthropic", "deepseek"]);
   expect(selected).toEqual(await catalog(["anthropic", "deepseek"]));

@@ -8,6 +8,7 @@ import {
   INVENTORY_OPERATION_ID,
   LAUNCH_OPERATION_ID,
   OMP_PLUGIN_ID,
+  OMP_VERSION,
   OmpHarnessProfileSchema,
   RUNS_LOCATION_ID,
   SESSION_GUEST_PATH,
@@ -874,7 +875,7 @@ test("a default inventory reports Codex from the account's listing, and an expli
     inputCostPerMillion: 1, outputCostPerMillion: 5, contextWindow: 500_000, maxTokens: 128_000, reasoning: true,
     thinkingLevels: ["low", "medium", "high"], images: true, quotaTier });
   const receipt = (...models: InventoryModel[]) =>
-    JSON.stringify({ schemaVersion: 1, kind: "inventory", ompVersion: "18.8.6", observedAt: 1, models });
+    JSON.stringify({ schemaVersion: 1, kind: "inventory", ompVersion: OMP_VERSION, observedAt: 1, models });
   const listed = row("openai-codex", CODEX_LISTED_ONLY, "openai-codex-responses", "chat");
   const pinned = row("anthropic", "claude-sonnet-4-5", "anthropic-messages", null);
 
@@ -965,8 +966,8 @@ test("a one-shot holds every model role its configuration leaves unset to the co
   const job = await f.client.call("runSession", { ...advised, reviewDigest });
   if ("refused" in job) throw new Error(job.refused);
   const roles: Record<string, string> = JSON.parse(String(f.posted[0]!.input.config)).modelRoles;
-  // The chat roles of OMP 18.8.6, in the CLI and in the SDK host.
-  for (const role of ["default", "slow", "vision", "plan", "commit", "tiny", "memory", "task", "advisor"])
+  // Native shared chat roles in both OMP 18.20.0 execution graphs.
+  for (const role of ["default", "slow", "vision", "plan", "commit", "tiny", "memory", "task", "advisor", "widget"])
     expect(roles[role]).toBe(configured);
   // A role the operator configured keeps its model.
   expect(roles.smol).toBe(smol);
@@ -1280,9 +1281,10 @@ test("restricted review binds exact tools and disables ambient skills without ch
     tools: { ...deployment.installation!.machine.tools, bun: sdkRuntimeArtifacts.tools.bun, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
   f.ctx.jobs.describeDeployment = async () => deployment;
   const automation = { mode: "restricted" as const, toolNames: ["read" as const], delegation: "disabled" as const };
-  // Code composes passive task routes even when delegation is disabled.
+  // Shared task routing remains passive configuration when delegation is disabled.
   const input = { ...session, overlay: { ...session.overlay,
-    task: { agentModelOverrides: { task: "anthropic/claude-sonnet-4-5" }, agentAdvisor: { task: "off" as const }, prewalk: false } } };
+    modelRoles: { ...session.overlay.modelRoles, task: "anthropic/claude-sonnet-4-5" },
+    task: { agentAdvisor: { task: "off" as const }, prewalk: false } } };
   const reviewed = await f.client.call("reviewSession", { ...input, automation });
   if ("refused" in reviewed) throw new Error(reviewed.refused);
   expect(reviewed.automation).toEqual(automation);

@@ -233,7 +233,6 @@ function configuredModels(overlay: Overlay): string[] {
   return [
     ...Object.values(roles),
     ...Object.values(overlay.retry?.fallbackChains ?? {}).flat(),
-    ...Object.values(overlay.task?.agentModelOverrides ?? {}).map(ref => ref.startsWith("@") ? roles[ref.slice(1)] ?? "" : ref),
   ];
 }
 /**
@@ -730,7 +729,7 @@ function supportsSdkRuntime(machine: MachineHalf | undefined, operationId: strin
       bun?.sha256 !== sdkRuntimeArtifacts.tools.bun[platform].sha256 ||
       bun.entrySha256 !== sdkRuntimeArtifacts.tools.bun[platform].entrySha256) return false;
   }
-  return sdkRuntimeArtifacts.sdkVersion === "18.8.6" &&
+  return sdkRuntimeArtifacts.sdkVersion === "18.20.0" &&
     operation?.executable?.runtimeTool === "bun" &&
     operation?.input.automation !== undefined && operation.input.resumeOverrides !== undefined &&
     operation.runtimeTools?.includes("sdkHost") === true && operation.runtimeTools.includes("sdk-pi-natives");

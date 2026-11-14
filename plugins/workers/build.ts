@@ -41,8 +41,8 @@ const graphs = {
   },
   sdkHost: {
     root: join(root, "sdk-host"), version: sdkRuntime.sdkVersion, nativeAlias: "sdk-pi-natives", native: sdkRuntime.tools["pi-natives"],
-    lockSha256: "77c223d720f100ec767ace917c31e94a84d652735c6ba58d75db2b7c178e52c3",
-    loaderSha256: "9288d96bebda7acc59251e6ebeaddd107b2dcfc2fedd9b7fd1a2e60f70a1d3d9",
+    lockSha256: "db392b5382eb87d450209bfc5f33c457748cd5fbb4a3dc085a00c1d32bf324cb",
+    loaderSha256: "395d21d431121f469ba5a6016c42ac06a5abfa1b8021abc0efbf475dfb0c7ccd",
     patch: undefined,
   },
 } as const;
@@ -296,29 +296,17 @@ async function importsAsText(importer: string, specifier: string): Promise<boole
   return true;
 }
 
-/** Execute the complete shipped helper, changing only its monorepo path mapping.
- * Its export expansion, exclusions, shims and lazy registry remain publisher code.
- * The private copy is temporary; installed packages and upstream checkouts are untouched.
+/** Execute the unmodified shipped helper using its supported installed-package layout.
+ * Export expansion, exclusions, compatibility shims and the lazy registry remain publisher code.
  */
 async function legacyPiPlugin(graph: DependencyGraph, codingAgent: string): Promise<BunPlugin> {
-  const packages = {
-    agent: "@oh-my-pi/pi-agent-core", ai: "@oh-my-pi/pi-ai", catalog: "@oh-my-pi/pi-catalog",
-    "coding-agent": "@oh-my-pi/pi-coding-agent", natives: "@oh-my-pi/pi-natives",
-    tui: "@oh-my-pi/pi-tui", utils: "@oh-my-pi/pi-utils",
-  };
-  const installed = Object.fromEntries(await Promise.all(Object.entries(packages).map(async ([key, name]) => [key, await packageRoot(graph, name)])));
-  let source = await readFile(join(codingAgent, "scripts/legacy-pi-virtual-module.ts"), "utf8");
-  source = replacePublishedSource(source, 'const packageDir = path.resolve(import.meta.dir, "..");', `const packageDir = ${JSON.stringify(codingAgent)};`);
-  source = replacePublishedSource(source, 'path.join(repoRoot, "packages", pkg.dir)', `(${JSON.stringify(installed)} as Record<string, string>)[pkg.dir]!`);
-  const stage = await mkdtemp(join(root, ".omp-sdk-helper-"));
-  try {
-    const file = join(stage, "legacy-pi-virtual-module.ts");
-    await writeFile(file, source);
-    const helper = await import(file);
-    return await helper.createLegacyPiVirtualModulePlugin();
-  } finally {
-    await rm(stage, { recursive: true, force: true });
-  }
+  await Promise.all([
+    "@oh-my-pi/pi-agent-core", "@oh-my-pi/pi-ai", "@oh-my-pi/pi-catalog",
+    "@oh-my-pi/pi-coding-agent", "@oh-my-pi/pi-natives", "@oh-my-pi/pi-tui", "@oh-my-pi/pi-utils",
+  ].map(name => packageRoot(graph, name)));
+  // The selected prepared graph owns this plugin; a static import would resolve from the baseline.
+  const helper = await import(join(codingAgent, "scripts/legacy-pi-virtual-module.ts"));
+  return await helper.createLegacyPiVirtualModulePlugin();
 }
 
 // quickjs-wasi@2.2.0 publishes MIT metadata but no standalone license, including
@@ -404,8 +392,7 @@ async function notices(importedFiles: Set<string>, codingAgent?: string): Promis
     }
   }
   const sections: string[] = [];
-  // Every @oh-my-pi package ships the same megabyte of aggregate notices, which repeated per
-  // package outgrew the plugin's 16 MiB artifact budget. Identical text is stated once.
+  // Identical publisher notice text is stated once, without dropping package attribution.
   const firstLabels = new Map<string, string>();
   const section = (label: string, text: string): string => {
     const digest = hash(Buffer.from(text));
@@ -424,7 +411,9 @@ async function notices(importedFiles: Set<string>, codingAgent?: string): Promis
     if (entries.length === 0 && directory.includes("node_modules")) {
       if (name === "quickjs-wasi@2.2.0") sections.push(quickjsNotice);
       else if (name === "@puppeteer/browsers@3.0.6" || name === "puppeteer-core@25.3.0") {
-        if (!publisherNotices.includes(`- ${name}: canonical Apache-2.0 text`)) throw new Error(`Missing exact publisher attribution: ${name}`);
+        const attribution = name.replace(/@([^@]+)$/, " $1");
+        if (!publisherNotices.includes(`- ${attribution} (no license file in package; Apache-2.0 per package.json)`))
+          throw new Error(`Missing exact publisher attribution: ${name}`);
         sections.push(`${name} / Apache-2.0\nLicense supplied by @oh-my-pi/pi-coding-agent@${sdkRuntime.sdkVersion} THIRD-PARTY-NOTICES.txt below.`);
         needsPublisherNotices = true;
       } else throw new Error(`Bundled dependency has no packaged license: ${name}`);
@@ -483,7 +472,6 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
     const docs = codingAgent ? await readFile(join(codingAgent, "dist/docs-index.generated.txt"), "utf8") : "";
     const quickjs = codingAgent ? await packageRoot(graph, "quickjs-wasi", "2.2.0") : undefined;
     const quickjsModule = quickjs ? await realpath(join(quickjs, "dist/index.js")) : undefined;
-    const htmlExport = codingAgent ? await realpath(join(codingAgent, "src/export/html/index.ts")) : undefined;
     const nativePackage = await packageRoot(graph, "@oh-my-pi/pi-natives");
     const nativeLoader = await realpath(join(nativePackage, "native/loader-state.js"));
     if (hash(await readFile(nativeLoader)) !== graph.loaderSha256) throw new Error(`Unreviewed native SDK loader bytes: ${graphName}`);
@@ -536,17 +524,6 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
               "new URL('../quickjs.wasm', import.meta.url)", `new URL(${JSON.stringify(`./${asset}`)}, import.meta.url)`);
             return { contents, loader: "js" };
           }
-          if (htmlExport && path === htmlExport) {
-            // The export template inlines its vendored scripts as text either way. Importing them
-            // as text keeps the archive within the protocol's eight declared files per artifact.
-            let contents = await readFile(path, "utf8");
-            for (const [binding, file] of [["highlightJs", "highlight.min.js"], ["markedJs", "marked.min.js"]]) {
-              contents = replacePublishedSource(contents, `import ${binding}Path from "./vendor/${file}" with { type: "file" };`,
-                `import ${binding} from "./vendor/${file}" with { type: "text" };`);
-              contents = replacePublishedSource(contents, `const ${binding} = fs.readFileSync(resolveBundledHtmlAssetPath(${binding}Path), "utf8");`, "");
-            }
-            return { contents, loader: "ts" };
-          }
           return undefined;
         });
       },
@@ -583,7 +560,7 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
       const member = output.path.startsWith("./") ? output.path.slice(2) : output.path;
       const prefix = `${name}-assets/`;
       if (output.kind !== "asset" || assets.has(member) || !member.startsWith(prefix) ||
-          !/^(?:template-[a-z0-9]+\.(?:css|html|js)|tool-views\.generated-[a-z0-9]+\.js|CHANGELOG-[a-z0-9]+\.md)$/.test(member.slice(prefix.length)))
+          !/^CHANGELOG-[a-z0-9]+\.md$/.test(member.slice(prefix.length)))
         throw new Error(`Undeclared worker bundle output: ${name}: ${member}`);
       const bytes = Buffer.from(await output.arrayBuffer());
       assets.set(member, bytes);

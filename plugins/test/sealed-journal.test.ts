@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { sealedToolResult, type SealedJournalEntry } from "../scripts/sealed-journal.ts";
 
-// Journal shapes as OMP 18.8.6 seals them for the native tool proof.
+// Sealed journal records consumed by the native tool proof.
 const head: SealedJournalEntry[] = [
   { type: "session", id: "session" }, { type: "model_change" }, { type: "thinking_level_change" },
   { type: "message", message: { role: "user", content: [{ type: "text", text: "NATIVE-TOOL-COMPOSITION-PROOF" }] } },

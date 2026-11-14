@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AuthStorage, ModelRegistry } from "@oh-my-pi/pi-coding-agent";
 import {
   expandRoleAlias, resolveAdvisorRoleSelection, resolveAgentModelSelection, resolveModelFromString, resolveModelOverride,
@@ -14,6 +15,8 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveRoleModelFull } from "@oh-my-pi/pi-coding-agent/session/role-models";
 import { SessionMaintenance, type SessionMaintenanceHost } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { loadBundledAgents } from "@oh-my-pi/pi-coding-agent/task/agents";
+import { isReadOnlyAgent } from "@oh-my-pi/pi-coding-agent/task/read-only-policy";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { resolveImageQuestionModel } from "@oh-my-pi/pi-coding-agent/utils/image-question";
 import { exactModelScope, pinnedModelRoles, type RuntimeAccountPool } from "../../api/index.ts";
@@ -78,6 +81,40 @@ test("resume refuses missing, unavailable, unauthenticated and incompatible stat
   } finally { await manager.close(); }
 });
 
+test("off and auto remain explicit selectors without inventing reasoning capability", async () => {
+  const plain = getBundledModel("openai", "gpt-4.1");
+  expect(plain.reasoning).toBe(false);
+  expect(plain.thinking).toBeUndefined();
+  const catalog = {
+    find: (provider: string, id: string) => provider === plain.provider && id === plain.id ? plain : undefined,
+    getAll: () => [plain], hasConfiguredAuth: () => true,
+  };
+  const manager = SessionManager.inMemory("/fixture");
+  const configured = { modelRoles: { default: "openai/gpt-4.1" } };
+  try {
+    manager.appendModelChange("openai/gpt-4.1");
+    manager.appendThinkingLevelChange("off", "auto");
+    expect(admitSdkSession(catalog, manager, configured, undefined)).toEqual({ model: plain, thinkingLevel: "auto" });
+    expect(admitSdkSession(catalog, manager, configured, { thinking: "off" })).toEqual({ model: plain, thinkingLevel: "off" });
+    expect(admitSdkSession(catalog, manager, configured, { model: "openai/gpt-4.1:off" }))
+      .toEqual({ model: plain, thinkingLevel: "off" });
+    expect(admitSdkSession(catalog, undefined, { ...configured, defaultThinkingLevel: "auto" }, undefined))
+      .toEqual({ model: plain, thinkingLevel: "auto" });
+    expect(() => admitSdkSession(catalog, undefined, { modelRoles: { default: "openai/gpt-4.1:medium" } }, undefined))
+      .toThrow("omp_resume_thinking_incompatible");
+    // :auto has never been a host model suffix. A real id ending in it stays literal.
+    expect(() => admitSdkSession(catalog, undefined, { modelRoles: { default: "openai/gpt-4.1:auto" } }, undefined))
+      .toThrow("omp_resume_model_unavailable");
+    const literal = listed("fixture", "literal:auto");
+    const literalRegistry = {
+      find: (provider: string, id: string) => provider === literal.provider && id === literal.id ? literal : undefined,
+      getAll: () => [literal], hasConfiguredAuth: () => true,
+    };
+    expect(admitSdkSession(literalRegistry, undefined, { modelRoles: { default: "fixture/literal:auto" } }, undefined))
+      .toEqual({ model: literal, thinkingLevel: "off" });
+  } finally { await manager.close(); }
+});
+
 test("a one-shot's startup scope admits its configured model and never one OMP would resolve instead", async () => {
   const available = [
     listed("openrouter", "x-ai/grok-4.5"),
@@ -96,6 +133,66 @@ test("a one-shot's startup scope admits its configured model and never one OMP w
   expect(await scope("openrouter/openai/gpt-5.5:high")).toEqual(["openrouter/openai/gpt-5.5"]);
   expect(await scope("openrouter/stealth/space-bunny-alpha:medium"))
     .toEqual(["openrouter/openrouter/stealth/space-bunny-alpha", "anthropic/openrouter/stealth/space-bunny-alpha"]);
+});
+
+test("the published bundled definitions retain their native selectors, prompts and tool policies", () => {
+  const agents = loadBundledAgents();
+  expect(agents.map(agent => agent.name).sort()).toEqual(["reviewer", "scout", "seance", "security-reviewer", "sonic", "task"]);
+  const byName = new Map(agents.map(agent => [agent.name, agent]));
+  const policy = (name: string) => {
+    const agent = byName.get(name)!;
+    expect(agent.source).toBe("bundled");
+    expect(agent.filePath).toBe(`embedded:${name}.md`);
+    expect(agent.systemPrompt.trim().length).toBeGreaterThan(0);
+    return { model: agent.model, thinking: agent.thinkingLevel, tools: agent.tools, spawns: agent.spawns };
+  };
+  expect(policy("task")).toEqual({ model: ["@task"], thinking: "auto", tools: undefined, spawns: "*" });
+  expect(policy("sonic")).toEqual({ model: ["@smol"], thinking: "medium", tools: undefined, spawns: undefined });
+  expect(policy("scout")).toEqual({ model: ["@smol"], thinking: "medium",
+    tools: ["read", "find", "grep", "glob", "ast_grep", "web_search"], spawns: undefined });
+  expect(policy("reviewer")).toEqual({ model: ["@slow"], thinking: undefined,
+    tools: ["read", "find", "grep", "glob", "bash", "lsp", "web_search", "ast_grep"], spawns: ["scout"] });
+  expect(policy("security-reviewer")).toEqual({ model: undefined, thinking: undefined,
+    tools: ["read", "find", "grep", "glob", "lsp", "ast_grep"], spawns: undefined });
+  expect(policy("seance")).toEqual({ model: undefined, thinking: undefined, tools: ["read", "grep", "glob"], spawns: undefined });
+  expect(isReadOnlyAgent(byName.get("scout")!)).toBe(true);
+  expect(isReadOnlyAgent(byName.get("seance")!)).toBe(true);
+  expect(byName.get("scout")!.readSummarize).toBe(false);
+  expect(byName.get("seance")!.readSummarize).toBe(false);
+  expect(byName.get("sonic")!.systemPrompt).toBe(byName.get("task")!.systemPrompt);
+  for (const name of ["scout", "reviewer", "security-reviewer"]) expect(byName.get(name)!.output).toBeDefined();
+});
+
+test("bundled agents route through shared roles and unconfigured specialists inherit the active model", async () => {
+  const root = mkdtempSync(join(tmpdir(), "bundled-agent-roles-"));
+  const modelRoles = {
+    default: "fixture/default:max", task: "fixture/everyday:medium",
+    smol: "fixture/cheap:medium", slow: "fixture/review:high",
+  };
+  const available = ["default", "active", "everyday", "cheap", "review"].map(id => buildModel({
+    ...listed("fixture", id), reasoning: true, thinking: { mode: "effort", efforts: ["low", "medium", "high", "xhigh", "max"] },
+  }));
+  try {
+    writeFileSync(join(root, "config.yml"), JSON.stringify({ modelRoles }));
+    const settings = await Settings.loadReadOnly({ cwd: root, agentDir: root, configFiles: [join(root, "config.yml")] });
+    const selections = Object.fromEntries(loadBundledAgents().map(agent => {
+      const selection = resolveAgentModelSelection({ agentModel: agent.model, settings, activeModelPattern: "fixture/active:low" });
+      const resolved = resolveModelOverride(selection.patterns, { getAvailable: () => available }, settings);
+      return [agent.name, { role: selection.role, model: resolved.model?.id, thinking: resolved.thinkingLevel }];
+    }));
+    expect(selections).toEqual({
+      task: { role: "task", model: "everyday", thinking: "medium" },
+      scout: { role: "smol", model: "cheap", thinking: "medium" },
+      sonic: { role: "smol", model: "cheap", thinking: "medium" },
+      reviewer: { role: "slow", model: "review", thinking: "high" },
+      "security-reviewer": { role: undefined, model: "active", thinking: "low" },
+      seance: { role: undefined, model: "active", thinking: "low" },
+    });
+    // No selector on these specialists: absent an active selector, OMP itself uses the default.
+    for (const agent of loadBundledAgents().filter(agent => agent.model === undefined)) {
+      expect(resolveAgentModelSelection({ agentModel: agent.model, settings })).toEqual({ patterns: [modelRoles.default], role: undefined });
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 /**
@@ -117,30 +214,31 @@ test("a one-shot's pinned roles leave OMP's later selections nothing but its con
     const workspace = join(agentDir, "workspace");
     mkdirSync(join(workspace, ".omp"), { recursive: true });
     writeFileSync(join(agentDir, "config.yml"), JSON.stringify({ modelRoles }));
-    writeFileSync(join(workspace, ".omp", "config.yml"), JSON.stringify({ modelRoles: { smol: other, task: other } }));
+    writeFileSync(join(workspace, ".omp", "config.yml"), JSON.stringify({ modelRoles: { smol: other, task: other, slow: other, advisor: other } }));
     const settings = await Settings.loadReadOnly({ cwd: workspace, agentDir, configFiles: [join(agentDir, "config.yml")] });
-    const agent = (agentModel: string) => name(resolveModelOverride(
-      resolveAgentModelSelection({ agentModel, settings, activeModelPattern: configured }).patterns,
-      { getAvailable: () => available }, settings).model);
+    const agents = Object.fromEntries(loadBundledAgents().map(agent => [agent.name, name(resolveModelOverride(
+      resolveAgentModelSelection({ agentModel: agent.model, settings, activeModelPattern: configured }).patterns,
+      { getAvailable: () => available }, settings).model)]));
     return {
       advisor: name(resolveAdvisorRoleSelection(settings, available)?.model),
-      taskAgent: agent("@task"),
-      fastAgent: agent("@smol"),
+      agents,
       planHandoff: name(resolveModelFromString(expandRoleAlias("@smol", settings), available)),
       compaction: [...new Set(CHAT_MODEL_ROLE_IDS.map(role =>
         name(resolveRoleModelFull(settings, role, available, available[0]).model)))].filter(model => model !== "none"),
     };
   };
   try {
-    // Unpinned, the advisor falls to OMP's reasoning list and the workspace picks the agents' model.
+    // Without the one-shot layer the workspace can choose the shared roles.
     expect(await selections({ default: configured })).toEqual({
-      advisor: other, taskAgent: other, fastAgent: other, planHandoff: other, compaction: [served, other],
+      advisor: other, agents: { task: other, scout: other, sonic: other, reviewer: other, "security-reviewer": served, seance: served },
+      planHandoff: other, compaction: [served, other],
     });
     expect(await selections(pinnedModelRoles({ default: configured }))).toEqual({
-      advisor: served, taskAgent: served, fastAgent: served, planHandoff: served, compaction: [served],
+      advisor: served, agents: Object.fromEntries(loadBundledAgents().map(agent => [agent.name, served])),
+      planHandoff: served, compaction: [served],
     });
     // A role the operator configured keeps its model.
-    expect((await selections(pinnedModelRoles({ default: configured, smol: "anthropic/claude-haiku-4-5" }))).fastAgent)
+    expect((await selections(pinnedModelRoles({ default: configured, smol: "anthropic/claude-haiku-4-5" }))).agents.scout)
       .toBe("anthropic/claude-haiku-4-5");
   } finally { rmSync(root, { recursive: true, force: true }); }
   // Every chat role this SDK knows is held, so a role a later OMP adds fails here instead of leaking.
@@ -213,7 +311,7 @@ test("a one-shot discovers only its configured provider, and nothing it selects 
         agentModel: "claude-opus-4-8", settings, activeModelPattern: configured }).patterns, registry, settings).model),
       imageQuestion: credential(resolveImageQuestionModel(
         { modelRegistry: registry, settings, getActiveModelString: () => configured } as unknown as ToolSession).model),
-      compactionLastResort: credential(new SessionMaintenance({ settings } as unknown as SessionMaintenanceHost)
+      compactionLastResort: credential(new SessionMaintenance({ settings, modelRegistry: registry } as unknown as SessionMaintenanceHost)
         .resolveCompactionModelCandidates(resolveModelFromString(configured, available), available).at(-1)),
     };
   };

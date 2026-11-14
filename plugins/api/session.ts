@@ -134,7 +134,7 @@ function transcript(archive: Uint8Array): { name: string; body: Uint8Array } {
   return found;
 }
 
-// OMP session records (header version 3, unchanged through 18.8.6). Unlisted keys are the agent's business, not the receipt's.
+// OMP session records (header version 3 through 18.20.0). Unlisted keys are the agent's business, not the receipt's.
 const RawTextPartSchema = z.object({ type: z.literal("text"), text: z.string() });
 const RawUsageSchema = z.object({
   input: count,

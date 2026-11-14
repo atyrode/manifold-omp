@@ -66,7 +66,7 @@ try {
   );
   await writeFile(
     join(root, "consumer.ts"),
-    `import { OMP_PLUGIN_ID, PreparedSessionSchema, createOmpClient } from "@atyrode/manifold-omp";
+    `import { OMP_PLUGIN_ID, OMP_VERSION, OverlaySchema, PreparedSessionSchema, RestrictedAutomationSchema, createOmpClient, pinnedModelRoles } from "@atyrode/manifold-omp";
 const machineId = "consumer-machine";
 const parsed = PreparedSessionSchema.parse({
   destination: { containerId: "consumer-container", machineId },
@@ -83,6 +83,18 @@ const parsed = PreparedSessionSchema.parse({
 });
 const client = createOmpClient(async () => ({}));
 if (parsed.runtime.machineId !== machineId || typeof client.call !== "function") throw new Error("invalid public API");
+const shared = OverlaySchema.parse({
+  modelRoles: { default: "anthropic/claude-sonnet-5-5:medium", task: "anthropic/claude-sonnet-5-5:medium",
+    smol: "anthropic/claude-haiku-5-5:medium", slow: "anthropic/claude-sonnet-5-5:high" },
+});
+const roles = pinnedModelRoles({ ...shared.modelRoles, default: shared.modelRoles!.default! });
+if (OMP_VERSION !== "18.20.0" || roles.task !== shared.modelRoles!.task || roles.smol !== shared.modelRoles!.smol ||
+    roles.slow !== shared.modelRoles!.slow || roles.widget !== roles.default) throw new Error("invalid shared native routing");
+if (OverlaySchema.safeParse({ task: { agentModelOverrides: { scout: "anthropic/claude-haiku-5-5" } } }).success)
+  throw new Error("named-agent routing admitted");
+RestrictedAutomationSchema.parse({ mode: "restricted", toolNames: ["read", "grep", "glob", "bash", "edit", "write"], delegation: "disabled" });
+if (RestrictedAutomationSchema.safeParse({ mode: "restricted", toolNames: ["task"], delegation: "disabled" }).success)
+  throw new Error("restricted delegation admitted");
 console.log(OMP_PLUGIN_ID);
 `,
   );

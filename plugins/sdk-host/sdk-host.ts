@@ -157,6 +157,8 @@ try {
     hasUI: terminal,
     // Since 18.8 only a TUI transcript is told it can draw Mermaid, SVG and table charts.
     tuiTranscript: terminal,
+    // 18.20 makes automatic title generation an explicit TUI-only opt-in.
+    autoTitle: terminal,
     // Prompt-cache warming spends provider requests no one is waiting on; one-shots never keep it.
     cacheWarming: kind !== "print" && !materialOnly,
     ...(restricted || skillsRuntime.mode === "disabled" ? { skills } : {}),
@@ -173,9 +175,12 @@ try {
     } : {}),
     ...(toolAdapter ? { customTools: toolAdapter.tools, extensions: [toolAdapter.extension] } : {}),
   });
-  if (materialOnly && (created.session.getAllToolNames().length !== 0 ||
-    created.session.getActiveToolNames().length !== 0 || created.session.getXdevToolEntries().length !== 0))
-    throw new Error("omp_material_registry_not_empty");
+  if (restricted) {
+    const expected = JSON.stringify([...automation.toolNames].sort());
+    if (JSON.stringify(created.session.getAllToolNames().sort()) !== expected ||
+      JSON.stringify(created.session.getActiveToolNames().sort()) !== expected || created.session.getXdevToolEntries().length !== 0)
+      throw new Error(materialOnly ? "omp_material_registry_not_empty" : "omp_restricted_registry_changed");
+  }
   toolAdapter?.assertRegistry(created);
   if (created.modelFallbackMessage || created.session.model?.provider !== admitted.model.provider ||
     created.session.model.id !== admitted.model.id) throw new Error("omp_resume_model_changed");
@@ -205,7 +210,7 @@ try {
       });
     } else {
       control = tui ? attachTuiControl(created.session, created.setToolUIContext, parentChannel(cancel), cancel) : undefined;
-      mode = new InteractiveMode(created.session, VERSION, undefined, control?.setToolUIContext ?? created.setToolUIContext,
+      mode = new InteractiveMode(created.session, VERSION, control?.setToolUIContext ?? created.setToolUIContext,
         created.lspServers, created.mcpManager, created.eventBus, undefined, created.subagentEventBus);
       await mode.init();
       if (resume) await mode.renderInitialMessages();

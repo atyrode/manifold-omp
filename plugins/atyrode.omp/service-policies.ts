@@ -34,7 +34,7 @@ export function buildSharedBrokerPolicy(runtime: ServiceRuntime): ServicePolicy 
   ]);
   metadata.readable = true;
   metadata.requestHeaders = capabilities;
-  // 18.8.6 /v1/usage has generatedAt and reports, not snapshot credentials or
+  // /v1/usage has generatedAt and reports, not snapshot credentials or
   // health tombstones. Preserve identity/quota leaves consumed by normalizeBrokerUsage.
   const usage = projected("GET", "/v1/usage", [
     ["generatedAt"], ["reports", "*", "provider"], ["reports", "*", "fetchedAt"],
@@ -83,7 +83,7 @@ export function buildSharedBrokerPolicy(runtime: ServiceRuntime): ServicePolicy 
   // so exactly those two values are declared.
   const refresh = credentialProxy("POST", "refresh");
   refresh.query = { reason: { type: "string", required: false, maxBytes: 16, enum: ["auth-recovery", "usage-probe"] } };
-  // The 18.8.6 client names the provider of a usage invalidation (`?provider=`), so the broker
+  // The SDK client names the provider of a usage invalidation (`?provider=`), so the broker
   // drops only that provider's reports. The undeclared-query refusal would lose the notice.
   const usageStale = proxy("POST", "/v1/usage/stale");
   usageStale.query = { provider: { type: "string", required: false, maxBytes: 128 } };

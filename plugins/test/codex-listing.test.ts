@@ -157,7 +157,7 @@ describe("inventory reports a listed provider from the gateway's listing", () =>
     inputCostPerMillion: 1, outputCostPerMillion: 5, contextWindow: 500_000, maxTokens: 128_000, reasoning: true,
     thinkingLevels: ["max", "low"], images: true, quotaTier: "chat" });
   const listing = (...facts: InventoryModel[]) => ({ object: "list", data: facts.map(model => ({ id: `${model.provider}/${model.id}`, inventory: model })) });
-  /** What the 18.8.6 CLI reports for the same pool: its own bundled rows, and the listed one by name only. */
+  /** A CLI listing-only row has a name but no gateway metadata; the gateway remains authoritative. */
   const cli = { models: [
     { provider: "openai-codex", id: `openai-codex/${LISTED_ONLY}`, selector: `openai-codex/openai-codex/${LISTED_ONLY}`, contextWindow: 500_000,
       maxTokens: 32_768, reasoning: false, thinking: null, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
