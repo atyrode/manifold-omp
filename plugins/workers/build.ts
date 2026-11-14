@@ -522,13 +522,16 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
             return { path, namespace: "file" };
           }
           const packaged = args.importer !== undefined && args.importer !== "" && containsPath(modules, args.importer);
+          // Upstream virtual modules deliberately anchor inside their package tree,
+          // but their namespace is not an on-disk source file.
+          const onDisk = packaged && args.namespace === "file";
           const from = packaged ? dirname(args.importer) : graph.root;
           const path = await realpath(Bun.resolveSync(args.path, from));
           if (!containsPath(modules, path)) throw new Error(`Worker dependency escapes ${graphName}: ${args.path}`);
           // A plugin's resolution drops the import's attributes, so Bun would bundle a package file
           // imported `with { type: "text" }` as a module and hand the importer an object instead of
           // its source (18.4's accessibility audit then fails to parse at SDK host startup).
-          return { path, namespace: packaged && await importsAsText(args.importer, args.path) ? "omp-text" : "file" };
+          return { path, namespace: onDisk && await importsAsText(args.importer, args.path) ? "omp-text" : "file" };
         });
         build.onLoad({ filter: /.*/, namespace: "omp-text" }, async args => {
           importedFiles.add(args.path);
@@ -560,6 +563,7 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
     // In memory, the embedded bytes are exactly the bytes this build produced.
     const result = await Bun.build({
       entrypoints: [join(root, source)],
+      throw: false,
       naming: { entry: `${name}.js`, asset: `${name}-assets/[name]-[hash].[ext]` },
       // Identical-input workers differed with optional minification enabled,
       // even without identifier renaming. Keep only whitespace compaction.
@@ -579,7 +583,10 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
       // leaves the pinned Manifold SDK's transitive graph with its owner.
       tsconfig: join(root, "tsconfig.json"),
     });
-    if (!result.success) throw new AggregateError(result.logs, `Worker bundling failed: ${name}`);
+    if (!result.success) {
+      const details = result.logs.map(log => `${log.position?.file ?? name}: ${log.message}`).join("\n");
+      throw new AggregateError(result.logs, `Worker bundling failed: ${name}\n${details}`);
+    }
     const entry = result.outputs.find(output => output.kind === "entry-point");
     if (!entry) throw new Error(`Missing worker entrypoint: ${name}`);
     for (const output of result.outputs) {

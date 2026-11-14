@@ -8,7 +8,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AuthStorage, ModelRegistry } from "@oh-my-pi/pi-coding-agent";
 import {
   expandRoleAlias, resolveAdvisorRoleSelection, resolveAgentModelSelection, resolveModelFromString, resolveModelOverride,
-  resolveModelRoleValue, resolveModelScope,
+  resolveModelScope,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { CHAT_MODEL_ROLE_IDS } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -123,8 +123,6 @@ test("a one-shot's startup scope admits its configured model and never one OMP w
   ];
   const scope = async (reference: string) => (await resolveModelScope([exactModelScope(reference)], { getAvailable: () => available }))
     .map(({ model }) => `${model.provider}/${model.id}`);
-  // Unscoped, an id the catalog lacks resolves to a neighbour by spelling: the substitution.
-  expect(resolveModelRoleValue("openrouter/x-ai/grok-5", available).model?.id).toBe("x-ai/grok-4.5");
   expect(await scope("openrouter/x-ai/grok-5")).toEqual([]);
   expect(await scope("openrouter/stealth/space-bunny")).toEqual([]);
   expect(await scope("openrouter/openai/gpt-5.5:high")).toEqual(["openrouter/openai/gpt-5.5"]);

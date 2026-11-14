@@ -22,7 +22,7 @@
     "operations:invoke"
   ],
   "dataVersion": {
-    "major": 1,
+    "major": 2,
     "minor": 0
   },
   "purges": [
