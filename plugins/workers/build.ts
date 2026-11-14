@@ -6,9 +6,11 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { gzipSync } from "node:zlib";
 import type { BunPlugin } from "bun";
 import { dlopen, ptr } from "bun:ffi";
-import { MachineArtifactSchema, type MachineArtifact, type MachineHalf } from "../../../manifold/packages/protocol/src/index.ts";
+import { MachineArtifactSchema, ManagedToolArtifactSchema, type MachineArtifact, type MachineHalf } from "../../../manifold/packages/protocol/src/index.ts";
 import runtime from "../runtime-artifacts.json";
 import sdkRuntime from "../sdk-host/runtime-artifacts.json";
+import { GRAMMAR_ASSET, ompRuntimeTools, SDK_HOST_ASSET, sourceAssetUrl } from "../runtime-assets.ts";
+import grammarMetadata from "../runtime-data/omp-grammar-assets-v1/grammars-v1.json";
 
 const root = resolve(import.meta.dir, "..");
 const platforms = ["linux-x64", "linux-arm64"] as const;
@@ -35,14 +37,14 @@ const dependencyMarker = ".omp-prepared-dependencies.json";
 const graphs = {
   baseline: {
     root, version: runtime.sdkVersion, nativeAlias: "pi-natives", native: runtime.tools["pi-natives"],
-    lockSha256: "d36d0949eda2d989aeb7d4315c992fef4b2b39fa018d1def92115a9978fde8b9",
+    lockSha256: "e1014f5b6547a637b3fc73d7d520cf163752cab3664e7ece4027b0e0e4d5340f",
     loaderSha256: "395d21d431121f469ba5a6016c42ac06a5abfa1b8021abc0efbf475dfb0c7ccd",
-    patch: { file: "patches/@oh-my-pi%2Fpi-ai@18.20.0.patch", sha256: "70afb022302f0c2113dbd5122d8a22f16137466024a22931ed2f0a6da22fe36a" },
+    patch: { file: "patches/@oh-my-pi%2Fpi-ai@18.20.1.patch", sha256: "70afb022302f0c2113dbd5122d8a22f16137466024a22931ed2f0a6da22fe36a" },
   },
   sdkHost: {
     root: join(root, "sdk-host"), version: sdkRuntime.sdkVersion, nativeAlias: "sdk-pi-natives", native: sdkRuntime.tools["pi-natives"],
-    lockSha256: "77c223d720f100ec767ace917c31e94a84d652735c6ba58d75db2b7c178e52c3",
-    loaderSha256: "9288d96bebda7acc59251e6ebeaddd107b2dcfc2fedd9b7fd1a2e60f70a1d3d9",
+    lockSha256: "6c53b09ae91f93eb03de778d1ab8ca6389a54f91cc9ee2da463c7a29acb4ecad",
+    loaderSha256: "395d21d431121f469ba5a6016c42ac06a5abfa1b8021abc0efbf475dfb0c7ccd",
     patch: undefined,
   },
 } as const;
@@ -245,6 +247,32 @@ export function missingNativeExportMessage(symbolName) {
   return "@oh-my-pi/pi-natives export " + symbolName + " is missing from " + path;
 }
 `;
+
+/** Preserve the host SDK's published diagnostics and release validation helpers.
+ * Only its final acquisition function changes: no host/cache discovery or extraction.
+ * The complete source is hash-pinned before this adapter runs.
+ */
+function pinnedSdkHostLoader(graph: DependencyGraph, source: string): string {
+  const acquisition = "export function loadNative() {";
+  const start = source.indexOf(acquisition);
+  if (start < 0 || start !== source.lastIndexOf(acquisition))
+    throw new Error("Published native acquisition adapter no longer matches exactly once");
+  return `${source.slice(0, start)}
+let pinnedBindings;
+export function loadNative() {
+  if (pinnedBindings) return pinnedBindings;
+  const candidate = ${JSON.stringify(`/runtime/bin/${graph.nativeAlias}`)};
+  const ctx = { packageVersion: packageJson.version, isWorkspaceLoad: false };
+  const module = { exports: {} };
+  process.dlopen(module, candidate);
+  validateLoadedBindings(ctx, module.exports, candidate);
+  installNativeTokioRuntime(module.exports);
+  loadedAddon = describeLoadedAddon(module.exports, candidate, ctx);
+  pinnedBindings = module.exports;
+  return pinnedBindings;
+}
+`;
+}
 /** Reviewed `pi-natives/native/path.js` bytes: pi-utils' path normalization imports it, and it
  * loads the addon only when `process.platform === "win32"`, a platform no worker targets. */
 const windowsOnlyNativeSha256 = "716fe783105dc03fc5deaab32a4f0470ba366e663ae77de42c5760144855bf99";
@@ -255,6 +283,8 @@ export interface WorkerArtifacts {
   tools: NonNullable<MachineHalf["tools"]>;
   /** Owned bytes for every declared bundleFile, without filesystem staging. */
   members: ReadonlyMap<string, Uint8Array>;
+  /** Exact release bytes; never embedded in a family bundle or installed by the packer. */
+  sourceAssets: ReadonlyMap<string, Uint8Array>;
   embeddedBase64Bytes: number;
   /** External owner-provisioned native resource, intentionally not a managed artifact. */
   requiredRuntimeTools: readonly ["system"];
@@ -296,29 +326,17 @@ async function importsAsText(importer: string, specifier: string): Promise<boole
   return true;
 }
 
-/** Execute the complete shipped helper, changing only its monorepo path mapping.
- * Its export expansion, exclusions, shims and lazy registry remain publisher code.
- * The private copy is temporary; installed packages and upstream checkouts are untouched.
+/** Execute the unmodified shipped helper using its supported installed-package layout.
+ * Export expansion, exclusions, compatibility shims and the lazy registry remain publisher code.
  */
 async function legacyPiPlugin(graph: DependencyGraph, codingAgent: string): Promise<BunPlugin> {
-  const packages = {
-    agent: "@oh-my-pi/pi-agent-core", ai: "@oh-my-pi/pi-ai", catalog: "@oh-my-pi/pi-catalog",
-    "coding-agent": "@oh-my-pi/pi-coding-agent", natives: "@oh-my-pi/pi-natives",
-    tui: "@oh-my-pi/pi-tui", utils: "@oh-my-pi/pi-utils",
-  };
-  const installed = Object.fromEntries(await Promise.all(Object.entries(packages).map(async ([key, name]) => [key, await packageRoot(graph, name)])));
-  let source = await readFile(join(codingAgent, "scripts/legacy-pi-virtual-module.ts"), "utf8");
-  source = replacePublishedSource(source, 'const packageDir = path.resolve(import.meta.dir, "..");', `const packageDir = ${JSON.stringify(codingAgent)};`);
-  source = replacePublishedSource(source, 'path.join(repoRoot, "packages", pkg.dir)', `(${JSON.stringify(installed)} as Record<string, string>)[pkg.dir]!`);
-  const stage = await mkdtemp(join(root, ".omp-sdk-helper-"));
-  try {
-    const file = join(stage, "legacy-pi-virtual-module.ts");
-    await writeFile(file, source);
-    const helper = await import(file);
-    return await helper.createLegacyPiVirtualModulePlugin();
-  } finally {
-    await rm(stage, { recursive: true, force: true });
-  }
+  await Promise.all([
+    "@oh-my-pi/pi-agent-core", "@oh-my-pi/pi-ai", "@oh-my-pi/pi-catalog",
+    "@oh-my-pi/pi-coding-agent", "@oh-my-pi/pi-natives", "@oh-my-pi/pi-tui", "@oh-my-pi/pi-utils",
+  ].map(name => packageRoot(graph, name)));
+  // The selected prepared graph owns this plugin; a static import would resolve from the baseline.
+  const helper = await import(join(codingAgent, "scripts/legacy-pi-virtual-module.ts"));
+  return await helper.createLegacyPiVirtualModulePlugin();
 }
 
 // quickjs-wasi@2.2.0 publishes MIT metadata but no standalone license, including
@@ -404,8 +422,7 @@ async function notices(importedFiles: Set<string>, codingAgent?: string): Promis
     }
   }
   const sections: string[] = [];
-  // Every @oh-my-pi package ships the same megabyte of aggregate notices, which repeated per
-  // package outgrew the plugin's 16 MiB artifact budget. Identical text is stated once.
+  // Identical publisher notice text is stated once, without dropping package attribution.
   const firstLabels = new Map<string, string>();
   const section = (label: string, text: string): string => {
     const digest = hash(Buffer.from(text));
@@ -424,7 +441,9 @@ async function notices(importedFiles: Set<string>, codingAgent?: string): Promis
     if (entries.length === 0 && directory.includes("node_modules")) {
       if (name === "quickjs-wasi@2.2.0") sections.push(quickjsNotice);
       else if (name === "@puppeteer/browsers@3.0.6" || name === "puppeteer-core@25.3.0") {
-        if (!publisherNotices.includes(`- ${name}: canonical Apache-2.0 text`)) throw new Error(`Missing exact publisher attribution: ${name}`);
+        const attribution = name.replace(/@([^@]+)$/, " $1");
+        if (!publisherNotices.includes(`- ${attribution} (no license file in package; Apache-2.0 per package.json)`))
+          throw new Error(`Missing exact publisher attribution: ${name}`);
         sections.push(`${name} / Apache-2.0\nLicense supplied by @oh-my-pi/pi-coding-agent@${sdkRuntime.sdkVersion} THIRD-PARTY-NOTICES.txt below.`);
         needsPublisherNotices = true;
       } else throw new Error(`Bundled dependency has no packaged license: ${name}`);
@@ -449,13 +468,14 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
   const artifacts: WorkerArtifacts["artifacts"] = {};
   const tools: WorkerArtifacts["tools"] = {};
   const members = new Map<string, Uint8Array>();
+  const sourceAssets = new Map<string, Uint8Array>();
   let embeddedBase64Bytes = 0;
   for (const [alias, layouts] of Object.entries(runtime.tools)) {
     if (target === "gateway" && alias === "omp") continue;
     if (target === "root" && alias === "pi-natives") continue;
     tools[alias] = {};
     for (const platform of platforms) {
-      const declaration = MachineArtifactSchema.parse(layouts[platform]);
+      const declaration = ManagedToolArtifactSchema.parse(alias === "omp" ? ompRuntimeTools[platform] : layouts[platform]);
       tools[alias]![platform] = declaration;
       if (!declaration.bundleFile || members.has(declaration.bundleFile)) continue;
       const directory = await realpath(join(root, "runtime-data"));
@@ -471,6 +491,16 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
       members.set(declaration.bundleFile, bytes);
     }
   }
+  if (target !== "gateway") {
+    const directory = await realpath(join(root, ".runtime-cache", "omp-grammar-assets-v1"));
+    const file = await realpath(join(directory, grammarMetadata.archive.file));
+    const stat = await lstat(file);
+    if (!containsPath(directory, file) || !stat.isFile() || stat.size !== grammarMetadata.archive.maxBytes)
+      throw new Error("Invalid prepared grammar archive; run scripts/prepare-grammar-assets.py");
+    const bytes = await readFile(file);
+    if (hash(bytes) !== grammarMetadata.archive.sha256) throw new Error("Unreviewed prepared grammar archive");
+    sourceAssets.set(GRAMMAR_ASSET, bytes);
+  }
   if (target === "root") tools[graphs.sdkHost.nativeAlias] = Object.fromEntries(
     platforms.map(platform => [platform, MachineArtifactSchema.parse(graphs.sdkHost.native[platform])]),
   );
@@ -483,10 +513,10 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
     const docs = codingAgent ? await readFile(join(codingAgent, "dist/docs-index.generated.txt"), "utf8") : "";
     const quickjs = codingAgent ? await packageRoot(graph, "quickjs-wasi", "2.2.0") : undefined;
     const quickjsModule = quickjs ? await realpath(join(quickjs, "dist/index.js")) : undefined;
-    const htmlExport = codingAgent ? await realpath(join(codingAgent, "src/export/html/index.ts")) : undefined;
     const nativePackage = await packageRoot(graph, "@oh-my-pi/pi-natives");
     const nativeLoader = await realpath(join(nativePackage, "native/loader-state.js"));
-    if (hash(await readFile(nativeLoader)) !== graph.loaderSha256) throw new Error(`Unreviewed native SDK loader bytes: ${graphName}`);
+    const nativeLoaderBytes = await readFile(nativeLoader);
+    if (hash(nativeLoaderBytes) !== graph.loaderSha256) throw new Error(`Unreviewed native SDK loader bytes: ${graphName}`);
     const importedFiles = new Set<string>();
     let usesNative = false;
     const assets = new Map<string, Buffer>();
@@ -507,13 +537,16 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
             return { path, namespace: "file" };
           }
           const packaged = args.importer !== undefined && args.importer !== "" && containsPath(modules, args.importer);
+          // The upstream virtual helper also uses the file namespace. Only sources
+          // observed by our real file loader exist on disk and carry import attributes.
+          const onDisk = packaged && importedFiles.has(args.importer);
           const from = packaged ? dirname(args.importer) : graph.root;
           const path = await realpath(Bun.resolveSync(args.path, from));
           if (!containsPath(modules, path)) throw new Error(`Worker dependency escapes ${graphName}: ${args.path}`);
           // A plugin's resolution drops the import's attributes, so Bun would bundle a package file
           // imported `with { type: "text" }` as a module and hand the importer an object instead of
           // its source (18.4's accessibility audit then fails to parse at SDK host startup).
-          return { path, namespace: packaged && await importsAsText(args.importer, args.path) ? "omp-text" : "file" };
+          return { path, namespace: onDisk && await importsAsText(args.importer, args.path) ? "omp-text" : "file" };
         });
         build.onLoad({ filter: /.*/, namespace: "omp-text" }, async args => {
           importedFiles.add(args.path);
@@ -526,7 +559,7 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
           importedFiles.add(path);
           if (path === nativeLoader) {
             usesNative = true;
-            return { contents: pinnedLoader(graph), loader: "js" };
+            return { contents: graphName === "sdkHost" ? pinnedSdkHostLoader(graph, nativeLoaderBytes.toString("utf8")) : pinnedLoader(graph), loader: "js" };
           }
           if (quickjs && path === quickjsModule) {
             const asset = `${name}-assets/quickjs.wasm`;
@@ -535,17 +568,6 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
             const contents = replacePublishedSource(await readFile(path, "utf8"),
               "new URL('../quickjs.wasm', import.meta.url)", `new URL(${JSON.stringify(`./${asset}`)}, import.meta.url)`);
             return { contents, loader: "js" };
-          }
-          if (htmlExport && path === htmlExport) {
-            // The export template inlines its vendored scripts as text either way. Importing them
-            // as text keeps the archive within the protocol's eight declared files per artifact.
-            let contents = await readFile(path, "utf8");
-            for (const [binding, file] of [["highlightJs", "highlight.min.js"], ["markedJs", "marked.min.js"]]) {
-              contents = replacePublishedSource(contents, `import ${binding}Path from "./vendor/${file}" with { type: "file" };`,
-                `import ${binding} from "./vendor/${file}" with { type: "text" };`);
-              contents = replacePublishedSource(contents, `const ${binding} = fs.readFileSync(resolveBundledHtmlAssetPath(${binding}Path), "utf8");`, "");
-            }
-            return { contents, loader: "ts" };
           }
           return undefined;
         });
@@ -556,6 +578,7 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
     // In memory, the embedded bytes are exactly the bytes this build produced.
     const result = await Bun.build({
       entrypoints: [join(root, source)],
+      throw: false,
       naming: { entry: `${name}.js`, asset: `${name}-assets/[name]-[hash].[ext]` },
       // Identical-input workers differed with optional minification enabled,
       // even without identifier renaming. Keep only whitespace compaction.
@@ -575,7 +598,10 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
       // leaves the pinned Manifold SDK's transitive graph with its owner.
       tsconfig: join(root, "tsconfig.json"),
     });
-    if (!result.success) throw new AggregateError(result.logs, `Worker bundling failed: ${name}`);
+    if (!result.success) {
+      const details = result.logs.map(log => `${log.position?.file ?? name}: ${log.message}`).join("\n");
+      throw new AggregateError(result.logs, `Worker bundling failed: ${name}\n${details}`);
+    }
     const entry = result.outputs.find(output => output.kind === "entry-point");
     if (!entry) throw new Error(`Missing worker entrypoint: ${name}`);
     for (const output of result.outputs) {
@@ -583,7 +609,7 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
       const member = output.path.startsWith("./") ? output.path.slice(2) : output.path;
       const prefix = `${name}-assets/`;
       if (output.kind !== "asset" || assets.has(member) || !member.startsWith(prefix) ||
-          !/^(?:template-[a-z0-9]+\.(?:css|html|js)|tool-views\.generated-[a-z0-9]+\.js|CHANGELOG-[a-z0-9]+\.md)$/.test(member.slice(prefix.length)))
+          !/^CHANGELOG-[a-z0-9]+\.md$/.test(member.slice(prefix.length)))
         throw new Error(`Undeclared worker bundle output: ${name}: ${member}`);
       const bytes = Buffer.from(await output.arrayBuffer());
       assets.set(member, bytes);
@@ -629,17 +655,26 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
         files: declaredFiles,
       };
     }
-    declaration = MachineArtifactSchema.parse(declaration);
-    embeddedBase64Bytes += 4 * Math.ceil(bytes.length / 3);
-    if (embeddedBase64Bytes > maxEmbeddedBytes) throw new Error(`Bundled worker members require ${embeddedBase64Bytes} base64 bytes; native plugin aggregate limit is ${maxEmbeddedBytes}. Publish these exact worker archives before distribution; no worker release URL is assumed.`);
-    if (members.has(declaration.bundleFile!)) throw new Error(`Duplicate worker member: ${declaration.bundleFile}`);
-    members.set(declaration.bundleFile!, bytes);
+    if (name === "sdkHost") {
+      const filename = SDK_HOST_ASSET;
+      const { bundleFile: _bundleFile, ...artifact } = declaration;
+      declaration = MachineArtifactSchema.parse({
+        ...artifact, url: sourceAssetUrl(filename),
+      });
+      sourceAssets.set(filename, bytes);
+    } else {
+      declaration = MachineArtifactSchema.parse(declaration);
+      embeddedBase64Bytes += 4 * Math.ceil(bytes.length / 3);
+      if (embeddedBase64Bytes > maxEmbeddedBytes) throw new Error(`Bundled worker members require ${embeddedBase64Bytes} base64 bytes; native plugin aggregate limit is ${maxEmbeddedBytes}`);
+      if (members.has(declaration.bundleFile!)) throw new Error(`Duplicate worker member: ${declaration.bundleFile}`);
+      members.set(declaration.bundleFile!, bytes);
+    }
     const layouts = Object.fromEntries(platforms.map(platform => [platform, declaration]));
     if (name === "inventory" || name === "broker" || name === "gateway") Object.assign(artifacts, layouts);
     else tools[name] = layouts;
   }
   if (Object.keys(tools).length > 8) throw new Error("Too many native tool maps");
-  return { artifacts, tools, members, embeddedBase64Bytes, requiredRuntimeTools: ["system"], systemRequirements: runtime.requiredRuntimeTools.system };
+  return { artifacts, tools, members, sourceAssets, embeddedBase64Bytes, requiredRuntimeTools: ["system"], systemRequirements: runtime.requiredRuntimeTools.system };
 }
 
 if (import.meta.main) {

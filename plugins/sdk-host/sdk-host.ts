@@ -7,8 +7,9 @@ import {
 import type { SettingsOptions } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import { runRpcMode } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
+import { __ompSetGrammarDir } from "@oh-my-pi/pi-natives";
 import { MaterialOnlyIsolationSchema, PROMPT_MAX_BYTES } from "../api/index.ts";
-import { ProbeModelsConfigSchema, PROBE_AGENT, readProbeInput } from "../workers/probe/inputs.ts";
+import { prepareOmpNativeDirectory, ProbeModelsConfigSchema, PROBE_AGENT, readProbeInput } from "../workers/probe/inputs.ts";
 import { openSessionsRoot, resolveSessionFile, SESSIONS_ROOT, SessionIdSchema } from "../workers/harness/sessions.ts";
 import { validateSkillInputs } from "../workers/harness/skills.ts";
 import { readAutomation, readResumeOverrides, readSessionInput } from "../workers/harness/sdk-inputs.ts";
@@ -36,6 +37,9 @@ let control: TuiControl | undefined;
 let code = 1;
 try {
   if (Object.keys(process.env).some(name => name.startsWith("MANIFOLD_"))) throw new Error("omp_sdk_environment_invalid");
+  if (process.env.PI_NATIVES_DIR !== "/tmp/omp-native") throw new Error("omp_sdk_environment_invalid");
+  prepareOmpNativeDirectory();
+  __ompSetGrammarDir("/runtime/bin/omp-grammars");
   const kind = z.enum(["interactive", "print", "material-print", "resume", "rpc", "rpc-resume", "tui", "tui-resume"]).parse(process.argv[2]);
   const resume = kind === "resume" || kind === "rpc-resume" || kind === "tui-resume";
   const rpc = kind === "rpc" || kind === "rpc-resume";
@@ -157,6 +161,8 @@ try {
     hasUI: terminal,
     // Since 18.8 only a TUI transcript is told it can draw Mermaid, SVG and table charts.
     tuiTranscript: terminal,
+    // 18.20 makes automatic title generation an explicit TUI-only opt-in.
+    autoTitle: terminal,
     // Prompt-cache warming spends provider requests no one is waiting on; one-shots never keep it.
     cacheWarming: kind !== "print" && !materialOnly,
     ...(restricted || skillsRuntime.mode === "disabled" ? { skills } : {}),
@@ -173,9 +179,12 @@ try {
     } : {}),
     ...(toolAdapter ? { customTools: toolAdapter.tools, extensions: [toolAdapter.extension] } : {}),
   });
-  if (materialOnly && (created.session.getAllToolNames().length !== 0 ||
-    created.session.getActiveToolNames().length !== 0 || created.session.getXdevToolEntries().length !== 0))
-    throw new Error("omp_material_registry_not_empty");
+  if (restricted) {
+    const expected = JSON.stringify([...automation.toolNames].sort());
+    if (JSON.stringify(created.session.getAllToolNames().sort()) !== expected ||
+      JSON.stringify(created.session.getActiveToolNames().sort()) !== expected || created.session.getXdevToolEntries().length !== 0)
+      throw new Error(materialOnly ? "omp_material_registry_not_empty" : "omp_restricted_registry_changed");
+  }
   toolAdapter?.assertRegistry(created);
   if (created.modelFallbackMessage || created.session.model?.provider !== admitted.model.provider ||
     created.session.model.id !== admitted.model.id) throw new Error("omp_resume_model_changed");
@@ -205,7 +214,7 @@ try {
       });
     } else {
       control = tui ? attachTuiControl(created.session, created.setToolUIContext, parentChannel(cancel), cancel) : undefined;
-      mode = new InteractiveMode(created.session, VERSION, undefined, control?.setToolUIContext ?? created.setToolUIContext,
+      mode = new InteractiveMode(created.session, VERSION, control?.setToolUIContext ?? created.setToolUIContext,
         created.lspServers, created.mcpManager, created.eventBus, undefined, created.subagentEventBus);
       await mode.init();
       if (resume) await mode.renderInitialMessages();

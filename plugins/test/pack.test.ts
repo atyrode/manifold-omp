@@ -2,12 +2,15 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { gunzipSync } from "node:zlib";
 import type { PackResult } from "../../../manifold/packages/plugin-kit/src/pack.ts";
 import type { pack } from "../pack.ts";
+import { GRAMMAR_ASSET, ompRuntimeTools, SDK_HOST_ASSET, SOURCE_ASSETS, sourceAssetUrl } from "../runtime-assets.ts";
 
 const source = resolve(import.meta.dir, "..");
 const family = ["atyrode.omp", "atyrode.omp.accounts", "atyrode.omp.gateway"];
-const publishedFiles = [...family.map(id => `${id}.manifold-plugin.json`), "SHA256SUMS", "native-requirements.json"].sort();
+const sourceAssets = [...SOURCE_ASSETS];
+const publishedFiles = [...family.map(id => `${id}.manifold-plugin.json`), ...sourceAssets, "SHA256SUMS", "native-requirements.json"].sort();
 let fixture: string;
 let scratch: string;
 let fixturePack: typeof pack;
@@ -24,6 +27,7 @@ beforeAll(async () => {
   // Each private graph retains every member, including its generated receipt.
   for (const graph of ["", "sdk-host"])
     await cp(join(source, graph, "node_modules"), join(fixture, graph, "node_modules"), { recursive: true, verbatimSymlinks: true });
+  await cp(join(source, ".runtime-cache", "omp-grammar-assets-v1"), join(fixture, ".runtime-cache", "omp-grammar-assets-v1"), { recursive: true });
   const module = await import(join(fixture, "pack.ts"));
   fixturePack = module.pack;
 }, 180_000);
@@ -111,7 +115,7 @@ async function packWithReorderedAssets(destination: string) {
 
 for (const destinationKind of ["default", "caller"] as const) {
   describe(`${destinationKind} destination`, () => {
-    for (const [part, id] of [["accounts", family[1]!], ["gateway", family[2]!]] as const) {
+    for (const part of ["accounts", "gateway"] as const) {
       test(`${part} compiler failure preserves the complete prior family`, async () => {
         const destination = destinationKind === "default" ? join(fixture, "dist") : join(scratch, `failure-${part}`);
         const previous = await priorFamily(destination);
@@ -119,7 +123,7 @@ for (const destinationKind of ["default", "caller"] as const) {
         const sourceBytes = await readFile(entrypoint);
         try {
           await writeFile(entrypoint, "export const invalid = ;\n");
-          await expect(fixturePack(destinationKind === "default" ? undefined : destination)).rejects.toThrow(`Packing ${id} failed`);
+          await expect(fixturePack(destinationKind === "default" ? undefined : destination)).rejects.toMatchObject({ cause: expect.anything() });
           expect(await snapshot(destination)).toEqual(previous);
         } finally {
           await writeFile(entrypoint, sourceBytes);
@@ -149,7 +153,10 @@ for (const destinationKind of ["default", "caller"] as const) {
       expect(finalNames).toEqual(publishedFiles);
       expect(first.map(({ id }) => id)).toEqual(family);
       expect(first.map(({ file }) => file)).toEqual(family.map(id => join(destination, `${id}.manifold-plugin.json`)));
-      expect(await readFile(join(destination, "SHA256SUMS"), "utf8")).toBe(first.map(({ id, sha256 }) => `${sha256}  ${id}.manifold-plugin.json\n`).join(""));
+      const assetSums = await Promise.all(sourceAssets.map(async filename =>
+        `${new Bun.CryptoHasher("sha256").update(await readFile(join(destination, filename))).digest("hex")}  ${filename}\n`));
+      expect(await readFile(join(destination, "SHA256SUMS"), "utf8")).toBe(
+        first.map(({ id, sha256 }) => `${sha256}  ${id}.manifold-plugin.json\n`).join("") + assetSums.join(""));
       for (const bundle of first) {
         const bytes = await readFile(bundle.file);
         expect(new Bun.CryptoHasher("sha256").update(bytes).digest("hex")).toBe(bundle.sha256);
@@ -159,6 +166,28 @@ for (const destinationKind of ["default", "caller"] as const) {
         expect(parsed.builtAgainst?.["@manifold/source"]).toBe(
           (await readFile(join(fixture, "MANIFOLD_REV"), "utf8")).trim(),
         );
+        for (const filename of sourceAssets) expect(parsed.files[filename]).toBeUndefined();
+        if (bundle.id === "atyrode.omp") {
+          const tools = parsed.manifest.machine.tools;
+          for (const platform of ["linux-x64", "linux-arm64"] as const) {
+            expect(tools.omp[platform]).toEqual(ompRuntimeTools[platform]);
+            const sdk = tools.sdkHost[platform];
+            const archive = await readFile(join(destination, SDK_HOST_ASSET));
+            expect(sdk.url).toBe(sourceAssetUrl(SDK_HOST_ASSET));
+            expect(sdk.bundleFile).toBeUndefined();
+            expect(sdk.sha256).toBe(new Bun.CryptoHasher("sha256").update(archive).digest("hex"));
+            expect(sdk.maxBytes).toBe(archive.length);
+            expect(sdk.maxExpandedBytes).toBe(gunzipSync(archive).length);
+            const grammar = tools.omp[platform].fileGroups[0].artifact;
+            const grammarArchive = await readFile(join(destination, GRAMMAR_ASSET));
+            expect(grammar.url).toBe(sourceAssetUrl(GRAMMAR_ASSET));
+            expect(grammar.bundleFile).toBeUndefined();
+            expect(grammar.sha256).toBe(new Bun.CryptoHasher("sha256").update(grammarArchive).digest("hex"));
+            expect(grammar.maxBytes).toBe(grammarArchive.length);
+            expect(grammar.maxExpandedBytes).toBe(gunzipSync(grammarArchive).length);
+            expect(1 + Object.keys(grammar.files).length).toBe(41);
+          }
+        }
       }
       const firstBytes = await snapshot(destination);
       const second = await packWithReorderedAssets(destination);
@@ -171,22 +200,6 @@ for (const destinationKind of ["default", "caller"] as const) {
         const before = JSON.parse(Buffer.from(firstBytes[file]!, "base64").toString());
         const after = JSON.parse(Buffer.from(secondBytes[file]!, "base64").toString());
         differingFields(before, after, file, differences);
-        const member = "omp-sdkHost.tar.gz";
-        if (typeof before.files?.[member] === "string" && typeof after.files?.[member] === "string" &&
-          before.files[member] !== after.files[member]) {
-          const entries = await Promise.all([before.files[member], after.files[member]].map(async encoded => {
-            const archive = await new Bun.Archive(Buffer.from(encoded, "base64")).files("sdkHost.js");
-            const entry = archive.get("sdkHost.js");
-            if (!entry) throw new Error("SDK-host archive is missing its declared entry");
-            return await entry.text();
-          }));
-          const [left, right] = entries as [string, string];
-          let offset = 0;
-          while (offset < Math.min(left.length, right.length) && left[offset] === right[offset]) offset++;
-          differences.push({ path: `${file}/files/${member}/sdkHost.js`, offset,
-            before: { length: left.length, excerpt: left.slice(Math.max(0, offset - 160), offset + 320) },
-            after: { length: right.length, excerpt: right.slice(Math.max(0, offset - 160), offset + 320) } });
-        }
         console.error("package_determinism_mismatch", JSON.stringify(differences));
       }
       expect(secondBytes).toEqual(firstBytes);
@@ -213,7 +226,7 @@ for (const graph of ["", "sdk-host"]) for (const dependency of ["@oh-my-pi/pi-ai
 for (const [filename, refusal] of [
   ["bun.lock", "Unreviewed bun.lock"],
   ["sdk-host/bun.lock", "Unreviewed bun.lock"],
-  ["patches/@oh-my-pi%2Fpi-ai@18.20.0.patch", "Unreviewed pi-ai patch"],
+  ["patches/@oh-my-pi%2Fpi-ai@18.20.1.patch", "Unreviewed pi-ai patch"],
 ] as const) {
   test(`${filename} drift refuses the previously prepared graph`, async () => {
     const destination = join(scratch, "changed-input");
@@ -280,6 +293,20 @@ test("tampered bundled CA data preserves the complete prior family", async () =>
   } finally {
     await writeFile(file, original);
   }
+}, 180_000);
+
+test("tampered prepared grammar bytes preserve the complete prior family", async () => {
+  const destination = join(scratch, "tampered-grammar-data");
+  const previous = await priorFamily(destination);
+  const file = join(fixture, ".runtime-cache", "omp-grammar-assets-v1", "grammars-v1.tar.gz");
+  const original = await readFile(file);
+  try {
+    const corrupted = Buffer.from(original);
+    corrupted[0] = corrupted[0]! ^ 1;
+    await writeFile(file, corrupted);
+    await expect(fixturePack(destination)).rejects.toThrow("grammar");
+    expect(await snapshot(destination)).toEqual(previous);
+  } finally { await writeFile(file, original); }
 }, 180_000);
 
 test("source, SDK, symlink and another run's staging destinations are refused without mutation", async () => {
@@ -424,11 +451,15 @@ test("compiler preparation cannot overwrite another directory through a replaced
 async function publishedFamily(directory: string): Promise<void> {
   expect((await readdir(directory)).sort()).toEqual(publishedFiles);
   const sums = (await readFile(join(directory, "SHA256SUMS"), "utf8")).trim().split("\n");
-  expect(sums.map(line => line.slice(66))).toEqual(family.map(id => `${id}.manifold-plugin.json`));
+  expect(sums.map(line => line.slice(66))).toEqual([...family.map(id => `${id}.manifold-plugin.json`), ...sourceAssets]);
   for (const [index, id] of family.entries()) {
     const bytes = await readFile(join(directory, `${id}.manifold-plugin.json`));
     expect(new Bun.CryptoHasher("sha256").update(bytes).digest("hex")).toBe(sums[index]!.slice(0, 64));
     expect(JSON.parse(bytes.toString("utf8")).manifest.id).toBe(id);
+  }
+  for (const [index, filename] of sourceAssets.entries()) {
+    const bytes = await readFile(join(directory, filename));
+    expect(new Bun.CryptoHasher("sha256").update(bytes).digest("hex")).toBe(sums[family.length + index]!.slice(0, 64));
   }
   expect(JSON.parse(await readFile(join(directory, "native-requirements.json"), "utf8")).requiredRuntimeTools).toEqual(["system"]);
 }

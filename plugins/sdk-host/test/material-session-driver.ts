@@ -36,7 +36,8 @@ try {
     promptTemplates: [{ name: "summarize", description: "fixture", content: "TEMPLATE-EXPANDED", source: "(fixture)" }],
     enableMCP: false, enableLsp: false, enableIrc: false, skipPythonPreflight: true, spawns: "",
   });
-  if (created.session.getAllToolNames().length !== 0) throw new Error("material registry is not empty");
+  if (created.session.getAllToolNames().length !== 0 || created.session.getActiveToolNames().length !== 0 ||
+    created.session.getXdevToolEntries().length !== 0) throw new Error("material registry is not empty");
   code = await runMaterialPrintMode(created.session, materialMessage(input.prompt, input.material));
 } finally { auth.close(); }
 process.exit(code);

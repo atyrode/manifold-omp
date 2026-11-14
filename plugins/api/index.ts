@@ -159,16 +159,6 @@ export const OverlaySchema = z.strictObject({
     .optional(),
   task: z
     .strictObject({
-      agentModelOverrides: z
-        .record(
-          identifier,
-          z.union([
-            modelReference,
-            z.string().regex(/^@[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/),
-          ]),
-        )
-        .refine((value) => Object.keys(value).length <= 128)
-        .optional(),
       agentAdvisor: z.strictObject({ task: z.enum(["on", "off"]) }).optional(),
       prewalk: z.boolean().optional(),
     })

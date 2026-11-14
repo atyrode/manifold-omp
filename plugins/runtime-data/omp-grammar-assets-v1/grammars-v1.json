@@ -1,0 +1,224 @@
+{
+  "schemaVersion": 1,
+  "archive": {
+    "file": "grammars-v1.tar.gz",
+    "format": "tar.gz",
+    "sha256": "6fd35e6dc87b51c8acc91f1fbe38eec83fb93800dd42e3323ced9d4191039bb3",
+    "maxBytes": 6002768,
+    "maxExpandedBytes": 84224000,
+    "maxMembers": 41,
+    "expandedTarSha256": "34311ac9115d5aa02f6794b7493ba22e876d94b2bec0a429d36e9169a372f683",
+    "payloadBytes": 84190581
+  },
+  "sourceProvenanceSha256": "c19017dbf10e0a3c76b4a724fa3c051b461c2afa4a11be6c6da879e3a0f98862",
+  "grammarCount": 39,
+  "aggregateCompressedZstBytes": 3917259,
+  "aggregateWasmBytes": 84091954,
+  "members": [
+    {
+      "path": "THIRD-PARTY-NOTICES.txt",
+      "size": 87669,
+      "sha256": "104b20b8919282e7b559cbe68c55b50bffd18ec0ffeb2f51b9881065ad584c8d"
+    },
+    {
+      "path": "astro-612c83b88b97ba7c.wasm",
+      "size": 24622,
+      "sha256": "612c83b88b97ba7cc53a4808aebf71196442d2aea70955333b114212b771a4d7"
+    },
+    {
+      "path": "clojure-f63ecd31939b06c3.wasm",
+      "size": 97934,
+      "sha256": "f63ecd31939b06c315c49794a628059b6f16de191a17b148a290e5f8faffbc0a"
+    },
+    {
+      "path": "cmake-38a05d65733bf24f.wasm",
+      "size": 75504,
+      "sha256": "38a05d65733bf24f4469b01d644d6b8e26e779fcc40ae562037dd699aee6e103"
+    },
+    {
+      "path": "csharp-f265130d20fe62d3.wasm",
+      "size": 5328197,
+      "sha256": "f265130d20fe62d3dc0cec756ee5a4159bd9825894a48fc0f7e72c8bd30ef099"
+    },
+    {
+      "path": "dart-52bdbf469a2343a5.wasm",
+      "size": 1269300,
+      "sha256": "52bdbf469a2343a52385f75dab61097fe9c157e747ddfcc52200c153c4259d4b"
+    },
+    {
+      "path": "dockerfile-6d95cfe08d32ad32.wasm",
+      "size": 48699,
+      "sha256": "6d95cfe08d32ad32cd4e3e13e209f03ae59fbd495ad61014e1873fbbbb6c5078"
+    },
+    {
+      "path": "elixir-1160c3b90a7c1eb7.wasm",
+      "size": 1412268,
+      "sha256": "1160c3b90a7c1eb7cb8f8e5c3a1960db3219c97c10fa21b1421b79142cc2e556"
+    },
+    {
+      "path": "emacs-lisp-d4fee941a25f6464.wasm",
+      "size": 52513,
+      "sha256": "d4fee941a25f646467cebe60317f46eb0f47b617c76fb9a1a60e7e7982b43415"
+    },
+    {
+      "path": "erlang-bb8809212393e686.wasm",
+      "size": 418478,
+      "sha256": "bb8809212393e68687d0f2bc1309c4ca7601fa704a8a96edaffaa34585f1b1b7"
+    },
+    {
+      "path": "fortran-f72872963184cdb4.wasm",
+      "size": 6591350,
+      "sha256": "f72872963184cdb4ccb623be3e4e40606066a317be6d5d61cdc929b51bba6d22"
+    },
+    {
+      "path": "graphql-fd4081c84308f5db.wasm",
+      "size": 57563,
+      "sha256": "fd4081c84308f5db14a4a6e1bea91c08f9c38e5ab47e5a0730c4a39448844d00"
+    },
+    {
+      "path": "haskell-ddc4978970326bc4.wasm",
+      "size": 3805634,
+      "sha256": "ddc4978970326bc46369f3dff15027c54dac79adb7aca9ba7b6d3a20ebb1b3e0"
+    },
+    {
+      "path": "hcl-1b4b186da007c489.wasm",
+      "size": 93351,
+      "sha256": "1b4b186da007c48980f7ec7259b15edb2ea6cb1b8cf7ad01d5c9c39456aa52fb"
+    },
+    {
+      "path": "ini-4884a74e0e60d02f.wasm",
+      "size": 4710,
+      "sha256": "4884a74e0e60d02fc897b1f780c044e578ff839c9eeb6f4742d2feaef9839ece"
+    },
+    {
+      "path": "julia-78d8e1aa3b207c29.wasm",
+      "size": 6223351,
+      "sha256": "78d8e1aa3b207c290631bbb071ebbe20f91d631e91dd2d78a71358472660978a"
+    },
+    {
+      "path": "just-989d19dab6b34933.wasm",
+      "size": 44632,
+      "sha256": "989d19dab6b349337e0335e8f8bfe39de40f27639dc34c23a0d8c63678a69e68"
+    },
+    {
+      "path": "kotlin-83d1aa9580f91a32.wasm",
+      "size": 5772696,
+      "sha256": "83d1aa9580f91a32b51a057ad4216166c29e488bf750aa891ae528f7a04dd4bf"
+    },
+    {
+      "path": "lua-83446c583739247d.wasm",
+      "size": 53205,
+      "sha256": "83446c583739247d74ae0953a1844b642fc126a5e773b797ecd0f7b5af686c84"
+    },
+    {
+      "path": "make-c2a057ef58739b2f.wasm",
+      "size": 147044,
+      "sha256": "c2a057ef58739b2f8025bc3f7d04a62ae3daad8aeb7979b2db6097800950cded"
+    },
+    {
+      "path": "manifest.json",
+      "size": 10958,
+      "sha256": "3a2539de2f48b28569aa02e4023398a97ad3806e6a7e1891fba3be76a0288a1d"
+    },
+    {
+      "path": "nix-10a66e15b62be1a5.wasm",
+      "size": 79503,
+      "sha256": "10a66e15b62be1a59cd256abf4b48fdeac07e50c0a8e50ceb64296fcec019930"
+    },
+    {
+      "path": "objc-ede2d58688f085d4.wasm",
+      "size": 5317156,
+      "sha256": "ede2d58688f085d4d36ccdf7f2b50aa61f70ea4f134dd3741c23ad857473a148"
+    },
+    {
+      "path": "ocaml-c60bd9980a698106.wasm",
+      "size": 5553927,
+      "sha256": "c60bd9980a698106c09dccf5a089841e7d285721ad8ce9e4fd5a326bf3316d0f"
+    },
+    {
+      "path": "odin-0fa018a7182e62a6.wasm",
+      "size": 2215304,
+      "sha256": "0fa018a7182e62a6414379018fb1bbe2e46ca39f6f1cd6584a4609481c1f303e"
+    },
+    {
+      "path": "php-cb7397cba44a21ce.wasm",
+      "size": 1002409,
+      "sha256": "cb7397cba44a21ce6882d8173c597d66e32a257cb1f628ba45cdf23f9d8d7c6a"
+    },
+    {
+      "path": "powershell-2a24f946f96e67ac.wasm",
+      "size": 990743,
+      "sha256": "2a24f946f96e67ac812fb6c7d647576a033febc0c48f4c91a340b549e7eac73d"
+    },
+    {
+      "path": "protobuf-0b226f4132ac4493.wasm",
+      "size": 73836,
+      "sha256": "0b226f4132ac4493642b8df1fbeb7541c92e36e3fb152064ef662d072135b795"
+    },
+    {
+      "path": "r-908227b85fae8f37.wasm",
+      "size": 484429,
+      "sha256": "908227b85fae8f37660f9991110349a2ce6ecde650549c8a72cda800caa5e948"
+    },
+    {
+      "path": "ruby-e77f88559b47c0fe.wasm",
+      "size": 2106322,
+      "sha256": "e77f88559b47c0fe2771821c6c160cdf6bbfe17afcd642ab3fdda9aebb70b2f3"
+    },
+    {
+      "path": "scala-f1699072abf3668a.wasm",
+      "size": 3922744,
+      "sha256": "f1699072abf3668a995ece3950a52c00f9da168a58684fe104e98214b0a74903"
+    },
+    {
+      "path": "solidity-ac4d44dc54b7a475.wasm",
+      "size": 508585,
+      "sha256": "ac4d44dc54b7a475c2284ae27ab0af932043e2cfd4e200a416b2ac5d40f433d7"
+    },
+    {
+      "path": "sql-f9d5638965f6f7ec.wasm",
+      "size": 2433442,
+      "sha256": "f9d5638965f6f7ecc6b6979b8717f44e756687a1cbe4fef411b84506bdb81451"
+    },
+    {
+      "path": "starlark-1f892a95b3d42e69.wasm",
+      "size": 329944,
+      "sha256": "1f892a95b3d42e69e71eeb3efdba3cc605a5c8b221b554e250f5418c64c682a6"
+    },
+    {
+      "path": "svelte-03ab329192177443.wasm",
+      "size": 44859,
+      "sha256": "03ab329192177443c91eaf0904b011089cc6b779df1792468afd379c0a6a2512"
+    },
+    {
+      "path": "swift-92a6aa39712255e7.wasm",
+      "size": 3726992,
+      "sha256": "92a6aa39712255e7332d1b06db52bc6d49e9f563215846978c0ca63b6cc38359"
+    },
+    {
+      "path": "tlaplus-2bb6711906017f86.wasm",
+      "size": 4878580,
+      "sha256": "2bb6711906017f861d3c143553c5077fc167f29d023a606a5dcfc159efb9e5bc"
+    },
+    {
+      "path": "verilog-46f723039630ef85.wasm",
+      "size": 18135336,
+      "sha256": "46f723039630ef85b8a2dd324cba2673207163f760eb435c800bc0f56d78bb0e"
+    },
+    {
+      "path": "vue-a9b2b4573afa0f31.wasm",
+      "size": 28095,
+      "sha256": "a9b2b4573afa0f31a878753a30e2cda2030baa26544159448da6ba8c69bfa76d"
+    },
+    {
+      "path": "xml-fafa7327c7a09ba7.wasm",
+      "size": 46968,
+      "sha256": "fafa7327c7a09ba74612e23543ff4e93ee08b785f0a8c2f8292c03f0b65c4917"
+    },
+    {
+      "path": "zig-4dd568b541381b9d.wasm",
+      "size": 691729,
+      "sha256": "4dd568b541381b9ddcd0b53eda9956d26fea148b26f0af2ec52b1e8b4de3ed2e"
+    }
+  ]
+}

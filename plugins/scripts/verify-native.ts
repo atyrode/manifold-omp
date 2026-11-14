@@ -20,6 +20,8 @@ try {
   const root = process.env.OMP_VERIFY_ROOT;
   check(root && process.cwd() === join(root, "cwd") && process.env.HOME === join(root, "home")
     && process.env.PI_CODING_AGENT_DIR === join(root, "agent") && process.send, "missing-private-environment");
+  const publishedAssets = process.argv.length === 3 && process.argv[2] === "--published-assets";
+  check(process.argv.length === 2 || publishedAssets, "invalid-verification-arguments");
   // Intentional module-loading boundary: static imports would run before this
   // child verifies the launcher's empty credential environment and private HOME.
   phase = "import-pack";
@@ -47,6 +49,12 @@ try {
   const expectedSums = process.env.OMP_VERIFY_EXPECTED_SUMS;
   check(expectedSums && isAbsolute(expectedSums) && await readFile(join(root, "bundles", "SHA256SUMS"), "utf8") === await readFile(expectedSums, "utf8"),
     "packed-family-differs-from-release");
+  const { preparedSourceArtifacts, verifyPublishedRelease } = await import("./source-assets.ts");
+  const sourceBundle = PluginBundleSchema.parse(JSON.parse(await readFile(bundles[0]!.file, "utf8")));
+  check(sourceBundle.manifest.machine, "packed-root-machine-missing");
+  const preparedArtifactArchives = publishedAssets ? undefined
+    : await preparedSourceArtifacts(join(root, "bundles"), sourceBundle.manifest.machine);
+  if (publishedAssets) await verifyPublishedRelease();
   const policyFile = join(root, "agent-policy.txt");
   await writeFile(policyFile, "Disposable native proof policy A.\n", { mode: 0o600 });
   phase = "server-start";
@@ -346,8 +354,9 @@ try {
         MANIFOLD_AGENT_POLICY_FILE: policyFile } });
     hub.url = server.httpUrl;
     const nativeRoot = resolve(import.meta.dir, "../../../manifold");
-    nativeOwner = Bun.spawn([process.execPath, "--no-env-file", "--no-install", "packages/agent/src/main.ts", "--terminal-host"], {
-      cwd: nativeRoot, env: { ...process.env, MANIFOLD_JOB_OWNER_CONFIG: config,
+    nativeOwner = Bun.spawn([process.execPath, "--no-env-file", "--no-install",
+      ...(publishedAssets ? ["packages/agent/src/main.ts", "--terminal-host"] : [resolve(import.meta.dir, "verify-native-owner.ts")])], {
+      cwd: publishedAssets ? nativeRoot : join(root, "cwd"), env: { ...process.env, MANIFOLD_JOB_OWNER_CONFIG: config,
         MANIFOLD_JOB_OWNER_SOCKET: socket, MANIFOLD_TERMINAL_HOST_SOCKET: `${socket}.terminal` },
       stdin: "ignore", stdout: "ignore", stderr: "ignore",
     });
@@ -659,7 +668,8 @@ try {
     const { verifySdkHost, SdkHostVerificationFailure } = await import("./verify-sdk-host.ts");
     try {
       await verifySdkHost({ root, bubblewrap, systemBindings: system.system!,
-        bundlePath: bundles.find(bundle => bundle.id === OMP_PLUGIN_ID)!.file });
+        bundlePath: bundles.find(bundle => bundle.id === OMP_PLUGIN_ID)!.file,
+        ...(preparedArtifactArchives ? { preparedArtifactArchives } : {}) });
     } catch (error) {
       if (error instanceof SdkHostVerificationFailure)
         throw new VerificationFailure(`sdk-${error.code}`);

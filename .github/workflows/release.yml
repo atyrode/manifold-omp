@@ -1,12 +1,13 @@
 name: Release
 
-# A `v*` tag publishes the native OMP family: the three bundles plugins/pack.ts
-# packs and their SHA256SUMS. `bundles` refuses a tag that does not name the
+# A `v*` tag publishes the three native family bundles, the complete SDK-host and
+# grammar archives, and their SHA256SUMS. `bundles` refuses a tag that does not name the
 # family version on a commit main has, then runs the repository gate on the
 # tagged commit beside Manifold at plugins/MANIFOLD_REV; verify repacks the
 # family in its disposable unit and fails unless it reproduces the packed bytes.
-# `release` holds the only write grant, runs no repository code and attaches
-# only those bytes.
+# Only `publish-candidate` and `promote` can write, and neither runs repository
+# code. Public HTTPS/native proof must pass between publication and promotion;
+# a failed proof leaves its candidate held, never deleted, replaced or promoted.
 
 on:
   push:
@@ -43,9 +44,17 @@ jobs:
           esac
       - name: Read the pinned Manifold revision
         id: manifold
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           rev="$(tr -d '[:space:]' < caller/plugins/MANIFOLD_REV)"
-          [ -n "$rev" ] || { echo "MANIFOLD_REV is empty"; exit 1; }
+          [[ "$rev" =~ ^[a-f0-9]{40}$ ]] || { echo "MANIFOLD_REV must be a full lowercase SHA"; exit 1; }
+          status="$(gh api "repos/atyrode/manifold/compare/main...$rev" --jq .status)"
+          case "$status" in
+            identical | behind) ;;
+            *) echo "$rev is $status relative to Manifold main; pin a commit main has"; exit 1 ;;
+          esac
           echo "rev=$rev" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -72,6 +81,7 @@ jobs:
         working-directory: caller/plugins
         run: |
           bun --no-env-file --no-install workers/build.ts --prepare-dependencies
+          python3 scripts/prepare-grammar-assets.py
           bun --no-env-file --no-install scripts/prepare-ci.ts
       - name: Typecheck
         working-directory: caller/plugins
@@ -96,11 +106,13 @@ jobs:
           name: omp-plugins
           path: |
             caller/plugins/dist/*.manifold-plugin.json
+            caller/plugins/dist/omp-sdkHost.tar.gz
+            caller/plugins/dist/omp-grammars-v1.tar.gz
             caller/plugins/dist/SHA256SUMS
           if-no-files-found: error
           overwrite: true
 
-  release:
+  publish-candidate:
     needs: bundles
     runs-on: ubuntu-latest
     permissions:
@@ -112,13 +124,17 @@ jobs:
         with:
           name: omp-plugins
           path: dist
-      - name: Require SHA256SUMS to name exactly the packed bundles, at the tag's version
+      - name: Require exactly the complete checksummed family and runtime assets
         working-directory: dist
         run: |
           set -euo pipefail
           sha256sum --check --strict SHA256SUMS
           listed="$(awk '{ print $2 }' SHA256SUMS | sort)"
-          packed="$(printf '%s\n' *.manifold-plugin.json | sort)"
+          packed="$(printf '%s\n' atyrode.omp.manifold-plugin.json atyrode.omp.accounts.manifold-plugin.json \
+            atyrode.omp.gateway.manifold-plugin.json omp-sdkHost.tar.gz omp-grammars-v1.tar.gz | sort)"
+          actual="$(find . -maxdepth 1 -type f -printf '%f\n' | sort)"
+          expected="$(printf '%s\n' "$packed" SHA256SUMS | sort)"
+          [ "$actual" = "$expected" ] || { echo "Incomplete or unexpected release asset set"; exit 1; }
           [ "$listed" = "$packed" ] || {
             printf 'SHA256SUMS lists:\n%s\npacked:\n%s\n' "$listed" "$packed"
             exit 1
@@ -128,7 +144,7 @@ jobs:
             got="$(jq -er .manifest.version "$bundle")"
             [ "$got" = "$want" ] || { echo "$bundle is version $got; tag $TAG names $want"; exit 1; }
           done
-      - name: Create the tagged release with the verified bundles
+      - name: Upload the complete asset set as a draft, then publish a held prerelease
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPOSITORY: ${{ github.repository }}
@@ -137,5 +153,132 @@ jobs:
           commit="$(gh api "repos/$REPOSITORY/commits/refs/tags/$TAG" --jq .sha)"
           [ "$commit" = "$GITHUB_SHA" ] || { echo "tag $TAG now names $commit; this run built $GITHUB_SHA"; exit 1; }
           gh release create "$TAG" --repo "$REPOSITORY" --verify-tag \
-            --title "$TAG" --generate-notes \
-            dist/*.manifold-plugin.json dist/SHA256SUMS
+            --draft --prerelease --latest=false --title "$TAG" --generate-notes \
+            dist/*.manifold-plugin.json dist/omp-sdkHost.tar.gz dist/omp-grammars-v1.tar.gz dist/SHA256SUMS
+          metadata="$(gh api "repos/$REPOSITORY/releases/tags/$TAG")"
+          jq -e '.draft == true and .prerelease == true' <<< "$metadata" >/dev/null
+          expected="$(printf '%s\n' dist/* | xargs -n1 basename | sort)"
+          uploaded="$(jq -r '.assets[].name' <<< "$metadata" | sort)"
+          [ "$uploaded" = "$expected" ] || { echo "Draft asset set differs; refusing publication"; exit 1; }
+          for file in dist/*; do
+            name="$(basename "$file")"
+            size="$(stat -c %s "$file")"
+            jq -e --arg name "$name" --argjson size "$size" \
+              '.assets[] | select(.name == $name) | .size == $size' <<< "$metadata" >/dev/null
+          done
+          commit="$(gh api "repos/$REPOSITORY/commits/refs/tags/$TAG" --jq .sha)"
+          [ "$commit" = "$GITHUB_SHA" ] || { echo "Tag moved before candidate publication"; exit 1; }
+          gh release edit "$TAG" --repo "$REPOSITORY" --draft=false --prerelease --latest=false
+
+  public-proof:
+    needs: publish-candidate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      release-id: ${{ steps.release.outputs.id }}
+      assets-digest: ${{ steps.release.outputs.assets }}
+    env:
+      TAG: ${{ github.ref_name }}
+      REPOSITORY: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: caller
+          persist-credentials: false
+      - name: Read the pinned Manifold revision
+        id: manifold
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          rev="$(tr -d '[:space:]' < caller/plugins/MANIFOLD_REV)"
+          [[ "$rev" =~ ^[a-f0-9]{40}$ ]] || { echo "MANIFOLD_REV must be a full lowercase SHA"; exit 1; }
+          status="$(gh api "repos/atyrode/manifold/compare/main...$rev" --jq .status)"
+          case "$status" in
+            identical | behind) ;;
+            *) echo "$rev is $status relative to Manifold main; pin a commit main has"; exit 1 ;;
+          esac
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: atyrode/manifold
+          ref: ${{ steps.manifold.outputs.rev }}
+          path: manifold
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.4"
+      - name: Pin the published candidate and acquire every asset through public HTTPS
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          commit="$(gh api "repos/$REPOSITORY/commits/refs/tags/$TAG" --jq .sha)"
+          [ "$commit" = "$GITHUB_SHA" ] || { echo "Candidate tag differs from built source"; exit 1; }
+          metadata="$(gh api "repos/$REPOSITORY/releases/tags/$TAG")"
+          jq -e '.draft == false and .prerelease == true' <<< "$metadata" >/dev/null
+          expected="$(printf '%s\n' atyrode.omp.manifold-plugin.json atyrode.omp.accounts.manifold-plugin.json \
+            atyrode.omp.gateway.manifold-plugin.json omp-sdkHost.tar.gz omp-grammars-v1.tar.gz SHA256SUMS | sort)"
+          [ "$(jq -r '.assets[].name' <<< "$metadata" | sort)" = "$expected" ]
+          echo "id=$(jq -er .id <<< "$metadata")" >> "$GITHUB_OUTPUT"
+          echo "assets=$(jq -cS '[.assets[] | {id,name,size,digest,updated_at}] | sort_by(.name)' <<< "$metadata" | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          # No bearer or owner credentials accompany these versioned HTTPS downloads.
+          mkdir public-release
+          while IFS= read -r file; do
+            curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+              "https://github.com/$REPOSITORY/releases/download/$TAG/$file" --output "public-release/$file"
+          done <<< "$expected"
+          (cd public-release && sha256sum --check --strict SHA256SUMS)
+      - name: Prepare the independent graphs and fresh native containment fixtures
+        run: |
+          set -euo pipefail
+          (cd manifold && bun install --frozen-lockfile && bash scripts/install-runtime-ci.sh)
+          (cd caller/plugins && bun install --frozen-lockfile && \
+            bun --no-env-file --no-install workers/build.ts --prepare-dependencies && \
+            python3 scripts/prepare-grammar-assets.py && \
+            bun --no-env-file --no-install scripts/prepare-ci.ts)
+      - name: Prove published bytes with normal HTTPS acquisition and a fresh native owner
+        working-directory: caller/plugins
+        run: |
+          OMP_VERIFY_EXPECTED_SUMS="$GITHUB_WORKSPACE/public-release/SHA256SUMS" \
+          OMP_CONSUMER_SOURCE="github:$GITHUB_REPOSITORY#$(git rev-parse HEAD)" \
+            bun --no-env-file --no-install scripts/verify.ts --published-assets
+      - name: Require the proven asset identities to remain unchanged
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXPECTED_ASSETS: ${{ steps.release.outputs.assets }}
+          EXPECTED_RELEASE: ${{ steps.release.outputs.id }}
+        run: |
+          set -euo pipefail
+          metadata="$(gh api "repos/$REPOSITORY/releases/tags/$TAG")"
+          [ "$(jq -er .id <<< "$metadata")" = "$EXPECTED_RELEASE" ]
+          actual="$(jq -cS '[.assets[] | {id,name,size,digest,updated_at}] | sort_by(.name)' <<< "$metadata" | sha256sum | cut -d' ' -f1)"
+          [ "$actual" = "$EXPECTED_ASSETS" ] || { echo "Published assets changed during proof"; exit 1; }
+
+  promote:
+    needs: public-proof
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+      REPOSITORY: ${{ github.repository }}
+      EXPECTED_RELEASE: ${{ needs.public-proof.outputs.release-id }}
+      EXPECTED_ASSETS: ${{ needs.public-proof.outputs.assets-digest }}
+    steps:
+      # No checkout, downloaded scripts or repository code in either write-granted job.
+      - name: Promote only the already-proven candidate's status flags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          commit="$(gh api "repos/$REPOSITORY/commits/refs/tags/$TAG" --jq .sha)"
+          [ "$commit" = "$GITHUB_SHA" ] || { echo "Tag differs from proven source"; exit 1; }
+          metadata="$(gh api "repos/$REPOSITORY/releases/tags/$TAG")"
+          jq -e '.draft == false and .prerelease == true' <<< "$metadata" >/dev/null
+          [ "$(jq -er .id <<< "$metadata")" = "$EXPECTED_RELEASE" ]
+          actual="$(jq -cS '[.assets[] | {id,name,size,digest,updated_at}] | sort_by(.name)' <<< "$metadata" | sha256sum | cut -d' ' -f1)"
+          [ "$actual" = "$EXPECTED_ASSETS" ] || { echo "Assets differ from the public proof"; exit 1; }
+          gh release edit "$TAG" --repo "$REPOSITORY" --prerelease=false --latest

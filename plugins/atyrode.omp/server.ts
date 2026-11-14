@@ -14,7 +14,7 @@ import {
 } from "../api/index.ts";
 import { describeDestination, OmpRefusal, type OmpContext } from "./machine-server.ts";
 import { refusal } from "./refusal.ts";
-import { readDefaults, writeDefaults } from "./state.ts";
+import { defaultsNativeSharedRolesMigration, readDefaults, writeDefaults } from "./state.ts";
 import { readSkillCatalog, writeSkillCatalog } from "./skills.ts";
 import { controlRun, harness } from "./harness.ts";
 import { listSessions, resumeSession } from "./sessions.ts";
@@ -159,6 +159,7 @@ export const handlers = Object.fromEntries(
 );
 const plugin = {
   manifest: PluginManifestSchema.parse(manifestJson),
+  migrations: [defaultsNativeSharedRolesMigration],
   actions: (Object.keys(rootActionSchemas) as RootAction[]).map((name) =>
     defineServerAction({
       name,

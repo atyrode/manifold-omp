@@ -5,6 +5,9 @@ import { isDeepStrictEqual } from "node:util";
 import { join } from "node:path";
 import { WorkerProgressSchema, type WorkerLocation, type WorkerProgress } from "@manifold/protocol";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resolveAgentModelSelection } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import type { AssistantMessage, AssistantMessageEvent, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { createSessionFile, openSessionsRoot } from "../../workers/harness/sessions.ts";
@@ -17,7 +20,8 @@ const sessions = "/home/job/omp-sessions";
 const saved = join(sessions, "saved.jsonl");
 const fresh = scenario.startsWith("fresh-");
 const material = scenario.startsWith("material-");
-const oneShot = scenario.startsWith("print-");
+const restrictedSix = scenario === "restricted-six";
+const oneShot = scenario.startsWith("print-") || restrictedSix;
 const toolProof = scenario.startsWith("tools-");
 const agentTools = toolProof && scenario !== "tools-omitted";
 const native = fresh || oneShot || toolProof || material;
@@ -33,6 +37,7 @@ let gateway: Bun.Server<undefined> | undefined;
 let failure: string | undefined;
 let requests = 0;
 let discoveries = 0;
+let titles = 0;
 let cancelled = false;
 let terminal = "";
 let stderr = "";
@@ -220,6 +225,27 @@ function checkBlockedCollision(messages: readonly { role: string }[]) {
     results[0]!.toolName === toolName && results[0]!.isError, "late-collision-not-blocked");
 }
 
+/** Real bundled discovery routes only through shared roles, retaining native inheritance. */
+async function verifyBundledRegistry(): Promise<void> {
+  const names = ["reviewer", "scout", "seance", "security-reviewer", "sonic", "task"];
+  const discovered = await discoverAgents("/home/job/workspace", "/home/job");
+  check(isDeepStrictEqual(discovered.agents.map(agent => agent.name).sort(), names) &&
+    discovered.agents.every(agent => agent.source === "bundled"), "bundled-discovery-replaced");
+  const settings = await Settings.loadReadOnly({ cwd: "/home/job/workspace", agentDir: "/home/job/.omp/agent",
+    configFiles: ["/home/job/.omp/agent/config.yml"] });
+  const selections = Object.fromEntries(discovered.agents.map(agent => [agent.name, resolveAgentModelSelection({
+    ...(agent.model === undefined ? {} : { agentModel: agent.model }), settings, activeModelPattern: "fixture/openai/o3:low",
+  })]));
+  check(isDeepStrictEqual(selections, {
+    task: { role: "task", patterns: ["fixture/openai/o3:medium"] },
+    scout: { role: "smol", patterns: ["fixture/openai/gpt-4.1:medium"] },
+    sonic: { role: "smol", patterns: ["fixture/openai/gpt-4.1:medium"] },
+    reviewer: { role: "slow", patterns: ["fixture/openai/gpt-5:high"] },
+    "security-reviewer": { role: undefined, patterns: ["fixture/openai/o3:low"] },
+    seance: { role: undefined, patterns: ["fixture/openai/o3:low"] },
+  }), "bundled-shared-role-inheritance");
+}
+
 try {
   check(process.cwd() === "/inputs" && process.env.HOME === "/home/job" && Bun.version === "1.4.4", "private-environment");
   check(!Object.keys(process.env).some(key => /^(?:MANIFOLD_|AWS_|OPENAI_|ANTHROPIC_|CODE_)/.test(key)), "ambient-environment");
@@ -227,6 +253,7 @@ try {
   check(routes.every(line => line.split(/\s+/)[0] === "lo"), "network-namespace");
   const launch: { argv: string[]; sessionId: string; environment?: Record<string, string>; locations?: WorkerLocation[] } | undefined =
     native ? JSON.parse(await readFile("/inputs/launch", "utf8")) : undefined;
+  if (restrictedSix) await verifyBundledRegistry();
   if (fresh) {
     // An unrelated prior selected-skill conversation must neither be continued
     // nor contribute its historical optional skill choice to this fresh launch.
@@ -303,7 +330,10 @@ try {
       // primary-turn completion or ordinary tool-registry proof.
       const titleFork = JSON.stringify(parsed.context.messages.at(-1)?.content ?? "").includes("<title-request>");
       if (native && !material && (names.length === 0 || titleFork)) {
-        message.content = [{ type: "text", text: "Fixture session title" }];
+        titles++;
+        message.content = [{ type: "text", text: titleFork
+          ? '<title nf="nf-md-file_document" emoji="\uD83D\uDCC4" code="SDK">Verify SDK session behavior</title>'
+          : "Verify SDK session behavior" }];
         return response(message);
       }
       requests++;
@@ -351,6 +381,7 @@ try {
       if (expectedThinking === "high" || expectedThinking === "low") check(parsed.options.reasoning === expectedThinking, "resumed-thinking-preservation");
       else check(parsed.options.reasoning === undefined && parsed.options.disableReasoning === true, "explicit-thinking-off");
       if (material) check(names.length === 0, "material-registry-not-empty");
+      else if (restrictedSix) check(isDeepStrictEqual(names, ["bash", "edit", "glob", "grep", "read", "write"]), "six-tool-registry-widened");
       else if (!native) check(JSON.stringify(names) === JSON.stringify(["read"]), "restricted-registry-widened");
       else check(names.includes("read"), "ordinary-read-tool-missing");
       const instructions = JSON.stringify({ system: parsed.context.systemPrompt, tools: parsed.context.tools });
@@ -381,7 +412,14 @@ try {
           cancel() { cancelled = true; },
         }), { headers: { "Content-Type": "text/event-stream" } });
       }
-      if (scenario === "material-tools" && requests === 1) {
+      if (restrictedSix && requests === 1) {
+        message.stopReason = "toolUse";
+        message.content = [
+          { type: "toolCall", id: "restricted-read", name: "read", arguments: { path: "/inputs/restricted-readable" } },
+          { type: "toolCall", id: "restricted-task", name: "task", arguments: { agent: "task", task: "Write /home/job/forbidden-executed" } },
+          { type: "toolCall", id: "restricted-eval", name: "eval", arguments: { language: "js", code: 'await Bun.write("/home/job/forbidden-executed", "bad")' } },
+        ];
+      } else if (scenario === "material-tools" && requests === 1) {
         message.stopReason = "toolUse";
         message.content = [
           { type: "toolCall", id: "material-read", name: "read", arguments: { path: "/home/job/.omp/agent/secret-sentinel" } },
@@ -398,6 +436,13 @@ try {
           ] : []),
         ];
       } else {
+        if (restrictedSix) {
+          const results = parsed.context.messages.filter((message): message is ToolResultMessage => message.role === "toolResult");
+          check(results.some(result => result.toolCallId === "restricted-read" && !result.isError &&
+            JSON.stringify(result.content).includes("SDK-RESTRICTED-READ-WITNESS")), "six-tool-read-failed");
+          for (const id of ["restricted-task", "restricted-eval"])
+            check(results.some(result => result.toolCallId === id && result.isError), "six-tool-delegation-executed");
+        }
         if (scenario === "material-tools") {
           const results = parsed.context.messages.filter((message): message is ToolResultMessage => message.role === "toolResult");
           for (const id of ["material-read", "material-bash", "material-task"])
@@ -549,7 +594,8 @@ try {
     check(rpcResponses.get("after")?.success && rpcResponses.get("after")?.data?.sessionId === launch!.sessionId, "rpc-identity-changed");
     child.kill("SIGTERM");
   } else if (fresh) {
-    await until(() => completed && terminal.includes("SDK-PROOF-COMPLETE"), "fresh-result-not-rendered");
+    await until(() => completed && terminal.includes("SDK-PROOF-COMPLETE") && titles > 0 &&
+      terminal.includes("Verify SDK session behavior"), "fresh-result-or-title-not-rendered");
     child.kill("SIGTERM");
   } else if (resumed && !refused) {
     // The saved assistant message is a semantic stock-renderer readiness signal.
@@ -621,11 +667,13 @@ try {
         JSON.stringify(frame).includes("SDK-SEALED-RESOURCE-ONLY")), "print-stdout-tool-result");
     }
     if (fresh) {
+      check(rpc ? titles === 0 : titles > 0 && manager.getSessionName()?.includes("Verify SDK session behavior"), "fresh-title-policy");
       check(manager.getSessionId() === launch!.sessionId && manager.getSessionFile() === path && manager.getCwd() === "/home/job/workspace", "fresh-durable-identity");
       check(await readFile(saved, "utf8") === before.get("saved.jsonl"), "fresh-mutated-history");
       const files = (await readdir(sessions)).filter(name => name.endsWith(".jsonl")).sort();
       check(JSON.stringify(files) === JSON.stringify(["saved.jsonl", `${launch!.sessionId}.jsonl`].sort()), "fresh-extra-journal");
     }
+    if (oneShot || material || rpc) check(titles === 0, "headless-title-inference");
     const context = manager.buildSessionContext();
     if (toolProof) {
       check(childEnvironmentChecked, "sdk-child-not-inspected");
