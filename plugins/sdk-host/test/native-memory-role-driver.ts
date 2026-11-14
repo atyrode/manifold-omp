@@ -29,7 +29,7 @@ for (const [target, name] of [
   [http, "request"], [http, "get"], [https, "request"], [https, "get"],
   [net, "connect"], [net, "createConnection"], [net.Socket.prototype, "connect"],
   [tls, "connect"], [dgram, "createSocket"], [Bun, "connect"], [Bun, "udpSocket"],
-] as const) Object.defineProperty(target, name, { configurable: true, writable: true, value: refuseNetwork });
+] as const) Object.defineProperty(target, name, { value: refuseNetwork });
 syncBuiltinESMExports();
 
 // Intentional module-loading boundary: static SDK imports would initialize before

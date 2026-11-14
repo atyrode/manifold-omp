@@ -522,9 +522,9 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
             return { path, namespace: "file" };
           }
           const packaged = args.importer !== undefined && args.importer !== "" && containsPath(modules, args.importer);
-          // Upstream virtual modules deliberately anchor inside their package tree,
-          // but their namespace is not an on-disk source file.
-          const onDisk = packaged && args.namespace === "file";
+          // The upstream virtual helper also uses the file namespace. Only sources
+          // observed by our real file loader exist on disk and carry import attributes.
+          const onDisk = packaged && importedFiles.has(args.importer);
           const from = packaged ? dirname(args.importer) : graph.root;
           const path = await realpath(Bun.resolveSync(args.path, from));
           if (!containsPath(modules, path)) throw new Error(`Worker dependency escapes ${graphName}: ${args.path}`);
