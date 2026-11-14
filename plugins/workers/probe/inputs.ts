@@ -1,4 +1,4 @@
-import { accessSync, closeSync, constants, fstatSync, mkdirSync, openSync, readSync, readdirSync } from "node:fs";
+import { accessSync, closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readlinkSync, readSync, readdirSync, symlinkSync } from "node:fs";
 import { z } from "zod";
 import { identifier, modelId, ThinkingLevelSchema } from "../../api/contracts.ts";
 import {
@@ -119,6 +119,21 @@ export function isolateProbeEnvironment(environment: NodeJS.ProcessEnv): void {
 export function probeChildEnvironment(): Record<string, string> {
   return { HOME: PROBE_HOME, XDG_CONFIG_HOME: `${PROBE_HOME}/.config`, XDG_CACHE_HOME: `${PROBE_HOME}/.cache`,
     XDG_DATA_HOME: `${PROBE_HOME}/.local/share`, XDG_STATE_HOME: `${PROBE_HOME}/.local/state`,
-    PI_CODING_AGENT_DIR: PROBE_AGENT, PI_CONFIG_DIR: ".omp", TMPDIR: `${PROBE_HOME}/tmp`,
+    PI_CODING_AGENT_DIR: PROBE_AGENT, PI_CONFIG_DIR: ".omp", PI_NATIVES_DIR: "/tmp/omp-native", TMPDIR: `${PROBE_HOME}/tmp`,
     PATH: "/runtime/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8", TZ: "UTC", NO_COLOR: "1" };
+}
+/** Only the stock CLI's embedded addon uses this private writable directory.
+ * Grammar bytes remain the owner's verified, read-only managed artifact files. */
+export function prepareOmpNativeDirectory(): void {
+  const directory = "/tmp/omp-native";
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const stat = lstatSync(directory);
+  if (!stat.isDirectory() || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0)
+    throw new Error("omp_native_directory_invalid");
+  const grammars = `${directory}/grammars`;
+  try { symlinkSync("/runtime/bin/omp-grammars", grammars); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST" || !lstatSync(grammars).isSymbolicLink() ||
+      readlinkSync(grammars) !== "/runtime/bin/omp-grammars") throw new Error("omp_native_directory_invalid");
+  }
 }

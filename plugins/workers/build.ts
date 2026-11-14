@@ -6,9 +6,11 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { gzipSync } from "node:zlib";
 import type { BunPlugin } from "bun";
 import { dlopen, ptr } from "bun:ffi";
-import { MachineArtifactSchema, type MachineArtifact, type MachineHalf } from "../../../manifold/packages/protocol/src/index.ts";
+import { MachineArtifactSchema, ManagedToolArtifactSchema, type MachineArtifact, type MachineHalf } from "../../../manifold/packages/protocol/src/index.ts";
 import runtime from "../runtime-artifacts.json";
 import sdkRuntime from "../sdk-host/runtime-artifacts.json";
+import { GRAMMAR_ASSET, ompRuntimeTools, SDK_HOST_ASSET, sourceAssetUrl } from "../runtime-assets.ts";
+import grammarMetadata from "../runtime-data/omp-grammar-assets-v1/grammars-v1.json";
 
 const root = resolve(import.meta.dir, "..");
 const platforms = ["linux-x64", "linux-arm64"] as const;
@@ -281,6 +283,8 @@ export interface WorkerArtifacts {
   tools: NonNullable<MachineHalf["tools"]>;
   /** Owned bytes for every declared bundleFile, without filesystem staging. */
   members: ReadonlyMap<string, Uint8Array>;
+  /** Exact release bytes; never embedded in a family bundle or installed by the packer. */
+  sourceAssets: ReadonlyMap<string, Uint8Array>;
   embeddedBase64Bytes: number;
   /** External owner-provisioned native resource, intentionally not a managed artifact. */
   requiredRuntimeTools: readonly ["system"];
@@ -464,13 +468,14 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
   const artifacts: WorkerArtifacts["artifacts"] = {};
   const tools: WorkerArtifacts["tools"] = {};
   const members = new Map<string, Uint8Array>();
+  const sourceAssets = new Map<string, Uint8Array>();
   let embeddedBase64Bytes = 0;
   for (const [alias, layouts] of Object.entries(runtime.tools)) {
     if (target === "gateway" && alias === "omp") continue;
     if (target === "root" && alias === "pi-natives") continue;
     tools[alias] = {};
     for (const platform of platforms) {
-      const declaration = MachineArtifactSchema.parse(layouts[platform]);
+      const declaration = ManagedToolArtifactSchema.parse(alias === "omp" ? ompRuntimeTools[platform] : layouts[platform]);
       tools[alias]![platform] = declaration;
       if (!declaration.bundleFile || members.has(declaration.bundleFile)) continue;
       const directory = await realpath(join(root, "runtime-data"));
@@ -485,6 +490,16 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
       if (embeddedBase64Bytes > maxEmbeddedBytes) throw new Error("Bundled runtime data exceeds native aggregate limit");
       members.set(declaration.bundleFile, bytes);
     }
+  }
+  if (target !== "gateway") {
+    const directory = await realpath(join(root, ".runtime-cache", "omp-grammar-assets-v1"));
+    const file = await realpath(join(directory, grammarMetadata.archive.file));
+    const stat = await lstat(file);
+    if (!containsPath(directory, file) || !stat.isFile() || stat.size !== grammarMetadata.archive.maxBytes)
+      throw new Error("Invalid prepared grammar archive; run scripts/prepare-grammar-assets.py");
+    const bytes = await readFile(file);
+    if (hash(bytes) !== grammarMetadata.archive.sha256) throw new Error("Unreviewed prepared grammar archive");
+    sourceAssets.set(GRAMMAR_ASSET, bytes);
   }
   if (target === "root") tools[graphs.sdkHost.nativeAlias] = Object.fromEntries(
     platforms.map(platform => [platform, MachineArtifactSchema.parse(graphs.sdkHost.native[platform])]),
@@ -640,17 +655,26 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
         files: declaredFiles,
       };
     }
-    declaration = MachineArtifactSchema.parse(declaration);
-    embeddedBase64Bytes += 4 * Math.ceil(bytes.length / 3);
-    if (embeddedBase64Bytes > maxEmbeddedBytes) throw new Error(`Bundled worker members require ${embeddedBase64Bytes} base64 bytes; native plugin aggregate limit is ${maxEmbeddedBytes}. Publish these exact worker archives before distribution; no worker release URL is assumed.`);
-    if (members.has(declaration.bundleFile!)) throw new Error(`Duplicate worker member: ${declaration.bundleFile}`);
-    members.set(declaration.bundleFile!, bytes);
+    if (name === "sdkHost") {
+      const filename = SDK_HOST_ASSET;
+      const { bundleFile: _bundleFile, ...artifact } = declaration;
+      declaration = MachineArtifactSchema.parse({
+        ...artifact, url: sourceAssetUrl(filename),
+      });
+      sourceAssets.set(filename, bytes);
+    } else {
+      declaration = MachineArtifactSchema.parse(declaration);
+      embeddedBase64Bytes += 4 * Math.ceil(bytes.length / 3);
+      if (embeddedBase64Bytes > maxEmbeddedBytes) throw new Error(`Bundled worker members require ${embeddedBase64Bytes} base64 bytes; native plugin aggregate limit is ${maxEmbeddedBytes}`);
+      if (members.has(declaration.bundleFile!)) throw new Error(`Duplicate worker member: ${declaration.bundleFile}`);
+      members.set(declaration.bundleFile!, bytes);
+    }
     const layouts = Object.fromEntries(platforms.map(platform => [platform, declaration]));
     if (name === "inventory" || name === "broker" || name === "gateway") Object.assign(artifacts, layouts);
     else tools[name] = layouts;
   }
   if (Object.keys(tools).length > 8) throw new Error("Too many native tool maps");
-  return { artifacts, tools, members, embeddedBase64Bytes, requiredRuntimeTools: ["system"], systemRequirements: runtime.requiredRuntimeTools.system };
+  return { artifacts, tools, members, sourceAssets, embeddedBase64Bytes, requiredRuntimeTools: ["system"], systemRequirements: runtime.requiredRuntimeTools.system };
 }
 
 if (import.meta.main) {

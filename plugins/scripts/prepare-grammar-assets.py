@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare reviewed source assets only; never execute grammars or modify runtime pins."""
+"""Reproduce the complete reviewed grammar release asset without executing its contents."""
 
 import argparse
 import contextlib
@@ -10,11 +10,9 @@ import json
 from pathlib import Path
 import re
 import subprocess
-import sys
 import tarfile
 import tempfile
 import urllib.request
-import zlib
 
 
 ASSET_DIR = Path(__file__).resolve().parents[1] / "runtime-data/omp-grammar-assets-v1"
@@ -110,13 +108,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cache-dir", type=Path, help="hash-prefixed source files; temporary by default")
     parser.add_argument("--offline", action="store_true", help="refuse any source download")
-    parser.add_argument("--output-dir", type=Path, default=ASSET_DIR)
+    parser.add_argument("--output-dir", type=Path, default=ASSET_DIR.parents[1] / ".runtime-cache/omp-grammar-assets-v1")
     args = parser.parse_args()
     sources_data = (ASSET_DIR / "sources.json").read_bytes()
     sources = json.loads(sources_data)
-    required = sources["reproducer"]
-    if sys.version.split()[0] != required["python"] or zlib.ZLIB_RUNTIME_VERSION != required["zlib"]:
-        raise RuntimeError(f"exact archive reproduction requires Python {required['python']} and zlib {required['zlib']}")
 
     with contextlib.ExitStack() as stack:
         cache = args.cache_dir
@@ -150,13 +145,15 @@ def main():
     checked(compressed, sources["archive"], "reviewed grammar archive")
     metadata_data = json_bytes(metadata)
     metadata_name = stem + ".json"
-    # A reproducer must refuse drift before overwriting the reviewed source archive.
+    # Refuse byte or metadata drift before publishing the generated archive.
     reviewed = ASSET_DIR / metadata_name
-    if reviewed.exists() and reviewed.read_bytes() != metadata_data:
+    if reviewed.read_bytes() != metadata_data:
         raise ValueError("reproduced archive metadata differs from the reviewed asset")
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    (args.output_dir / (stem + ".tar.gz")).write_bytes(compressed)
-    (args.output_dir / metadata_name).write_bytes(metadata_data)
+    with tempfile.TemporaryDirectory(prefix=".omp-grammar-", dir=args.output_dir) as staged:
+        output = Path(staged) / (stem + ".tar.gz")
+        output.write_bytes(compressed)
+        output.replace(args.output_dir / output.name)
     print(json.dumps(metadata["archive"], indent=2))
 
 

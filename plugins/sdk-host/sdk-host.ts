@@ -7,8 +7,9 @@ import {
 import type { SettingsOptions } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import { runRpcMode } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
+import { __ompSetGrammarDir } from "@oh-my-pi/pi-natives";
 import { MaterialOnlyIsolationSchema, PROMPT_MAX_BYTES } from "../api/index.ts";
-import { ProbeModelsConfigSchema, PROBE_AGENT, readProbeInput } from "../workers/probe/inputs.ts";
+import { prepareOmpNativeDirectory, ProbeModelsConfigSchema, PROBE_AGENT, readProbeInput } from "../workers/probe/inputs.ts";
 import { openSessionsRoot, resolveSessionFile, SESSIONS_ROOT, SessionIdSchema } from "../workers/harness/sessions.ts";
 import { validateSkillInputs } from "../workers/harness/skills.ts";
 import { readAutomation, readResumeOverrides, readSessionInput } from "../workers/harness/sdk-inputs.ts";
@@ -36,6 +37,9 @@ let control: TuiControl | undefined;
 let code = 1;
 try {
   if (Object.keys(process.env).some(name => name.startsWith("MANIFOLD_"))) throw new Error("omp_sdk_environment_invalid");
+  if (process.env.PI_NATIVES_DIR !== "/tmp/omp-native") throw new Error("omp_sdk_environment_invalid");
+  prepareOmpNativeDirectory();
+  __ompSetGrammarDir("/runtime/bin/omp-grammars");
   const kind = z.enum(["interactive", "print", "material-print", "resume", "rpc", "rpc-resume", "tui", "tui-resume"]).parse(process.argv[2]);
   const resume = kind === "resume" || kind === "rpc-resume" || kind === "tui-resume";
   const rpc = kind === "rpc" || kind === "rpc-resume";

@@ -1,5 +1,5 @@
 import { ProbeError, parseBenchmarkObservation, parseInventoryObservation, parseOmpVersion, probeAddress, type BenchmarkInput, type BenchmarkReceipt, type InventoryReceipt, type ProbeIdentity } from "../../api/probe.ts";
-import { PROBE_HOME, probeChildEnvironment, type GatewayListingAddress } from "./inputs.ts";
+import { prepareOmpNativeDirectory, PROBE_HOME, probeChildEnvironment, type GatewayListingAddress } from "./inputs.ts";
 import { bundledQuotaTiers } from "../../atyrode.omp/sdk-metadata.macro.ts" with { type: "macro" };
 
 // Literal build-time data from the same pinned SDK classification as the metadata projection.
@@ -10,6 +10,7 @@ const fixedBenchmarkArgs = ["--json", "--runs", "1", "--max-tokens", "4", "--pro
 // Private implementation, never an argv/cwd/env API or caller-selected command.
 async function capture(kind: "version" | "inventory" | "benchmark", signal: AbortSignal, input?: BenchmarkInput): Promise<string> {
   if (signal.aborted) throw new ProbeError("cancelled");
+  prepareOmpNativeDirectory();
   const args = kind === "version" ? ["--version"] : kind === "inventory" ? ["models", "--json", "--no-extensions"] :
     ["bench", ...input!.candidates.map(probeAddress), ...fixedBenchmarkArgs];
   const child = Bun.spawn(["/runtime/bin/omp", ...args], {

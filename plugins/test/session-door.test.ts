@@ -30,6 +30,7 @@ import { digestOf, type OmpContext } from "../atyrode.omp/machine-server.ts";
 import { handlers as rootHandlers } from "../atyrode.omp/server.ts";
 import rootManifest from "../atyrode.omp/manifest.json";
 import sdkRuntimeArtifacts from "../sdk-host/runtime-artifacts.json";
+import { ompRuntimeTools } from "../runtime-assets.ts";
 import { OPENROUTER_LISTING_TEMPLATE } from "../workers/gateway/template.ts";
 import { ProbeModelsConfigSchema } from "../workers/probe/inputs.ts";
 import { ustar } from "./fixtures/ustar.ts";
@@ -94,7 +95,7 @@ const session = {
   prompt: "summarise the repository",
   planYolo: false,
 };
-const machine = MachineHalfSchema.parse(rootManifest.machine);
+const machine = MachineHalfSchema.parse({ ...rootManifest.machine, tools: { omp: ompRuntimeTools } });
 const launch = machine.operations[LAUNCH_OPERATION_ID]!;
 const oneShot = machine.operations[SESSION_OPERATION_ID]!;
 
@@ -217,7 +218,7 @@ function publicJob(
 function fixture(options: { sdk?: boolean } = {}): Fixture {
   const installedMachine = options.sdk ? MachineHalfSchema.parse({
     ...machine,
-    tools: { ...machine.tools, bun: sdkRuntimeArtifacts.tools.bun, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] },
+    tools: { ...machine.tools, omp: ompRuntimeTools, bun: sdkRuntimeArtifacts.tools.bun, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] },
   }) : machine;
   const storage = new Map<string, string>();
   const archives = new Map<string, Buffer>();
@@ -1243,7 +1244,7 @@ test("set reviews spend on the same explicit selection, but not on a changed cat
   const f = fixture();
   const deployment = structuredClone(await f.ctx.jobs.describeDeployment({ machineId: target.machineId, pluginId: OMP_PLUGIN_ID }));
   deployment.installation!.machine = MachineHalfSchema.parse({ ...deployment.installation!.machine,
-    tools: { ...deployment.installation!.machine.tools, bun: sdkRuntimeArtifacts.tools.bun, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
+    tools: { ...deployment.installation!.machine.tools, omp: ompRuntimeTools, bun: sdkRuntimeArtifacts.tools.bun, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
   f.ctx.jobs.describeDeployment = async () => deployment;
   f.ctx.jobs.inspectInputs = async ({ inputs }) => ({ inputs: inputs.map(input => ({
     ...input, sha256: "a".repeat(64), bytes: 4096, files: 1,
@@ -1278,7 +1279,7 @@ test("restricted review binds exact tools and disables ambient skills without ch
   const f = fixture();
   const deployment = structuredClone(await f.ctx.jobs.describeDeployment({ machineId: target.machineId, pluginId: OMP_PLUGIN_ID }));
   deployment.installation!.machine = MachineHalfSchema.parse({ ...deployment.installation!.machine,
-    tools: { ...deployment.installation!.machine.tools, bun: sdkRuntimeArtifacts.tools.bun, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
+    tools: { ...deployment.installation!.machine.tools, omp: ompRuntimeTools, bun: sdkRuntimeArtifacts.tools.bun, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
   f.ctx.jobs.describeDeployment = async () => deployment;
   const automation = { mode: "restricted" as const, toolNames: ["read" as const], delegation: "disabled" as const };
   // Shared task routing remains passive configuration when delegation is disabled.
@@ -1308,7 +1309,7 @@ for (const platform of ["linux-x64", "linux-arm64"] as const) {
         const f = fixture();
         const deployment = structuredClone(await f.ctx.jobs.describeDeployment({ machineId: target.machineId, pluginId: OMP_PLUGIN_ID }));
         const machine = MachineHalfSchema.parse({ ...deployment.installation!.machine,
-          tools: { ...deployment.installation!.machine!.tools, bun: sdkRuntimeArtifacts.tools.bun,
+          tools: { ...deployment.installation!.machine!.tools, omp: ompRuntimeTools, bun: sdkRuntimeArtifacts.tools.bun,
             "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
         deployment.installation!.machine = machine;
         f.ctx.jobs.describeDeployment = async () => deployment;
@@ -1320,6 +1321,25 @@ for (const platform of ["linux-x64", "linux-arm64"] as const) {
         expect(f.posted).toEqual([]);
       });
     }
+  }
+}
+
+for (const platform of ["linux-x64", "linux-arm64"] as const) {
+  for (const drift of ["missing", "source", "member", "target"] as const) {
+    test(`ordinary session refuses ${platform} grammar group ${drift} drift before dispatch`, async () => {
+      const f = fixture();
+      const deployment = structuredClone(await f.ctx.jobs.describeDeployment({ machineId: target.machineId, pluginId: OMP_PLUGIN_ID }));
+      f.ctx.jobs.describeDeployment = async () => deployment;
+      const reviewDigest = await reviewDigestOf(f.client, session);
+      const omp = deployment.installation!.machine.tools!.omp![platform]!;
+      if (drift === "missing") delete omp.fileGroups;
+      else if (drift === "source") omp.fileGroups![0]!.artifact.sha256 = "f".repeat(64);
+      else if (drift === "member") omp.fileGroups![0]!.artifact.files!["file-0"]!.sha256 = "f".repeat(64);
+      else omp.fileGroups![0]!.target = ["other-grammars"];
+      expect(await f.client.call("reviewSession", session)).toEqual({ refused: "omp_resources_changed" });
+      expect(await f.client.call("runSession", { ...session, reviewDigest })).toEqual({ refused: "omp_resources_changed" });
+      expect(f.posted).toEqual([]);
+    });
   }
 }
 

@@ -15,10 +15,12 @@ import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 type Receipt = { ok: boolean; code?: string };
+const publishedAssets = process.argv.length === 3 && process.argv[2] === "--published-assets";
 const success = {
   ok: true,
   family: "atyrode.omp",
   verification: "standalone-native-and-packaged-worker-boundaries",
+  sourceAssets: publishedAssets ? "published-versioned-https-sha256" : "owned-prepared-source-bytes",
 } as const;
 class VerificationFailure extends Error {
   constructor(readonly code: string) {
@@ -162,6 +164,7 @@ async function delegated(): Promise<void> {
       "--no-env-file",
       "--no-install",
       fileURLToPath(import.meta.url),
+      ...(publishedAssets ? ["--published-assets"] : []),
     ];
     safeToRemove = false;
     const child = Bun.spawn(command, {
@@ -340,9 +343,10 @@ async function isolated(): Promise<void> {
       [
         "--user", "--map-root-user", "--mount", "--propagation", "private",
         busybox, "sh", "-eu", "-c",
-        '"$1" mount -t tmpfs -o size=1048576,nr_inodes=4096,mode=0700 tmpfs "$2"; exec "$3" --no-env-file --no-install "$4"',
+        '"$1" mount -t tmpfs -o size=1048576,nr_inodes=4096,mode=0700 tmpfs "$2"; interpreter="$3"; verifier="$4"; shift 4; exec "$interpreter" --no-env-file --no-install "$verifier" "$@"',
         "omp-output-fixture", busybox, join(root, "runtime"), process.execPath,
         fileURLToPath(new URL("./verify-native.ts", import.meta.url)),
+        ...(publishedAssets ? ["--published-assets"] : []),
       ],
       {
         cwd: join(root, "cwd"),
@@ -438,6 +442,7 @@ async function isolated(): Promise<void> {
 }
 
 try {
+  check(process.argv.length === 2 || publishedAssets, "invalid-verification-arguments");
   const consumerModule = process.env.OMP_VERIFY_CONSUMER_MODULE;
   check(consumerModule === undefined || (isAbsolute(consumerModule) && consumerModule.endsWith(".ts")), "invalid-consumer-module");
   const expectedSums = process.env.OMP_VERIFY_EXPECTED_SUMS;

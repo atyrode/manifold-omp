@@ -37,6 +37,7 @@ import rootManifest from "../atyrode.omp/manifest.json";
 import accountsManifest from "../atyrode.omp/accounts/manifest.json";
 import gatewayManifest from "../atyrode.omp/gateway/manifest.json";
 import runtimeArtifacts from "../runtime-artifacts.json";
+import { ompRuntimeTools } from "../runtime-assets.ts";
 
 const target = { containerId: "fixture-room", machineId: "fixture-machine" };
 const pins = {
@@ -54,7 +55,7 @@ function fixture(pluginId: string) {
         : rootManifest;
   // A packed accounts installation carries the reviewed runtime tools the broker runs with.
   const machine = MachineHalfSchema.parse(pluginId === ACCOUNTS_PLUGIN_ID
-    ? { ...manifest.machine, tools: { "pi-natives": runtimeArtifacts.tools["pi-natives"], omp: runtimeArtifacts.tools.omp } }
+    ? { ...manifest.machine, tools: { "pi-natives": runtimeArtifacts.tools["pi-natives"], omp: ompRuntimeTools } }
     : manifest.machine);
   const consents: {
     node: string;
@@ -971,6 +972,20 @@ test("promotion refuses an accounts installation retained from an older runtime 
     containerId: target.containerId, expectedBrokerRevision, reviewDigest: review.reviewDigest,
   })).toEqual({ revision: "promoted-broker" });
 });
+
+for (const platform of ["linux-x64", "linux-arm64"] as const) {
+  test(`promotion refuses an accounts runtime missing its ${platform} grammar group`, async () => {
+    const f = fixture(ACCOUNTS_PLUGIN_ID);
+    delete f.machine.tools!.omp![platform]!.fileGroups;
+    const expectedBrokerRevision = f.broker.configuration.revision;
+    expect(await f.client.call("reviewAccountRuntime", { expectedBrokerRevision }))
+      .toEqual({ refused: "omp_account_runtime_outdated" });
+    expect(await f.client.call("promoteAccountRuntime", {
+      containerId: target.containerId, expectedBrokerRevision, reviewDigest: "a".repeat(64),
+    })).toEqual({ refused: "omp_account_runtime_outdated" });
+    expect(f.effects).toEqual([]);
+  });
+}
 
 test("a gateway is not admitted against a broker policy promoted by an older version", async () => {
   const f = fixture(GATEWAY_PLUGIN_ID);

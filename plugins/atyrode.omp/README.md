@@ -197,7 +197,7 @@ ends at OMP's `tool_execution_start` marker for that call, which claims no outco
 
 Upgrade the compatible Manifold host first, then the exact native source, then any
 Code consumer pin. This contract requires the declared `MANIFOLD_REV` host's protocol
-59 and hardened worker contract 13 support, with the independently packaged SDK host 18.20.0.
+60, native owner 46 and hardened worker contract 14 support, with the independently packaged SDK host 18.20.0 and its complete declared grammar group.
 Disposable unpaid native and compiled-SDK proofs do not establish live deployment,
 provider spending, fleet installation or the independently tracked material-only mode.
 
@@ -312,23 +312,14 @@ Any copy forked from this store keeps its custody id: a restored backup, or a co
 
 ## Repository gate
 
-The SDK pin and reusable workflow reference advance together. The pin, Manifold
-`a7c2237b` ([atyrode/manifold#1091](https://github.com/atyrode/manifold/pull/1091)), runs the
-reusable workflow on Bun 1.4.4 and stamps every packed bundle
-`builtAgainst["manifold:protocol"] = "59"` under hardened contract 13, the contract that adds the
-harness `resolveModel`. Protocol 59 arrived at Manifold `40d1f7c6`
-([atyrode/manifold#1088](https://github.com/atyrode/manifold/pull/1088), release v0.36.0) and
-changes only first-party terminal image admission, not a plugin call signature. A protocol 59
-host admits bundles stamped 57 or 59, but a protocol 57 host admits only 57, so these bundles
-need a hub at Manifold `40d1f7c6` or later: upgrade the hub first. The three bundles are replaced
-together with the host; no earlier stamp is retained. The local native gate below still has to
-prove the newly packed family, not just the host.
+The SDK pin in `plugins/MANIFOLD_REV` and the reusable workflow reference advance together, using only a merged Manifold source revision and Bun **1.4.4**. Family **0.4.0** requires protocol **60**, native owner **46** and hardened contract **14** for explicit managed artifact file groups. Upgrade both hub and native owner before admitting the family; older transports or owners must refuse its grouped declarations, not discard their companion files. All three bundles carry the current protocol stamp and are replaced together. The local native gate below must prove the newly packed family, not just the host.
 
 Use Bun **1.4.4** and a clean sibling `manifold` checkout at the revision in `plugins/MANIFOLD_REV`. From `plugins/`:
 
 ```sh
 bun install --frozen-lockfile
 bun run deps:prepare
+python3 scripts/prepare-grammar-assets.py
 bun run check
 bun test
 bun run pack
@@ -344,22 +335,31 @@ OMP_VERIFY_SYSTEMD_MODE=user bun run verify
 
 Verify packs the family again inside that unit and proves the bundles it packed. It requires `OMP_VERIFY_EXPECTED_SUMS`, an absolute path to the `SHA256SUMS` of the pack being published: it freezes that file and refuses with `packed-family-differs-from-release` unless its own pack reproduces it byte for byte, so the bundles in `dist/` are the bundles proven. Without it, verify refuses with `invalid-expected-sums` before any work. Hosted CI packs and verifies this way on every change.
 
+The default source gate acquires the actual locally produced SDK-host and grammar archives through Manifold's trusted constructor-only prepared-archive seam, with the same declared HTTPS URLs, SHA-256, member bounds, authority and custody checks. Its provenance is **owned-prepared-source-bytes**, not a download from the future release. No environment, RPC, plugin input or production CLI staging switch can inject this map. After publication, `bun run verify --published-assets` uses normal HTTPS acquisition without a prepared map and disposable owner state; that separate proof establishes the published release bytes.
+
 ## Releases
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`. Tag `v<version>` on a commit `main` has, where `<version>` is the version the three family manifests and the root `package.json` carry. The workflow refuses any other tag before the gate runs.
 
-The `bundles` job checks out the tagged commit beside Manifold at `plugins/MANIFOLD_REV` and runs the gate above with Bun 1.4.4 on the CI fixtures, as hosted CI does: frozen installs, Manifold's real machine-jobs proof, dependency preparation, both typechecks, `bun test`, `bun run pack`, then `scripts/verify.ts` bound to the packed `SHA256SUMS` and installing the public API from GitHub at the tagged commit. This job can only read the repository.
+Release publication has four ordered phases:
 
-The `release` job is the only one granted `contents: write`, and it runs no repository code. It requires `SHA256SUMS` to verify and to name exactly the packed bundles, every bundle's `manifest.version` to equal the tag's version, and the tag to still name the commit `bundles` built. It then runs `gh release create <tag> --verify-tag --generate-notes` with four assets:
+1. A read-only source-proof job checks out the tagged commit beside the merged Manifold pin and runs the hosted gate: frozen installs, real machine-jobs proof, dependency and grammar preparation, both typechecks, the full test suite, packing, and native verification against the exact `SHA256SUMS` and public GitHub source commit. The two future release assets use the actual producer-owned bytes described above.
+2. A write-only publication job runs no repository code. It verifies the checksums, the exact five-file output set, all three manifest versions and the unchanged tag commit; it creates a draft, uploads every asset, then publishes it as a prerelease.
+3. A separate read-only job downloads the versioned public HTTPS assets, checks their sizes and SHA-256 values, and runs the public-consumer/native proof without prepared archives or a reused owner cache.
+4. Only successful public proof permits the final write-only job to mark the release stable/latest. It runs no repository code.
+
+The release has six assets:
 
 - `atyrode.omp.manifold-plugin.json`
 - `atyrode.omp.accounts.manifold-plugin.json`
 - `atyrode.omp.gateway.manifold-plugin.json`
-- `SHA256SUMS`, which lists the three in installation order: parent, accounts, gateway.
+- `omp-sdkHost.tar.gz`
+- `omp-grammars-v1.tar.gz`
+- `SHA256SUMS`, covering all five files; the plugin installation order remains parent, accounts, gateway.
 
-`native-requirements.json` is a pack report and is not attached. The workflow installs nothing on any hub. A refused tag, failed gate or failed check creates no release. Re-run the failed jobs of a transient failure; anything that needs a fix is released under a new tag, because a pushed tag is never moved.
+`native-requirements.json` is a pack report and is not attached. No phase installs anything on a hub. A failed source gate creates no release; a failed public proof leaves the prerelease unpromoted for diagnosis. Tags are never moved, assets are never clobbered and failed releases are not deleted as a retry mechanism. A source fix needs a new version/tag. Exact versioned URLs, measured hashes and checked sizes provide consumer integrity; this workflow does not assert GitHub-enforced release immutability or change repository security settings. GitHub permits prerelease/latest changes even for an immutable release ([upstream contract](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases)).
 
-Publication is not activation. A compatible protocol-59 hub and native owner must admit all three versioned bundles in parent/accounts/gateway order, with the release's `SHA256SUMS` checked first. Native plugin update and machine deployment require their own reviewed revisions, resource bindings and consents; changed native declarations cannot replace an enabled installation. After the current accounts runtime is installed, call `atyrode.omp.accounts.reviewAccountRuntime({ expectedBrokerRevision })`, then `promoteAccountRuntime({ containerId, expectedBrokerRevision, reviewDigest })` with that unchanged review. Omit `clientAccess` to preserve the installed client-access policy. Promotion rebinds the instance service to the current native runtime over the same credential store; do not purge, replace or recreate the store. Its custody id, credential ids and account scopes survive that promotion. Reconfigure an existing gateway only through its separate reviewed policy boundary. A separately released Code consumer must also update its GitHub source pin; neither this tag nor a local standalone CLI update changes that consumer or deploys native plugins.
+Publication is not activation. A compatible protocol-60 hub and native owner 46 must admit all three versioned bundles in parent/accounts/gateway order, with the release's `SHA256SUMS` checked first. Native plugin update and machine deployment require their own reviewed revisions, resource bindings and consents; changed native declarations cannot replace an enabled installation. After the current accounts runtime is installed, call `atyrode.omp.accounts.reviewAccountRuntime({ expectedBrokerRevision })`, then `promoteAccountRuntime({ containerId, expectedBrokerRevision, reviewDigest })` with that unchanged review. Omit `clientAccess` to preserve the installed client-access policy. Promotion rebinds the instance service to the current native runtime over the same credential store; do not purge, replace or recreate the store. Its custody id, credential ids and account scopes survive that promotion. Reconfigure an existing gateway only through its separate reviewed policy boundary. A separately released Code consumer must also update its GitHub source pin; neither this tag nor a local standalone CLI update changes that consumer or deploys native plugins.
 
 ## Published SDK packaging
 
@@ -375,7 +375,7 @@ The retained patch preserves broker quiesce and refresher stop/join, detached re
 
 The separately invoked `sdkHost` uses unpatched published **18.20.0**, under the independent `plugins/sdk-host/` package and frozen lock. Stock print and RPC implementations are public deep exports from `@oh-my-pi/pi-coding-agent`. Its TUI kinds retain `tuiTranscript` and opt into auto-title; print/RPC do neither. Explicit optional peer imports remain closed by `proxy-agent@8.0.1`, `supports-color@7.2.0` and `yauzl@3.4.0`; the PAC dependency stays pinned to `quickjs-wasi@2.2.0`. This graph has no `patchedDependencies`; any such declaration refuses preparation.
 
-`bun run deps:prepare` prepares both graphs independently with Bun 1.4.4, fresh caches, frozen locks, disabled lifecycle scripts, and private copied dependency trees. Each graph owns its full-tree receipt, lock pin, SDK version, loader digest and native artifact identity. Cross-graph receipt reuse, dependency escape and installed-byte changes refuse packaging. There is no workspace hoisting between roots. Packaging is install-free and credential-free; it reads only prepared trees, owned sources and committed runtime data. The baseline and SDK-host compiler projects resolve their respective actual package graphs; SDK-only type paths are scoped to the SDK project, never global aliases.
+`bun run deps:prepare` prepares both graphs independently with Bun 1.4.4, fresh caches, frozen locks, disabled lifecycle scripts, and private copied dependency trees. Each graph owns its full-tree receipt, lock pin, SDK version, loader digest and native artifact identity. Cross-graph receipt reuse, dependency escape and installed-byte changes refuse packaging. There is no workspace hoisting between roots. Packaging is install-free and credential-free; it reads prepared trees, owned sources, committed runtime data and the separately prepared grammar archive verified against its committed SHA-256, exact bounds and member metadata. Preparation may fetch the pinned grammar inputs; packing performs no grammar download or runtime extraction. The baseline and SDK-host compiler projects resolve their respective actual package graphs; SDK-only type paths are scoped to the SDK project, never global aliases.
 
 Worker compilation uses whitespace compaction without syntax or identifier minification. A matching SDK pin does not waive byte equality: the package regression rebuilds from a private dependency copy and a separate process, compares every published byte, and reports the first differing SDK-host source span when an archive changes. Disabling only identifier minification did not hold that boundary under the protocol-48 SDK; both optional transformations remain off. Native declarations and the final artifact-size budgets still apply unchanged.
 
@@ -397,13 +397,13 @@ Native pins are derived from the published npm version metadata's `dist.tarball`
 
 This execution refresh intentionally retains the existing Certifi **2026.1.4** CA data pin. Its [PyPI advisory metadata](https://pypi.org/pypi/certifi/2026.1.4/json) reports [GHSA-6q48-6c7w-9gw2 / PYSEC-2026-4320](https://osv.dev/vulnerability/GHSA-6q48-6c7w-9gw2): an affected trusted emSign root can enable on-path TLS impersonation with compromised intermediate keys. Upstream removed the affected roots in 2026.10.18 and recommends 2026.10.19 or later. This inherited trust-store risk is not remediated by upgrading the OMP execution graphs.
 
-Every embedded worker, asset and notice counts toward the existing **16 MiB aggregate base64 limit**, with duplicate asset rejection and final plugin JSON verification before atomic publication. Arbitrary-cwd packaging remains supported. Successful packaging alone does not establish optional browser/PAC/ML execution, ARM64 runtime behavior or end-to-end native admission; the credential gate and packaged SDK-host strict-refusal proof must both pass.
+Every embedded worker, asset and notice counts toward the existing **16 MiB aggregate base64 limit**, with duplicate asset rejection and final plugin JSON verification before atomic publication. The complete SDK-host archive and grammar archive are external, versioned HTTPS release assets with exact SHA-256 and size bounds, not embedded base64 or committed compiled binaries. Pack atomically emits the three bundles and both archives, covered by one `SHA256SUMS`. Arbitrary-cwd packaging remains supported. Successful packaging alone does not establish optional browser/PAC/ML execution, ARM64 runtime behavior or end-to-end native admission; the credential gate and packaged SDK-host native proof must both pass.
 
 Credential SDK updates require the preserved authority scenarios (ingress, mutation ordering, restart, quiesce, shutdown) to pass against the private patch. The patch is not ported to the published SDK-host graph.
 
-### Prepared grammar source asset (not a runtime cutover)
+### Offline grammar runtime asset
 
-`plugins/runtime-data/omp-grammar-assets-v1/grammars-v1.tar.gz` contains all **39** WASM grammars named by OMP **18.20.0**'s published registry, plus the complete, byte-identical `stencil-hq/wasm-grammars` **v1** `manifest.json` and `THIRD-PARTY-NOTICES.txt`. It has **41** sorted flat regular-file members, fixed USTAR ownership/mode/timestamps and a fixed gzip header. Its SHA-256 is `6fd35e6dc87b51c8acc91f1fbe38eec83fb93800dd42e3323ced9d4191039bb3`; the exact archive and complete expanded tar bounds are **6,002,768** and **84,224,000** bytes. `grammars-v1.json` records every member's size/SHA-256, the complete tar hash and exact member/payload counts.
+The generated, ignored `plugins/.runtime-cache/omp-grammar-assets-v1/grammars-v1.tar.gz` contains all **39** WASM grammars named by OMP **18.20.0**'s published registry, plus the complete, byte-identical `stencil-hq/wasm-grammars` **v1** `manifest.json` and `THIRD-PARTY-NOTICES.txt`. It has **41** sorted flat regular-file members, fixed USTAR ownership/mode/timestamps and a fixed gzip header. Its SHA-256 is `6fd35e6dc87b51c8acc91f1fbe38eec83fb93800dd42e3323ced9d4191039bb3`; the exact archive and complete expanded tar bounds are **6,002,768** and **84,224,000** bytes. The reviewed `plugins/runtime-data/omp-grammar-assets-v1/grammars-v1.json` records every member's size/SHA-256, the complete tar hash and exact member/payload counts. Neither this archive nor the compiled SDK-host archive is tracked in Git.
 
 The adjacent `sources.json` pins every compressed and decompressed grammar, the publisher manifest/notices, and the registry at its published OMP commit. It preserves the publisher's missing-license-file statements and license-heading/text discrepancies rather than asserting one uniform license or inventing notices. It also records independent hashes of the existing certifi **2026.1.4** wheel's PEM/license entries; that wheel, the CA pins and CA content are unchanged and are not included in the grammar archive.
 
@@ -413,6 +413,8 @@ From the repository root, a maintainer can reproduce into a separate directory:
 python3 plugins/scripts/prepare-grammar-assets.py --output-dir /tmp/omp-grammars-reproduced
 ```
 
-The reproducer requires Python **3.14.7** with zlib **1.3.2** for the exact gzip bytes and a host `zstd` decompressor (prepared with **1.5.7**). It downloads only the exact size/SHA-256-pinned public inputs into a temporary source cache, verifies both compressed and decompressed hashes and complete registry/manifest membership, and refuses output drift against the reviewed metadata. For offline reproduction, add `--offline --cache-dir /path/to/source-cache`; cache files are named `<sha256>-<source file>` using `sources.json`. No downloaded code or WASM is executed.
+The reproducer uses Python **3** and a host `zstd` decompressor; the tool versions in `sources.json` describe the original measurement, not mandatory host upgrades. It downloads only exact size/SHA-256-pinned public inputs into a temporary source cache, verifies both compressed and decompressed hashes and complete registry/manifest membership, and refuses any archive or metadata byte drift before atomic output. For offline reproduction, add `--offline --cache-dir /path/to/source-cache`; cache files are named `<sha256>-<source file>` using `sources.json`. No downloaded code or WASM is executed by preparation.
 
-This archive is not referenced by a runtime declaration or embedded by the packer. This prerequisite changes no family version, SDK graph, lock, patch or runtime execution graph; the existing CLI/SDK-host versions described above remain intentional. It supplies source bytes for a separately reviewed managed-artifact-group and same-family release-asset integration, not a published download URL, runtime extraction path, deployment or complete compatibility claim.
+The existing `omp` managed alias retains the unchanged official CLI executable and adds one explicit read-only file group at `/runtime/bin/omp-grammars`. The group exposes exactly the manifest, notices and 39 reviewed hash-named WASM files; there are no implicit archive members, extra aliases or owner system/development resources. The SDK loader configures that fixed directory. The stock CLI gets an owned writable `PI_NATIVES_DIR=/tmp/omp-native` with a fixed `grammars` symlink to the same read-only directory, preserving its existing embedded native-addon extraction without extracting grammars at runtime. Both native loading and SDK summary/highlighting resolve the same physical grammar subtree. Material sessions add only the existing `omp` alias to their six former runtime aliases; their executable, empty model-tool registry and lack of delegation authority remain unchanged.
+
+The native gate must exercise actual offline grammar loading, AST matching, read summaries and highlighting in both the stock CLI and independent SDK paths, including all 39 languages and representative Nix/SQL/Vue operations. Registry availability alone is not compatibility proof. Source preparation, release publication and these disposable no-provider fixtures perform no live deployment or operator-controlled storage migration.

@@ -1033,7 +1033,7 @@
           "SSL_CERT_FILE": "/runtime/bin/ca-certificates",
           "GIT_SSL_CAINFO": "/runtime/bin/ca-certificates"
         },
-        "runtimeTools": ["bun", "ca-certificates", "system", "harness", "sdkHost", "sdk-pi-natives"],
+        "runtimeTools": ["omp", "bun", "ca-certificates", "system", "harness", "sdkHost", "sdk-pi-natives"],
         "executable": { "runtimeTool": "bun" },
         "inputFiles": {
           "models": {

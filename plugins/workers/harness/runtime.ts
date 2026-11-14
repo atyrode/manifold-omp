@@ -7,7 +7,7 @@ import { ActionRunner } from "@manifold/sdk";
 import type { WorkerContext } from "@manifold/sdk/worker";
 import type { ActionRunnerResponse } from "@manifold/protocol";
 import { z } from "zod";
-import { probeChildEnvironment } from "../probe/inputs.ts";
+import { prepareOmpNativeDirectory, probeChildEnvironment } from "../probe/inputs.ts";
 import { openSessionsRoot, prepareSessionFile, SESSIONS_ROOT, SessionIdSchema } from "./sessions.ts";
 import { OmpRpcActivity, OmpSendInputSchema, rpcFrames, RPC_FRAME_BYTES } from "./rpc.ts";
 import { ADMISSION_CONTEXT_BYTES, writeAdmissionContext, type AdmissionContextFile } from "./admission.ts";
@@ -72,6 +72,7 @@ function inputText(name: "sessionId" | "prompt" | "lease", limit: number): strin
 export async function runOmpResume(signal: AbortSignal): Promise<boolean> {
   if (signal.aborted) throw new Error("harness_cancelled");
   validateSkillInputs();
+  prepareOmpNativeDirectory();
   const sessionId = SessionIdSchema.parse(inputText("sessionId", 36));
   const root = openSessionsRoot();
   let sessionFile: string;
@@ -108,6 +109,7 @@ export async function runOmpNative(context: WorkerContext): Promise<boolean> {
   const reportProgress: ReportOmpProgress = progress => context.reportProgress(progress);
   const skills = validateSkillInputs();
   if (signal.aborted) throw new Error("harness_cancelled");
+  prepareOmpNativeDirectory();
   const separator = process.argv.indexOf("--", 3);
   const options = process.argv.slice(3, separator < 0 ? undefined : separator);
   const print = options.includes("-p");
@@ -187,7 +189,7 @@ export async function runOmpNative(context: WorkerContext): Promise<boolean> {
       clearTimeout(timeout);
     }
   }
-  const environment = { ...process.env };
+  const environment = { ...process.env, PI_NATIVES_DIR: "/tmp/omp-native" };
   for (const name of Object.keys(environment)) if (name.startsWith("MANIFOLD_")) delete environment[name];
   const child = spawn("/runtime/bin/omp", [...(sessionFile ? ["--session", `${SESSIONS_ROOT}/${sessionFile}`] : []), ...process.argv.slice(3)], {
     cwd: "/home/job/workspace", env: environment, stdio: print ? ["inherit", "pipe", "inherit"] : "inherit",
@@ -218,6 +220,7 @@ export async function runOmpNative(context: WorkerContext): Promise<boolean> {
  * nor the private control descriptor; its only host boundary is the RPC pipe. */
 export async function runOmpHarness(context: WorkerContext): Promise<boolean> {
   const { signal } = context;
+  prepareOmpNativeDirectory();
   const skills = validateSkillInputs();
   if (skills.mode !== "preserve" && process.argv.includes("--plan-yolo")) throw new Error("omp_skills_plan_unsupported");
   const automation = readAutomation();
@@ -455,6 +458,7 @@ export async function runOmpHarness(context: WorkerContext): Promise<boolean> {
  */
 export async function runOmpHarnessTui(context: WorkerContext): Promise<boolean> {
   const { signal } = context;
+  prepareOmpNativeDirectory();
   validateSkillInputs();
   if (process.argv.includes("--plan-yolo")) throw new Error("omp_tui_plan_unsupported");
   const automation = readAutomation();
