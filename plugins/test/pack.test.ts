@@ -119,7 +119,7 @@ for (const destinationKind of ["default", "caller"] as const) {
         const sourceBytes = await readFile(entrypoint);
         try {
           await writeFile(entrypoint, "export const invalid = ;\n");
-          await expect(fixturePack(destinationKind === "default" ? undefined : destination)).rejects.toThrow();
+          await expect(fixturePack(destinationKind === "default" ? undefined : destination)).rejects.toMatchObject({ cause: expect.anything() });
           expect(await snapshot(destination)).toEqual(previous);
         } finally {
           await writeFile(entrypoint, sourceBytes);

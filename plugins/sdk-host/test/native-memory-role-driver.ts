@@ -72,7 +72,7 @@ const requests: {
   model: string;
   api: string;
   context: Context;
-  options: Pick<SimpleStreamOptions, "reasoning" | "disableReasoning" | "maxTokens" | "temperature" | "thinkingBudgets">;
+  options: { [K in "reasoning" | "disableReasoning" | "maxTokens" | "temperature" | "thinkingBudgets"]: SimpleStreamOptions[K] };
   syntheticKey: boolean;
   hasSessionId: boolean;
 }[] = [];
