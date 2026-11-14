@@ -245,6 +245,32 @@ export function missingNativeExportMessage(symbolName) {
   return "@oh-my-pi/pi-natives export " + symbolName + " is missing from " + path;
 }
 `;
+
+/** Preserve the host SDK's published diagnostics and release validation helpers.
+ * Only its final acquisition function changes: no host/cache discovery or extraction.
+ * The complete source is hash-pinned before this adapter runs.
+ */
+function pinnedSdkHostLoader(graph: DependencyGraph, source: string): string {
+  const acquisition = "export function loadNative() {";
+  const start = source.indexOf(acquisition);
+  if (start < 0 || start !== source.lastIndexOf(acquisition))
+    throw new Error("Published native acquisition adapter no longer matches exactly once");
+  return `${source.slice(0, start)}
+let pinnedBindings;
+export function loadNative() {
+  if (pinnedBindings) return pinnedBindings;
+  const candidate = ${JSON.stringify(`/runtime/bin/${graph.nativeAlias}`)};
+  const ctx = { packageVersion: packageJson.version, isWorkspaceLoad: false };
+  const module = { exports: {} };
+  process.dlopen(module, candidate);
+  validateLoadedBindings(ctx, module.exports, candidate);
+  installNativeTokioRuntime(module.exports);
+  loadedAddon = describeLoadedAddon(module.exports, candidate, ctx);
+  pinnedBindings = module.exports;
+  return pinnedBindings;
+}
+`;
+}
 /** Reviewed `pi-natives/native/path.js` bytes: pi-utils' path normalization imports it, and it
  * loads the addon only when `process.platform === "win32"`, a platform no worker targets. */
 const windowsOnlyNativeSha256 = "716fe783105dc03fc5deaab32a4f0470ba366e663ae77de42c5760144855bf99";
@@ -474,7 +500,8 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
     const quickjsModule = quickjs ? await realpath(join(quickjs, "dist/index.js")) : undefined;
     const nativePackage = await packageRoot(graph, "@oh-my-pi/pi-natives");
     const nativeLoader = await realpath(join(nativePackage, "native/loader-state.js"));
-    if (hash(await readFile(nativeLoader)) !== graph.loaderSha256) throw new Error(`Unreviewed native SDK loader bytes: ${graphName}`);
+    const nativeLoaderBytes = await readFile(nativeLoader);
+    if (hash(nativeLoaderBytes) !== graph.loaderSha256) throw new Error(`Unreviewed native SDK loader bytes: ${graphName}`);
     const importedFiles = new Set<string>();
     let usesNative = false;
     const assets = new Map<string, Buffer>();
@@ -514,7 +541,7 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
           importedFiles.add(path);
           if (path === nativeLoader) {
             usesNative = true;
-            return { contents: pinnedLoader(graph), loader: "js" };
+            return { contents: graphName === "sdkHost" ? pinnedSdkHostLoader(graph, nativeLoaderBytes.toString("utf8")) : pinnedLoader(graph), loader: "js" };
           }
           if (quickjs && path === quickjsModule) {
             const asset = `${name}-assets/quickjs.wasm`;
