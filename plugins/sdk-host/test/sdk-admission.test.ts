@@ -13,6 +13,7 @@ import {
 import { CHAT_MODEL_ROLE_IDS } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveRoleModelFull } from "@oh-my-pi/pi-coding-agent/session/role-models";
+import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionMaintenance, type SessionMaintenanceHost } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { loadBundledAgents } from "@oh-my-pi/pi-coding-agent/task/agents";
@@ -79,6 +80,55 @@ test("resume refuses missing, unavailable, unauthenticated and incompatible stat
     expect(() => admitSdkSession(registry, manager, defaults, undefined)).toThrow("omp_resume_model_unavailable");
   } finally { await manager.close(); }
 });
+
+for (const laterThinking of [undefined, "low", "high"] as const) {
+  test(laterThinking === undefined
+    ? "saved-session resume restores primary medium thinking after a retry fallback's high suffix"
+    : `saved-session resume preserves later explicit ${laterThinking} thinking after a retry fallback`, async () => {
+    const thinking = getBundledModel("openai", "gpt-5").thinking;
+    if (thinking === undefined || !thinking.efforts.includes("low") ||
+      !thinking.efforts.includes("medium") || !thinking.efforts.includes("high"))
+      throw new Error("retry_fallback_fixture_requires_controllable_effort_metadata");
+    const primary = buildModel({ ...model, reasoning: true, thinking });
+    const fallback = buildModel({ ...replacement, reasoning: true, thinking });
+    const available = [primary, fallback];
+    const catalog = {
+      find: (provider: string, id: string) => available.find(candidate => candidate.provider === provider && candidate.id === id),
+      getAll: () => available, getAvailable: () => available, hasConfiguredAuth: () => true,
+    };
+    const selectedFallback = resolveModelOverride(["fixture/replacement:high"], catalog);
+    expect(selectedFallback).toMatchObject({ model: fallback, thinkingLevel: "high", explicitThinkingLevel: true });
+    const defaults = { modelRoles: { default: "fixture/saved:medium" }, defaultThinkingLevel: "high" as const };
+    const root = mkdtempSync(join(tmpdir(), "saved-retry-fallback-"));
+    const sessions = join(root, "sessions");
+    try {
+      const manager = SessionManager.create(root, sessions);
+      const file = manager.getSessionFile()!;
+      try {
+        manager.appendModelChange("fixture/saved");
+        manager.appendThinkingLevelChange("medium", "medium");
+        // Upstream #19273: retry recovery records the suffix separately, immediately after
+        // a model change marked as an ephemeral, resolved retry fallback.
+        manager.appendModelChange("fixture/replacement", EPHEMERAL_MODEL_CHANGE_ROLE, true);
+        manager.appendThinkingLevelChange(selectedFallback.thinkingLevel, selectedFallback.thinkingLevel);
+        if (laterThinking !== undefined) {
+          // A later user change supersedes the hop. Re-selecting high after low also records
+          // a real change, rather than inventing an unchanged high selection upstream omits.
+          manager.appendThinkingLevelChange("low", "low");
+          if (laterThinking === "high") manager.appendThinkingLevelChange("high", "high");
+        }
+        // Persist a metadata-only fixture without requiring any provider turn.
+        await manager.ensureOnDisk();
+        await manager.flush();
+      } finally { await manager.close(); }
+      const resumed = await SessionManager.open(file, sessions, undefined, { throwIfMissing: true });
+      try {
+        expect(admitSdkSession(catalog, resumed, defaults, undefined))
+          .toEqual({ model: primary, thinkingLevel: laterThinking ?? "medium" });
+      } finally { await resumed.close(); }
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+}
 
 test("off and auto remain explicit selectors without inventing reasoning capability", async () => {
   const plain = getBundledModel("openai", "gpt-4.1");

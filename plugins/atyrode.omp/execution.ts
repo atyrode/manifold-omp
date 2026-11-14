@@ -740,7 +740,7 @@ function supportsSdkRuntime(machine: MachineHalf | undefined, operationId: strin
       bun?.sha256 !== sdkRuntimeArtifacts.tools.bun[platform].sha256 ||
       bun.entrySha256 !== sdkRuntimeArtifacts.tools.bun[platform].entrySha256) return false;
   }
-  return sdkRuntimeArtifacts.sdkVersion === "18.20.0" &&
+  return sdkRuntimeArtifacts.sdkVersion === "18.20.1" &&
     operation?.executable?.runtimeTool === "bun" &&
     operation?.input.automation !== undefined && operation.input.resumeOverrides !== undefined &&
     operation.runtimeTools?.includes("omp") === true &&

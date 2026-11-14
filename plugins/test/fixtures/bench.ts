@@ -5,7 +5,7 @@ import { OMP_VERSION, parseBenchmarkObservation, type BenchmarkReceipt, type Pro
  * What `omp bench` reports of one failed run: the error event's `errorMessage`, or a thrown
  * failure's message, and nothing else. Status, `errorId` and provider never reach the report,
  * so this one string is all the probe can classify. The stream/final/thrown error projection
- * matches OMP v18.20.0 `runBenchRequest` in `packages/coding-agent/src/cli/bench-cli.ts`.
+ * matches OMP v18.20.1 `runBenchRequest` in `packages/coding-agent/src/cli/bench-cli.ts`.
  * This fixture does not reproduce the benchmark scheduler or assert byte-identical SDK clients.
  */
 export async function benchFailure(stream: AssistantMessageEventStream): Promise<string | null> {

@@ -88,7 +88,7 @@ const shared = OverlaySchema.parse({
     smol: "anthropic/claude-haiku-5-5:medium", slow: "anthropic/claude-sonnet-5-5:high" },
 });
 const roles = pinnedModelRoles({ ...shared.modelRoles, default: shared.modelRoles!.default! });
-if (OMP_VERSION !== "18.20.0" || roles.task !== shared.modelRoles!.task || roles.smol !== shared.modelRoles!.smol ||
+if (OMP_VERSION !== "18.20.1" || roles.task !== shared.modelRoles!.task || roles.smol !== shared.modelRoles!.smol ||
     roles.slow !== shared.modelRoles!.slow || roles.widget !== roles.default) throw new Error("invalid shared native routing");
 if (OverlaySchema.safeParse({ task: { agentModelOverrides: { scout: "anthropic/claude-haiku-5-5" } } }).success)
   throw new Error("named-agent routing admitted");

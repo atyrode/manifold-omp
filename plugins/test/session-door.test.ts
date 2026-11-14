@@ -967,7 +967,7 @@ test("a one-shot holds every model role its configuration leaves unset to the co
   const job = await f.client.call("runSession", { ...advised, reviewDigest });
   if ("refused" in job) throw new Error(job.refused);
   const roles: Record<string, string> = JSON.parse(String(f.posted[0]!.input.config)).modelRoles;
-  // Native shared chat roles in both OMP 18.20.0 execution graphs.
+  // Native shared chat roles in both OMP 18.20.1 execution graphs.
   for (const role of ["default", "slow", "vision", "plan", "commit", "tiny", "memory", "task", "advisor", "widget"])
     expect(roles[role]).toBe(configured);
   // A role the operator configured keeps its model.

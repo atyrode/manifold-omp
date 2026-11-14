@@ -54,7 +54,7 @@ def prepare(sources, cache, offline):
         for g in grammars
     ]
     if len(grammars) != 39 or sorted(rows) != sorted(expected_rows):
-        raise ValueError("complete published OMP 18.20.0 grammar registry mismatch")
+        raise ValueError("complete published OMP 18.20.1 grammar registry mismatch")
 
     publisher_files = {
         pin["file"]: source_bytes(pin, cache, offline) for pin in sources["publisherFiles"]

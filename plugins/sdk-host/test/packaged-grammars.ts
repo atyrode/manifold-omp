@@ -116,8 +116,8 @@ try {
         }
         check(consumers.length === 1, "actual-shipped-consumer-process");
         const maps = await readFile(`/proc/${consumers[0]}/maps`, "utf8");
-        check(sdk ? maps.includes("/runtime/bin/sdk-pi-natives") && !maps.includes("/tmp/omp-native/18.20.0/")
-          : maps.includes("/tmp/omp-native/18.20.0/") && !maps.includes("sdk-pi-natives"), "actual-consumer-addon-identity");
+        check(sdk ? maps.includes("/runtime/bin/sdk-pi-natives") && !maps.includes("/tmp/omp-native/18.20.1/")
+          : maps.includes("/tmp/omp-native/18.20.1/") && !maps.includes("sdk-pi-natives"), "actual-consumer-addon-identity");
         const environment = (await readFile(`/proc/${consumers[0]}/environ`, "utf8")).split("\0");
         check(environment.includes("PI_NATIVES_DIR=/tmp/omp-native") && !environment.some(value => value.startsWith("MANIFOLD_")), "consumer-private-environment");
         consumerInspected = true;
@@ -209,7 +209,7 @@ try {
   }
   check(!(await stat("/home/job/.omp/natives/grammars").catch(() => undefined)), "no-home-grammar-cache");
   if (!sdk) {
-    const addons = (await readdir("/tmp/omp-native/18.20.0")).filter(name => name.endsWith(".node"));
+    const addons = (await readdir("/tmp/omp-native/18.20.1")).filter(name => name.endsWith(".node"));
     check(addons.length > 0, "stock-cli-embedded-addon-extraction");
   }
   check((await readFile(`/proc/self/task/${process.pid}/children`, "utf8")).trim() === "", "child-not-reaped");

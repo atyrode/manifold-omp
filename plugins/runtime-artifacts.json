@@ -1,11 +1,11 @@
 {
   "bunVersion": "1.4.4",
-  "sdkVersion": "18.20.0",
+  "sdkVersion": "18.20.1",
   "observedOn": "2026-11-14",
   "provenance": {
     "bunRelease": "https://github.com/oven-sh/bun/releases/tag/bun-v1.4.4",
-    "ompRelease": "https://github.com/can1357/oh-my-pi/releases/tag/v18.20.0",
-    "sdkRelease": "https://github.com/can1357/oh-my-pi/releases/tag/v18.20.0",
+    "ompRelease": "https://github.com/can1357/oh-my-pi/releases/tag/v18.20.1",
+    "sdkRelease": "https://github.com/can1357/oh-my-pi/releases/tag/v18.20.1",
     "caBundle": {
       "version": "2026.1.4",
       "observedOn": "2026-09-12",
@@ -15,7 +15,7 @@
       "integrity": "Certifi version follows the pinned Manifold Nixpkgs package. The immutable Python-hosted wheel SHA-256 and byte size match PyPI release metadata; the PEM and license entry SHA-256, aggregate expanded bytes and member count were derived from those exact downloaded bytes. Only the declared data files are extracted; no Python runtime or installer is required."
     },
     "integrity": "Release asset SHA-256 and sizes checked against downloaded bytes; npm tarballs checked against registry SHA-512; selected archive entries independently SHA-256 hashed. Expanded tar limits include all headers, padding and end markers. Versioned upstream URLs are hash-pinned, not GitHub immutable-release guarantees.",
-    "licensing": "The 18.20.0 release publishes LICENSE but no THIRD-PARTY-NOTICES.txt asset. CLI JavaScript and native notices are separately sourced from the exact reviewed npm tarballs and archive entries below."
+    "licensing": "The 18.20.1 release publishes LICENSE but no THIRD-PARTY-NOTICES.txt asset. CLI JavaScript and native notices are separately sourced from the exact reviewed npm tarballs and archive entries below."
   },
   "tools": {
     "ca-certificates": {
@@ -104,42 +104,42 @@
     },
     "omp": {
       "linux-x64": {
-        "url": "https://github.com/can1357/oh-my-pi/releases/download/v18.20.0/omp-linux-x64",
-        "sha256": "c8694be8c6e6a1f45e3636dd8a8e9eaa78878ad629a89000b403ec5e456d3f89",
+        "url": "https://github.com/can1357/oh-my-pi/releases/download/v18.20.1/omp-linux-x64",
+        "sha256": "24bef5a44d6db0d8f6e8f677404b9a7f1dde3c5e500c435290a3be71bb4dec2a",
         "format": "raw",
         "entry": [
           "omp-linux-x64"
         ],
-        "entrySha256": "c8694be8c6e6a1f45e3636dd8a8e9eaa78878ad629a89000b403ec5e456d3f89",
-        "maxBytes": 287484080,
-        "maxExpandedBytes": 287484080,
+        "entrySha256": "24bef5a44d6db0d8f6e8f677404b9a7f1dde3c5e500c435290a3be71bb4dec2a",
+        "maxBytes": 288622768,
+        "maxExpandedBytes": 288622768,
         "maxMembers": 1
       },
       "linux-arm64": {
-        "url": "https://github.com/can1357/oh-my-pi/releases/download/v18.20.0/omp-linux-arm64",
-        "sha256": "8b5e197db7c58b7ebabf83c6f03597f89bae3a766a84c6481b3a942a125f5e22",
+        "url": "https://github.com/can1357/oh-my-pi/releases/download/v18.20.1/omp-linux-arm64",
+        "sha256": "21305158dbdecfa771b72a62254831d60be6b96726245877c25324a4b9988f76",
         "format": "raw",
         "entry": [
           "omp-linux-arm64"
         ],
-        "entrySha256": "8b5e197db7c58b7ebabf83c6f03597f89bae3a766a84c6481b3a942a125f5e22",
-        "maxBytes": 244435960,
-        "maxExpandedBytes": 244435960,
+        "entrySha256": "21305158dbdecfa771b72a62254831d60be6b96726245877c25324a4b9988f76",
+        "maxBytes": 245156856,
+        "maxExpandedBytes": 245156856,
         "maxMembers": 1
       }
     },
     "pi-natives": {
       "linux-x64": {
-        "url": "https://registry.npmjs.org/@oh-my-pi/pi-natives-linux-x64/-/pi-natives-linux-x64-18.20.0.tgz",
-        "sha256": "46a6be7c32082b4ae17f7bac3593a5b153453bf5c7eccec0beaa419e02cf7a7d",
+        "url": "https://registry.npmjs.org/@oh-my-pi/pi-natives-linux-x64/-/pi-natives-linux-x64-18.20.1.tgz",
+        "sha256": "7d81077e5b69b79e669c28e74b1033e7d4e92598ad9fdfab3d39de37029e9eef",
         "format": "tar.gz",
         "entry": [
           "package",
           "pi_natives.linux-x64-baseline.node"
         ],
-        "entrySha256": "f834027255aa40eccd402836e7f60b4b12c8c8f8f6ea05f8546193a1acb73872",
-        "maxBytes": 104391114,
-        "maxExpandedBytes": 258923520,
+        "entrySha256": "788747bc29ce15f6e547a324f81af3aebe967dce64af2b7ef0a4ff2723a1ea50",
+        "maxBytes": 105033384,
+        "maxExpandedBytes": 260535296,
         "maxMembers": 6,
         "files": {
           "pi-natives-license": {
@@ -167,16 +167,16 @@
         }
       },
       "linux-arm64": {
-        "url": "https://registry.npmjs.org/@oh-my-pi/pi-natives-linux-arm64/-/pi-natives-linux-arm64-18.20.0.tgz",
-        "sha256": "04abca30ff79052ad4546b02d889aab7614f6e264709c6582fad578fd633e5fc",
+        "url": "https://registry.npmjs.org/@oh-my-pi/pi-natives-linux-arm64/-/pi-natives-linux-arm64-18.20.1.tgz",
+        "sha256": "04a1406a0ac389193c9ba2b4b00cef423fda0f91467d0336a3d31854ce052c65",
         "format": "tar.gz",
         "entry": [
           "package",
           "pi_natives.linux-arm64.node"
         ],
-        "entrySha256": "8818f13af18f11fe84d5b49fd5c46148781505e71340b33dcdbfc802e8c1ce50",
-        "maxBytes": 49624506,
-        "maxExpandedBytes": 119078400,
+        "entrySha256": "f9ff97a2eb0b2e0fab0c933104f43b7d2cd2c8b541d16e737408ab8e2ebf1644",
+        "maxBytes": 49841397,
+        "maxExpandedBytes": 119517696,
         "maxMembers": 5,
         "files": {
           "pi-natives-license": {
@@ -248,9 +248,9 @@
       ]
     },
     "omp": {
-      "url": "https://github.com/can1357/oh-my-pi/releases/download/v18.20.0/omp-linux-musl-x64",
-      "sha256": "c494052338bcd8112b4a0157f34067bf542a04977c5801070c5aabb17e88948a",
-      "size": 240022952,
+      "url": "https://github.com/can1357/oh-my-pi/releases/download/v18.20.1/omp-linux-musl-x64",
+      "sha256": "5260e06f07a594b25b8f7b6543a6bda296c704084700840d778e4ac494e6812e",
+      "size": 240813480,
       "interpreter": [
         "/lib/ld-musl-x86_64.so.1"
       ],
@@ -260,9 +260,9 @@
       ]
     },
     "ompArm64": {
-      "url": "https://github.com/can1357/oh-my-pi/releases/download/v18.20.0/omp-linux-musl-arm64",
-      "sha256": "9116f0ae710ab41902fd60157f7b78913292e696723ea56a184ce0365c5cafbc",
-      "size": 236723304,
+      "url": "https://github.com/can1357/oh-my-pi/releases/download/v18.20.1/omp-linux-musl-arm64",
+      "sha256": "eb356d673aabd3041db7a77a21e3574c96f6331a74d81035633a853860b2f68e",
+      "size": 237444200,
       "interpreter": [
         "/lib/ld-musl-aarch64.so.1"
       ],
@@ -275,22 +275,22 @@
   "licenses": [
     {
       "name": "LICENSE",
-      "browser_download_url": "https://github.com/can1357/oh-my-pi/releases/download/v18.20.0/LICENSE",
+      "browser_download_url": "https://github.com/can1357/oh-my-pi/releases/download/v18.20.1/LICENSE",
       "digest": "sha256:16c45f9d667442781f03fa198914cc39abcaa48ec5ed8f644643e554ca2fbf63",
       "size": 1144
     },
     {
       "name": "THIRD-PARTY-NOTICES.txt",
-      "archive_url": "https://registry.npmjs.org/@oh-my-pi/pi-coding-agent/-/pi-coding-agent-18.20.0.tgz",
-      "archiveSha256": "5c5bc1c089197ae13d48bb3d7ba44f4d134c00fddb9ab5c928f2fb09cac78837",
+      "archive_url": "https://registry.npmjs.org/@oh-my-pi/pi-coding-agent/-/pi-coding-agent-18.20.1.tgz",
+      "archiveSha256": "2f6e6c6dcff855e15ba7138b848407a431ea4a2df5de50e6fec41b563e4b2401",
       "entry": ["package", "THIRD-PARTY-NOTICES.txt"],
       "digest": "sha256:c8bdf2c6601a5af7dc96bf6e9ad0f49c459402a7606943c9ed64c1d81760ecc2",
       "size": 73893
     },
     {
       "name": "pi-natives/THIRD-PARTY-NOTICES.txt",
-      "archive_url": "https://registry.npmjs.org/@oh-my-pi/pi-natives-linux-x64/-/pi-natives-linux-x64-18.20.0.tgz",
-      "archiveSha256": "46a6be7c32082b4ae17f7bac3593a5b153453bf5c7eccec0beaa419e02cf7a7d",
+      "archive_url": "https://registry.npmjs.org/@oh-my-pi/pi-natives-linux-x64/-/pi-natives-linux-x64-18.20.1.tgz",
+      "archiveSha256": "7d81077e5b69b79e669c28e74b1033e7d4e92598ad9fdfab3d39de37029e9eef",
       "entry": ["package", "THIRD-PARTY-NOTICES.txt"],
       "digest": "sha256:482eca08a167209b391df83e644d263867e891baab775a493cac2e19c43f1fbd",
       "size": 703782

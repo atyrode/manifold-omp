@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "purpose": "Reviewable source asset only: all 39 published OMP 18.20.0 WASM grammars and complete publisher manifest/notices. No runtime manifest, dependency graph, CA data, deployment or publication change.",
+  "purpose": "Reviewable source asset only: all 39 published OMP 18.20.1 WASM grammars and complete publisher manifest/notices. No runtime manifest, dependency graph, CA data, deployment or publication change.",
   "observedOn": "2026-11-14",
   "publisherRelease": {
     "repository": "https://github.com/stencil-hq/wasm-grammars",
@@ -14,10 +14,10 @@
   },
   "ompRegistry": {
     "file": "omp-wasm-grammars.rs",
-    "url": "https://raw.githubusercontent.com/can1357/oh-my-pi/c308970263ae13744ea15ab67302e3dac840e266/crates/pi-ast/src/language/wasm_grammars.rs",
-    "publishedTagUrl": "https://raw.githubusercontent.com/can1357/oh-my-pi/v18.20.0/crates/pi-ast/src/language/wasm_grammars.rs",
-    "tag": "v18.20.0",
-    "commit": "c308970263ae13744ea15ab67302e3dac840e266",
+    "url": "https://raw.githubusercontent.com/can1357/oh-my-pi/b7fe8c7f43c378faa0863e79f5509f9dde16ad9a/crates/pi-ast/src/language/wasm_grammars.rs",
+    "publishedTagUrl": "https://raw.githubusercontent.com/can1357/oh-my-pi/v18.20.1/crates/pi-ast/src/language/wasm_grammars.rs",
+    "tag": "v18.20.1",
+    "commit": "b7fe8c7f43c378faa0863e79f5509f9dde16ad9a",
     "size": 8819,
     "sha256": "ee12eff2634a80a1ac99ad4172d9938165c1aa148064d059cfba8e3c473ea615"
   },
