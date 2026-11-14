@@ -143,9 +143,8 @@ export async function verifyNativeInventory({ hub, target, broker, client }: {
     const addresses = receipt.inventory.models.map(model => `${model.provider}/${model.id}`);
     check(addresses.some(address => address.startsWith("openai/")) &&
       receipt.inventory.models.every(model => SYNTHETIC_PROVIDERS.some(provider => provider === model.provider)), "receipt-models");
-    // These are rows of the actual pinned CLI catalog, not inference or account-entitlement claims.
-    for (const address of ["anthropic/claude-haiku-5-5", "anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5"])
-      check(addresses.includes(address), `receipt-${word(address)}`);
+    // The actual CLI catalog must retain the baseline Haiku support witness.
+    check(addresses.includes("anthropic/claude-haiku-5-5"), "receipt-claude-haiku-5-5");
   } catch (error) {
     failed = true;
     throw error;

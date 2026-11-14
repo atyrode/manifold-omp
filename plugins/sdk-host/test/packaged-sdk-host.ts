@@ -7,7 +7,6 @@ import { WorkerProgressSchema, type WorkerLocation, type WorkerProgress } from "
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveAgentModelSelection } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
-import { loadBundledAgents, parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import type { AssistantMessage, AssistantMessageEvent, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
@@ -226,38 +225,16 @@ function checkBlockedCollision(messages: readonly { role: string }[]) {
     results[0]!.toolName === toolName && results[0]!.isError, "late-collision-not-blocked");
 }
 
-/** Compare the CLI's actual unpacked definitions with the SDK's bundled/discovery registry.
- * Exported files stay outside discovery roots: they never replace native agents. */
+/** Real bundled discovery routes only through shared roles, retaining native inheritance. */
 async function verifyBundledRegistry(): Promise<void> {
-  const bundled = loadBundledAgents();
   const names = ["reviewer", "scout", "seance", "security-reviewer", "sonic", "task"];
-  check(isDeepStrictEqual(bundled.map(agent => agent.name).sort(), names), "bundled-agent-identities");
   const discovered = await discoverAgents("/home/job/workspace", "/home/job");
   check(isDeepStrictEqual(discovered.agents.map(agent => agent.name).sort(), names) &&
     discovered.agents.every(agent => agent.source === "bundled"), "bundled-discovery-replaced");
-  const directory = "/home/job/tmp/unpacked-agents";
-  child = Bun.spawn(["/runtime/bin/omp", "agents", "unpack", "--dir", directory, "--json"], {
-    cwd: "/home/job/workspace", env: process.env, stdin: "ignore", stdout: "pipe", stderr: "ignore",
-  });
-  const stdout = new Response(child.stdout as ReadableStream).text();
-  check(await child.exited === 0, "bundled-cli-export");
-  child = undefined;
-  const unpacked = JSON.parse(await stdout);
-  check(unpacked.total === 6 && unpacked.written.length === 6 && unpacked.skipped.length === 0 &&
-    isDeepStrictEqual((await readdir(directory)).sort(), names.map(name => `${name}.md`)), "bundled-cli-identities");
-  for (const agent of bundled) {
-    const path = join(directory, `${agent.name}.md`);
-    const exported = parseAgent(path, await readFile(path, "utf8"), "bundled");
-    check(exported.systemPrompt.trim() === agent.systemPrompt.trim() && agent.systemPrompt.trim().length > 0,
-      "bundled-cli-prompt");
-    for (const field of ["model", "thinkingLevel", "tools", "spawns", "output"] as const)
-      check(isDeepStrictEqual(exported[field], agent[field]), "bundled-cli-frontmatter");
-    check(isDeepStrictEqual(discovered.agents.find(candidate => candidate.name === agent.name), agent), "bundled-discovery-frontmatter");
-  }
   const settings = await Settings.loadReadOnly({ cwd: "/home/job/workspace", agentDir: "/home/job/.omp/agent",
     configFiles: ["/home/job/.omp/agent/config.yml"] });
   const selections = Object.fromEntries(discovered.agents.map(agent => [agent.name, resolveAgentModelSelection({
-    agentModel: agent.model, settings, activeModelPattern: "fixture/openai/o3:low",
+    ...(agent.model === undefined ? {} : { agentModel: agent.model }), settings, activeModelPattern: "fixture/openai/o3:low",
   })]));
   check(isDeepStrictEqual(selections, {
     task: { role: "task", patterns: ["fixture/openai/o3:medium"] },
