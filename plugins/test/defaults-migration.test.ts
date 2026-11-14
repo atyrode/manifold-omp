@@ -63,7 +63,7 @@ function fixture(raw?: string, initial: ReadonlyMap<string, string> = retainedRo
     auth: { principal: { id: "current-owner", kind: "human", name: "Fixture owner", color: "#336699" },
       caps: ["*"], isRoot: true, containerScope: null, allows: async () => true },
   } satisfies Pick<OmpContext, "pluginId" | "storage" | "now" | "outsideScope" | "auth">;
-  return { ctx: context as OmpContext, storage, rows, calls, comparisons, state };
+  return { ctx: context as unknown as OmpContext, storage, rows, calls, comparisons, state };
 }
 
 function expectUnrelatedRows(rows: ReadonlyMap<string, string>) {
@@ -73,7 +73,7 @@ function expectUnrelatedRows(rows: ReadonlyMap<string, string>) {
 
 test("registered native-shared-role migration retains audit metadata and advances revision once for CAS", async () => {
   expect(plugin.manifest.dataVersion).toEqual({ major: 2, minor: 0 });
-  expect(migration.to).toEqual(plugin.manifest.dataVersion);
+  expect(migration.to).toEqual({ major: 2, minor: 0 });
   for (const { task, overrides } of [
     { task: undefined, overrides: legacyOverrides },
     { task: { agentAdvisor: { task: "on" as const }, prewalk: false }, overrides: legacyOverrides },
