@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Effort, type Model } from "@oh-my-pi/pi-ai";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AuthStorage, ModelRegistry } from "@oh-my-pi/pi-coding-agent";
@@ -137,9 +137,15 @@ test("bundled agents route through shared roles and unconfigured specialists inh
     default: "fixture/default:max", task: "fixture/everyday:medium",
     smol: "fixture/cheap:medium", slow: "fixture/review:high",
   };
+  const thinking = getBundledModel("openai", "gpt-5").thinking;
+  const low = thinking?.efforts.find(effort => effort === "low");
+  const medium = thinking?.efforts.find(effort => effort === "medium");
+  const high = thinking?.efforts.find(effort => effort === "high");
+  if (thinking === undefined || low === undefined || medium === undefined || high === undefined)
+    throw new Error("native_role_fixture_requires_controllable_effort_metadata");
   const available = ["default", "active", "everyday", "cheap", "review"].map(id => buildModel({
     ...listed("fixture", id), reasoning: true,
-    thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max] },
+    thinking,
   }));
   try {
     writeFileSync(join(root, "config.yml"), JSON.stringify({ modelRoles }));
@@ -151,12 +157,12 @@ test("bundled agents route through shared roles and unconfigured specialists inh
       return [agent.name, { role: selection.role, model: resolved.model?.id, thinking: resolved.thinkingLevel }];
     }));
     expect(selections).toEqual({
-      task: { role: "task", model: "everyday", thinking: Effort.Medium },
-      scout: { role: "smol", model: "cheap", thinking: Effort.Medium },
-      sonic: { role: "smol", model: "cheap", thinking: Effort.Medium },
-      reviewer: { role: "slow", model: "review", thinking: Effort.High },
-      "security-reviewer": { role: undefined, model: "active", thinking: Effort.Low },
-      seance: { role: undefined, model: "active", thinking: Effort.Low },
+      task: { role: "task", model: "everyday", thinking: medium },
+      scout: { role: "smol", model: "cheap", thinking: medium },
+      sonic: { role: "smol", model: "cheap", thinking: medium },
+      reviewer: { role: "slow", model: "review", thinking: high },
+      "security-reviewer": { role: undefined, model: "active", thinking: low },
+      seance: { role: undefined, model: "active", thinking: low },
     });
     // No selector on these specialists: absent an active selector, OMP itself uses the default.
     for (const agent of loadBundledAgents().filter(agent => agent.model === undefined)) {

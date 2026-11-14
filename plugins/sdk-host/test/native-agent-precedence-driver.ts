@@ -7,7 +7,7 @@ import { resolveAgentModelSelection } from "@oh-my-pi/pi-coding-agent/config/mod
 import { getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { loadBundledAgents } from "@oh-my-pi/pi-coding-agent/task/agents";
-import { runSubagentRunRequest } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { runSubagentRunRequest, subagentRunRequest } from "@oh-my-pi/pi-coding-agent/task/executor";
 
 const input = JSON.parse(readFileSync(process.argv[2]!, "utf8")) as {
   root: string;
@@ -47,7 +47,7 @@ try {
     const id = `Precedence${index}`;
     // This is the production worker entry used after native task/eval dispatch. Pass exactly the
     // native resolver's expanded patterns and the untouched bundled frontmatter thinking default.
-    const result = await runSubagentRunRequest({ options: {
+    const result = await runSubagentRunRequest(subagentRunRequest({
       cwd, agent, task: `NATIVE-PRECEDENCE-${index}`, description: "Native bundled precedence proof", index, id,
       modelOverride: selection.patterns, ...(selection.role === undefined ? {} : { modelRole: selection.role }),
       ...(agent.thinkingLevel === undefined ? {} : { thinkingLevel: agent.thinkingLevel }),
@@ -56,7 +56,7 @@ try {
       skills: [], rules: [], contextFiles: [], promptTemplates: [], noContextFiles: true,
       artifactsDir: join(input.root, "sessions"), persistArtifacts: true, keepAlive: false,
       maxRuntimeMs: 20_000,
-    } });
+    }));
     if (result.exitCode !== 0) throw new Error(`precedence_executor_refused:${scenario.agent}:${result.error ?? result.stderr}`);
     const journal = await SessionManager.open(join(input.root, "sessions", `${id}.jsonl`), join(input.root, "sessions"), undefined,
       { throwIfMissing: true });

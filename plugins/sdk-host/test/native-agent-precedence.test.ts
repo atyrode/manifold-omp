@@ -3,25 +3,31 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
-import { Effort } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { parseRequest, type PiNativeParsedRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai/types";
 
 test("native executor applies shared-role suffixes before bundled thinking defaults and inherits unconfigured specialists", async () => {
   const root = mkdtempSync(join(tmpdir(), "omp-native-precedence-"));
   for (const directory of ["agent", "cwd", "home", "tmp", "sessions"]) mkdirSync(join(root, directory));
+  const thinking = getBundledModel("openai", "gpt-5").thinking;
+  const low = thinking?.efforts.find(effort => effort === "low");
+  const medium = thinking?.efforts.find(effort => effort === "medium");
+  const high = thinking?.efforts.find(effort => effort === "high");
+  if (thinking === undefined || low === undefined || medium === undefined || high === undefined)
+    throw new Error("native_executor_fixture_requires_controllable_effort_metadata");
   const scenarios = [
-    { agent: "task", task: "fixture/task:medium", smol: "fixture/smol:low", active: "fixture/active:low", model: "task", thinking: "medium", role: "task", declared: "auto" },
-    { agent: "task", task: "fixture/task:high", smol: "fixture/smol:low", active: "fixture/active:low", model: "task", thinking: "high", role: "task", declared: "auto" },
-    { agent: "scout", task: "fixture/task:medium", smol: "fixture/smol:low", active: "fixture/active:high", model: "smol", thinking: "low", role: "smol", declared: "medium" },
-    { agent: "scout", task: "fixture/task:medium", smol: "fixture/smol:high", active: "fixture/active:low", model: "smol", thinking: "high", role: "smol", declared: "medium" },
-    { agent: "sonic", task: "fixture/task:medium", smol: "fixture/smol:low", active: "fixture/active:high", model: "smol", thinking: "low", role: "smol", declared: "medium" },
-    { agent: "sonic", task: "fixture/task:medium", smol: "fixture/smol:high", active: "fixture/active:low", model: "smol", thinking: "high", role: "smol", declared: "medium" },
-    { agent: "security-reviewer", task: "fixture/task:medium", smol: "fixture/smol:medium", active: "fixture/active:low", model: "active", thinking: "low", role: null, declared: null },
-    { agent: "security-reviewer", task: "fixture/task:medium", smol: "fixture/smol:medium", active: "fixture/active:high", model: "active", thinking: "high", role: null, declared: null },
-    { agent: "seance", task: "fixture/task:medium", smol: "fixture/smol:medium", active: "fixture/active:low", model: "active", thinking: "low", role: null, declared: null },
-    { agent: "seance", task: "fixture/task:medium", smol: "fixture/smol:medium", active: "fixture/active:high", model: "active", thinking: "high", role: null, declared: null },
-    { agent: "reviewer", task: "fixture/task:medium", smol: "fixture/smol:low", active: "fixture/active:low", model: "slow", thinking: "high", role: "slow", declared: null },
+    { agent: "task", task: "fixture/task:medium", smol: "fixture/smol:low", active: "fixture/active:low", model: "task", thinking: medium, role: "task", declared: "auto" },
+    { agent: "task", task: "fixture/task:high", smol: "fixture/smol:low", active: "fixture/active:low", model: "task", thinking: high, role: "task", declared: "auto" },
+    { agent: "scout", task: "fixture/task:medium", smol: "fixture/smol:low", active: "fixture/active:high", model: "smol", thinking: low, role: "smol", declared: "medium" },
+    { agent: "scout", task: "fixture/task:medium", smol: "fixture/smol:high", active: "fixture/active:low", model: "smol", thinking: high, role: "smol", declared: "medium" },
+    { agent: "sonic", task: "fixture/task:medium", smol: "fixture/smol:low", active: "fixture/active:high", model: "smol", thinking: low, role: "smol", declared: "medium" },
+    { agent: "sonic", task: "fixture/task:medium", smol: "fixture/smol:high", active: "fixture/active:low", model: "smol", thinking: high, role: "smol", declared: "medium" },
+    { agent: "security-reviewer", task: "fixture/task:medium", smol: "fixture/smol:medium", active: "fixture/active:low", model: "active", thinking: low, role: null, declared: null },
+    { agent: "security-reviewer", task: "fixture/task:medium", smol: "fixture/smol:medium", active: "fixture/active:high", model: "active", thinking: high, role: null, declared: null },
+    { agent: "seance", task: "fixture/task:medium", smol: "fixture/smol:medium", active: "fixture/active:low", model: "active", thinking: low, role: null, declared: null },
+    { agent: "seance", task: "fixture/task:medium", smol: "fixture/smol:medium", active: "fixture/active:high", model: "active", thinking: high, role: null, declared: null },
+    { agent: "reviewer", task: "fixture/task:medium", smol: "fixture/smol:low", active: "fixture/active:low", model: "slow", thinking: high, role: "slow", declared: null },
   ];
   const bearer = `SYNTHETIC-NATIVE-PRECEDENCE-${randomUUID()}`;
   const requests: PiNativeParsedRequest[] = [];
@@ -47,9 +53,9 @@ test("native executor applies shared-role suffixes before bundled thinking defau
   const origin = `http://127.0.0.1:${server.port}`;
   writeFileSync(join(root, "agent", "models.yml"), JSON.stringify({ providers: { fixture: {
     baseUrl: origin, apiKey: bearer, api: "openai-completions", transport: "pi-native",
-    // These are explicitly synthetic controllable-effort models, not modified catalog entries.
+    // Synthetic identities reuse the published controllable-effort metadata, without mutating its catalog row.
     models: ["default", "active", "task", "smol", "slow"].map(id => ({ id, name: id, reasoning: true,
-      thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max] },
+      thinking,
       input: ["text"], contextWindow: 200_000, maxTokens: 8192,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     })),
