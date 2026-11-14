@@ -44,9 +44,17 @@ jobs:
           esac
       - name: Read the pinned Manifold revision
         id: manifold
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           rev="$(tr -d '[:space:]' < caller/plugins/MANIFOLD_REV)"
-          [ -n "$rev" ] || { echo "MANIFOLD_REV is empty"; exit 1; }
+          [[ "$rev" =~ ^[a-f0-9]{40}$ ]] || { echo "MANIFOLD_REV must be a full lowercase SHA"; exit 1; }
+          status="$(gh api "repos/atyrode/manifold/compare/main...$rev" --jq .status)"
+          case "$status" in
+            identical | behind) ;;
+            *) echo "$rev is $status relative to Manifold main; pin a commit main has"; exit 1 ;;
+          esac
           echo "rev=$rev" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -180,9 +188,17 @@ jobs:
           persist-credentials: false
       - name: Read the pinned Manifold revision
         id: manifold
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           rev="$(tr -d '[:space:]' < caller/plugins/MANIFOLD_REV)"
-          [[ "$rev" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$rev" =~ ^[a-f0-9]{40}$ ]] || { echo "MANIFOLD_REV must be a full lowercase SHA"; exit 1; }
+          status="$(gh api "repos/atyrode/manifold/compare/main...$rev" --jq .status)"
+          case "$status" in
+            identical | behind) ;;
+            *) echo "$rev is $status relative to Manifold main; pin a commit main has"; exit 1 ;;
+          esac
           echo "rev=$rev" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
