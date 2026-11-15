@@ -189,7 +189,7 @@ export async function runOmpNative(context: WorkerContext): Promise<boolean> {
       clearTimeout(timeout);
     }
   }
-  const environment = { ...process.env, PI_NATIVES_DIR: "/tmp/omp-native" };
+  const environment: NodeJS.ProcessEnv = { ...process.env, PI_NATIVES_DIR: "/tmp/omp-native" };
   for (const name of Object.keys(environment)) if (name.startsWith("MANIFOLD_")) delete environment[name];
   const child = spawn("/runtime/bin/omp", [...(sessionFile ? ["--session", `${SESSIONS_ROOT}/${sessionFile}`] : []), ...process.argv.slice(3)], {
     cwd: "/home/job/workspace", env: environment, stdio: print ? ["inherit", "pipe", "inherit"] : "inherit",
