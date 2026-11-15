@@ -312,7 +312,7 @@ Any copy forked from this store keeps its custody id: a restored backup, or a co
 
 ## Repository gate
 
-The SDK pin in `plugins/MANIFOLD_REV` and the reusable workflow reference advance together, using only a merged Manifold source revision and Bun **1.4.4**. Family **0.4.0** requires protocol **60**, native owner **46** and hardened contract **14** for explicit managed artifact file groups. Upgrade both hub and native owner before admitting the family; older transports or owners must refuse its grouped declarations, not discard their companion files. All three bundles carry the current protocol stamp and are replaced together. The local native gate below must prove the newly packed family, not just the host.
+The SDK pin in `plugins/MANIFOLD_REV` and the reusable workflow reference advance together, using only a released Manifold source revision and Bun **1.4.4**. The current pin is the stable Manifold **v0.37.0** release, commit `5693107cfb8b135f4753477d2d25e82b66925476` ([release](https://github.com/atyrode/manifold/releases/tag/v0.37.0)). Family **0.4.0** requires protocol **60**, native owner **46** and hardened contract **14** for explicit managed artifact file groups. Upgrade both hub and native owner before admitting the family; older transports or owners must refuse its grouped declarations, not discard their companion files. All three bundles carry the current protocol stamp and are replaced together. The local native gate below must prove the newly packed family, not just the host.
 
 Use Bun **1.4.4** and a clean sibling `manifold` checkout at the revision in `plugins/MANIFOLD_REV`. From `plugins/`:
 
