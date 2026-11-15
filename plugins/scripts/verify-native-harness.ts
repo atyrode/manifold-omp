@@ -69,7 +69,7 @@ export async function verifyNativeHarness({ root, server, hub, target, broker, c
   // model and thinking level it was asked for. A held turn stays in flight until released.
   const turns = new Map<string, { model: string; thinking: string }>();
   let held: PromiseWithResolvers<void> | undefined;
-  let inferenceFailure = false;
+  let inferenceFailure: "route" | "turn" | "decode" | undefined;
   function respond(text: string, model: string, hold?: Promise<void>): Response {
     const message: AssistantMessage = { role: "assistant", api: "openai-completions", provider: "openai", model,
       content: [{ type: "text", text }], stopReason: "stop", timestamp: Date.now(),
@@ -100,16 +100,21 @@ export async function verifyNativeHarness({ root, server, hub, target, broker, c
       })) });
       check(request.method === "POST" && url.pathname === "/v1/pi/stream", "unexpected-inference-route");
       const parsed = parseRequest(await request.json(), request.headers);
-      // A request without tools is the session's own housekeeping, such as a title, never a turn.
-      if ((parsed.context.tools ?? []).length === 0) return respond("Disposable harness proof", parsed.modelId);
       const last = parsed.context.messages.at(-1);
+      // Native title forks share the session's tools and append their own tagged side prompt.
+      const content = last?.role === "user" ? JSON.stringify(last.content) : "";
+      const titleFork = content.includes("<title-request>") && content.includes("</title-request>");
+      if ((parsed.context.tools ?? []).length === 0 || titleFork)
+        return respond("Disposable harness proof", parsed.modelId);
       const marker = last?.role === "user" ? /NATIVE-HARNESS-TURN-\d/.exec(JSON.stringify(last.content))?.[0] : undefined;
       check(marker && !turns.has(marker), "unexpected-inference-turn");
       const thinking = parsed.options.reasoning ?? (parsed.options.disableReasoning ? "off" : "unset");
       turns.set(marker, { model: parsed.modelId, thinking });
       return respond(`${marker}-REPLY served by ${parsed.modelId} at ${thinking}`, parsed.modelId, held?.promise);
-    } catch {
-      inferenceFailure = true;
+    } catch (error) {
+      inferenceFailure = error instanceof HarnessProofFailure
+        ? error.message === "native-harness-unexpected-inference-route" ? "route" : "turn"
+        : "decode";
       return new Response(null, { status: 500 });
     }
   } });
@@ -245,7 +250,7 @@ export async function verifyNativeHarness({ root, server, hub, target, broker, c
       }
     }
     async function until(predicate: () => Promise<boolean>, code: string, timeoutMs = 30_000): Promise<void> {
-      try { await waitFor(async () => { check(!inferenceFailure, "synthetic-inference-contract"); return await predicate(); }, timeoutMs, 250); }
+      try { await waitFor(async () => { check(!inferenceFailure, `synthetic-inference-contract-${inferenceFailure ?? "none"}`); return await predicate(); }, timeoutMs, 250); }
       catch (error) {
         if (error instanceof HarnessProofFailure) throw error;
         // A harness that failed prints its fixed code on the operator's terminal.
