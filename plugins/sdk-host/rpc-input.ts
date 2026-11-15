@@ -56,7 +56,7 @@ export function cancellableRpcInput(source: ReadableStream<Uint8Array>, signal: 
       else signal.addEventListener("abort", abort, { once: true });
     },
     async pull(controller) {
-      let result: ReadableStreamReadResult<Uint8Array>;
+      let result: Bun.ReadableStreamDefaultReadResult<Uint8Array>;
       try {
         result = await reader.read();
       } catch (error) {
