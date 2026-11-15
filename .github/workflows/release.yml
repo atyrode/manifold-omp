@@ -263,7 +263,7 @@ jobs:
           set -euo pipefail
           want="$(for file in dist/*; do
             jq -n --arg name "$(basename "$file")" --argjson size "$(stat -c %s "$file")" \
-              --arg digest "sha256:$(sha256sum "$file" | cut -d' ' -f1)" '{name, size, digest}'
+              --arg digest "sha256:$(sha256sum "$file" | cut -d' ' -f1)" '{name: $name, size: $size, digest: $digest}'
           done | jq -cs 'sort_by(.name)')"
           metadata="$(gh api "repos/$REPOSITORY/releases/$RELEASE_ID")"
           jq -e --arg id "$RELEASE_ID" --arg tag "$TAG" --argjson want "$want" '
