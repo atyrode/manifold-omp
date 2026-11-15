@@ -16,8 +16,8 @@ function check(value: unknown, code: string): asserts value {
 
 process.umask(0o077);
 let outcome: { ok: boolean; code?: string; error?: string; cleanup?: string };
-// Only verifier-owned phase identifiers cross IPC; never serialize an exception,
-// native denial message, request, credential, or server output to diagnose a failure.
+// Only fixed verifier classifications and bounded public artifact digest prefixes cross IPC.
+// Never serialize an exception, native denial message, request, credential, or server output.
 let phase = "isolation";
 try {
   const root = process.env.OMP_VERIFY_ROOT;
@@ -50,8 +50,43 @@ try {
   // The family proven below is byte for byte the family being published.
   phase = "release-binding";
   const expectedSums = process.env.OMP_VERIFY_EXPECTED_SUMS;
-  check(expectedSums && isAbsolute(expectedSums) && await readFile(join(root, "bundles", "SHA256SUMS"), "utf8") === await readFile(expectedSums, "utf8"),
-    "packed-family-differs-from-release");
+  // Only exact text equality is accepted. On failure, the strict parse below only classifies
+  // the difference with a fixed label and bounded public digest prefixes; never a path or text.
+  const releaseMismatch = (error: string) => new VerificationFailure("packed-family-differs-from-release", { error });
+  if (!expectedSums) throw releaseMismatch("expected-sums-unset");
+  if (!isAbsolute(expectedSums)) throw releaseMismatch("expected-sums-relative");
+  const readSums = async (side: "actual" | "expected", file: string) => {
+    try { return await readFile(file, "utf8"); }
+    catch (error) { throw releaseMismatch(`${side}-sums-read-${failureClass(error)}`); }
+  };
+  const actualSums = await readSums("actual", join(root, "bundles", "SHA256SUMS"));
+  const releasedSums = await readSums("expected", expectedSums);
+  if (actualSums !== releasedSums) {
+    const labels = [["atyrode.omp.manifold-plugin.json", "root"], ["atyrode.omp.accounts.manifold-plugin.json", "accounts"],
+      ["atyrode.omp.gateway.manifold-plugin.json", "gateway"], ["omp-grammars-v1.tar.gz", "grammars"], ["omp-sdkHost.tar.gz", "sdkhost"]] as const;
+    const parseSums = (side: "actual" | "expected", text: string) => {
+      const entries = new Map<string, string>();
+      if (!text.endsWith("\n")) throw releaseMismatch(`${side}-sums-malformed`);
+      for (const line of text.slice(0, -1).split("\n")) {
+        const match = /^([0-9a-f]{64}) {2}(.+)$/.exec(line);
+        if (!match || match[0] !== line || !labels.some(([name]) => name === match[2]) || entries.has(match[2]!))
+          throw releaseMismatch(`${side}-sums-malformed`);
+        entries.set(match[2]!, match[1]!);
+      }
+      return entries;
+    };
+    const actual = parseSums("actual", actualSums);
+    const expected = parseSums("expected", releasedSums);
+    for (const [name, label] of labels) {
+      const actualHash = actual.get(name);
+      const expectedHash = expected.get(name);
+      if (actualHash === undefined) throw releaseMismatch(`${label}-missing-actual`);
+      if (expectedHash === undefined) throw releaseMismatch(`${label}-missing-expected`);
+      if (actualHash !== expectedHash)
+        throw releaseMismatch(`${label}-hash-a${actualHash.slice(0, 12)}-e${expectedHash.slice(0, 12)}`);
+    }
+    throw releaseMismatch("sums-order-only");
+  }
   const { preparedSourceArtifacts, verifyPublishedRelease } = await import("./source-assets.ts");
   const sourceBundle = PluginBundleSchema.parse(JSON.parse(await readFile(bundles[0]!.file, "utf8")));
   check(sourceBundle.manifest.machine, "packed-root-machine-missing");
