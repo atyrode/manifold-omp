@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { closeSync, fstatSync } from "node:fs";
 import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { dlopen, FFIType, type Library } from "bun:ffi";
 import { canonicalJobJson, JobOwnerConfigSchema, PluginBundleSchema, type JobOwnerConfig } from "@manifold/protocol";
 import { acquireManagedTool, HeldDirectory, type PinnedManagedTool } from "../../../manifold/packages/agent/src/index.ts";
@@ -105,13 +105,21 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
       }));
     }
     phase = "fixture-control";
+    // Dynamic: the helper must resolve from the independent SDK-host tree; a static import would resolve from the baseline.
+    const helper = await import(resolve(import.meta.dir, "../sdk-host/node_modules/@oh-my-pi/pi-coding-agent/scripts/legacy-pi-virtual-module.ts"));
+    // Public compiler assets stay beside /control.js so each entry's actual
+    // './<asset>' reference resolves; never flattened, renamed or overwritten.
+    const controlAssets = join(work, "control-assets");
+    await mkdir(controlAssets, { mode: 0o700 });
+    const assets = new Map<string, Buffer>();
+    const reserved = new Set(["control.js", "inputs", "outputs", "home", "runtime", "proof-state", "proc", "dev", "tmp", ...bindings.map(bind => bind.target.split("/")[1]!)]);
     for (const name of ["packaged-sdk-host", "packaged-grammars"]) {
       // Bundle only verifier controls. Programs under test remain the verified
       // shipped harness, stock omp and SDK-host artifact declarations above.
       const control = await Bun.build({
         entrypoints: [resolve(import.meta.dir, `../sdk-host/test/${name}.ts`)],
         target: "bun", format: "esm", packages: "bundle", minify: false,
-        plugins: [{ name: "fixture-pinned-native", setup(build) {
+        plugins: [await helper.createLegacyPiVirtualModulePlugin(), { name: "fixture-pinned-native", setup(build) {
           build.onLoad({ filter: /\/pi-natives\/native\/loader-state\.js$/ }, async args => {
             const source = await readFile(args.path, "utf8");
             check(hash(Buffer.from(source)) === "395d21d431121f469ba5a6016c42ac06a5abfa1b8021abc0efbf475dfb0c7ccd", "fixture-native-loader");
@@ -137,8 +145,24 @@ export function loadNative() {
           });
         } }],
       });
-      check(control.success && control.outputs.length === 1, "fixture-bundle");
-      await writeFile(join(work, `${name}.js`), new Uint8Array(await control.outputs[0]!.arrayBuffer()), { mode: 0o400 });
+      check(control.success, "fixture-bundle");
+      const entry = control.outputs.find(output => output.kind === "entry-point");
+      check(entry, "fixture-bundle-entry");
+      await writeFile(join(work, `${name}.js`), Buffer.from(await entry.arrayBuffer()), { mode: 0o400, flag: "wx" });
+      for (const output of control.outputs) {
+        if (output === entry) continue;
+        const file = basename(output.path);
+        check(output.kind !== "entry-point" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(file) && !reserved.has(file)
+          && dirname(resolve(output.path)) === dirname(resolve(entry.path)), "fixture-asset");
+        const bytes = Buffer.from(await output.arrayBuffer());
+        const existing = assets.get(file);
+        if (existing) {
+          check(existing.equals(bytes), "fixture-asset-conflict");
+          continue;
+        }
+        await writeFile(join(controlAssets, file), bytes, { mode: 0o400, flag: "wx" });
+        assets.set(file, bytes);
+      }
     }
     await mkdir(join(work, "state"), { mode: 0o700 });
     const cases = ["selected", "disabled", "preserve", "auto", "model-only", "model-suffix", "thinking-only", "both", "missing-model", "missing-thinking", "incompatible", "changed", "missing", "rpc-restricted", "cancel",
@@ -294,6 +318,7 @@ export function loadNative() {
         "--bind", join(work, "state"), "/proof-state", "--ro-bind", join(work, `${grammar ? "packaged-grammars" : "packaged-sdk-host"}.js`), "/control.js",
         "--ro-bind", join(home, ".omp/agent/config.yml"), "/home/job/.omp/agent/config.yml",
         "--ro-bind", join(home, ".omp/agent/models.yml"), "/home/job/.omp/agent/models.yml"];
+      for (const file of assets.keys()) args.push("--ro-bind", join(controlAssets, file), `/${file}`);
       // Bubblewrap resolves bind sources inside its new user namespace, where this parent's
       // /proc/<pid>/fd links are refused. As core's launch does, hand each held descriptor
       // over as an inherited slot instead of reopening a replaceable cache pathname:

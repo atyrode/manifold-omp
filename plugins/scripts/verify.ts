@@ -288,7 +288,15 @@ async function delegated(): Promise<void> {
   }
   if (!safeToRemove) {
     held?.close();
-    throw new VerificationFailure("unit-termination-unobserved-state-retained", cleanup ? { cleanup } : {});
+    const code = "unit-termination-unobserved-state-retained";
+    if (!failure) throw new VerificationFailure(code, cleanup ? { cleanup } : {});
+    const primary = failure.error instanceof VerificationFailure ? failure.error
+      : new VerificationFailure("verification-launcher-failed", { error: failureClass(failure.error) });
+    const previous = primary.diagnostic.cleanup ?? cleanup;
+    throw new VerificationFailure(primary.code, {
+      ...primary.diagnostic,
+      cleanup: (previous ? `unit-unobserved-${previous}` : "unit-unobserved").slice(0, 80),
+    });
   }
   try {
     if (!held) throw new Error("directory_unheld");
