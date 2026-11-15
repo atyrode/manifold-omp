@@ -27,8 +27,11 @@ const agentTools = toolProof && scenario !== "tools-omitted";
 const native = fresh || oneShot || toolProof || material;
 const lateCollision = scenario === "tools-late-extension-collision";
 const rejectedTools = agentTools && scenario !== "tools-selected" && !lateCollision;
-const rpc = scenario === "fresh-rpc-selected";
-const selected = scenario === "selected" || scenario === "fresh-sdk-selected" || scenario === "print-sdk-selected" || rpc;
+const rpcCancel = scenario === "fresh-rpc-cancel";
+const rpc = scenario === "fresh-rpc-selected" || rpcCancel;
+const selected = scenario === "selected" || scenario === "fresh-sdk-selected" || scenario === "print-sdk-selected" || scenario === "fresh-rpc-selected";
+// The second RPC prompt, queued behind the held first turn, must never reach a model.
+const queuedFollowUp = "SDK-PROOF-QUEUED-FOLLOW-UP";
 const filtered = scenario === "fresh-sdk-filtered";
 const resumed = !native && !["selected", "disabled", "cancel"].includes(scenario);
 let owner: Socket | undefined;
@@ -377,6 +380,7 @@ try {
       }
       check(!refused, "refused-state-reached-inference");
       check(requests <= 2, "unexpected-extra-inference");
+      check(!rpcCancel || (requests === 1 && !JSON.stringify(parsed.context.messages).includes(queuedFollowUp)), "rpc-cancel-extra-inference");
       check(parsed.modelId === expectedModel, "resumed-model-selection");
       if (expectedThinking === "high" || expectedThinking === "low") check(parsed.options.reasoning === expectedThinking, "resumed-thinking-preservation");
       else check(parsed.options.reasoning === undefined && parsed.options.disableReasoning === true, "explicit-thinking-off");
@@ -404,7 +408,7 @@ try {
         check(!JSON.stringify(parsed.context.messages).includes("SDK-PROOF-COMPLETE"), "historical-conversation-restored");
       }
       if (rpc) check(String(parsed.context.systemPrompt).includes(await readFile("/inputs/admission", "utf8")), "rpc-admission-prompt-missing");
-      if (scenario === "cancel") {
+      if (scenario === "cancel" || rpcCancel) {
         waitingStream = true;
         request.signal.addEventListener("abort", () => { cancelled = true; }, { once: true });
         return new Response(new ReadableStream({
@@ -555,7 +559,8 @@ try {
     { locationId: "atyrode.omp.sessions", guestPath: sessions, access: "write" },
   ] })}\n`);
   const stderrRead = child.stderr instanceof ReadableStream ? new Response(child.stderr).text().then(value => { stderr = value; }) : Promise.resolve();
-  const rpcResponses = new Map<string, { success: boolean; data?: { sessionId?: string; sessionFile?: string } }>();
+  const rpcResponses = new Map<string, { success: boolean; data?: { sessionId?: string; sessionFile?: string;
+    isStreaming?: boolean; queuedMessages?: { followUp: string[] } } }>();
   let rpcEnded = false;
   const stdoutRead = child.stdout instanceof ReadableStream ? (async () => {
     if (!rpc) return await new Response(child!.stdout as ReadableStream).text();
@@ -587,11 +592,26 @@ try {
     await until(() => rpcResponses.has("before"), "rpc-not-ready");
     check(rpcResponses.get("before")?.success && rpcResponses.get("before")?.data?.sessionId === launch!.sessionId &&
       rpcResponses.get("before")?.data?.sessionFile === join(sessions, `${launch!.sessionId}.jsonl`), "rpc-fresh-identity");
-    send({ id: "prompt", type: "prompt", message: "SDK-PROOF-PROMPT" });
-    await until(() => completed && rpcEnded, "rpc-did-not-complete");
-    send({ id: "after", type: "get_session_stats" });
-    await until(() => rpcResponses.has("after"), "rpc-stats-after-turn");
-    check(rpcResponses.get("after")?.success && rpcResponses.get("after")?.data?.sessionId === launch!.sessionId, "rpc-identity-changed");
+    if (rpcCancel) {
+      // Mid-command: the first prompt's one inference is held open while a second prompt queues behind it
+      // as a stock follow-up. Only the public state reply, never a parent timestamp, proves the queue.
+      send({ id: "prompt", type: "prompt", message: "SDK-PROOF-PROMPT" });
+      await until(() => waitingStream, "rpc-cancel-stream-not-started");
+      send({ id: "queued", type: "prompt", message: queuedFollowUp, streamingBehavior: "followUp" });
+      await until(() => rpcResponses.has("queued"), "rpc-cancel-follow-up-unanswered");
+      check(rpcResponses.get("queued")?.success, "rpc-cancel-follow-up-refused");
+      send({ id: "state", type: "get_state" });
+      await until(() => rpcResponses.has("state"), "rpc-cancel-state-unanswered");
+      const state = rpcResponses.get("state");
+      check(state?.success && state.data?.isStreaming === true && state.data.queuedMessages?.followUp
+        .some(text => text.includes(queuedFollowUp)) === true, "rpc-cancel-follow-up-not-queued");
+    } else {
+      send({ id: "prompt", type: "prompt", message: "SDK-PROOF-PROMPT" });
+      await until(() => completed && rpcEnded, "rpc-did-not-complete");
+      send({ id: "after", type: "get_session_stats" });
+      await until(() => rpcResponses.has("after"), "rpc-stats-after-turn");
+      check(rpcResponses.get("after")?.success && rpcResponses.get("after")?.data?.sessionId === launch!.sessionId, "rpc-identity-changed");
+    }
     child.kill("SIGTERM");
   } else if (fresh) {
     await until(() => completed && terminal.includes("SDK-PROOF-COMPLETE") && titles > 0 &&
@@ -639,6 +659,27 @@ try {
     const deadline = Date.now() + 5_000;
     while (!cancelled && Date.now() < deadline) await Bun.sleep(20);
     check(cancelled, "gateway-stream-not-cancelled");
+  } else if (rpcCancel) {
+    // The host's fixed stderr code is its receipt that SIGTERM rejected RPC input into host cleanup; a total
+    // of one inference then admits no request on either side of that receipt, whatever the network ordering.
+    const codes = stderr.split("\n").filter(line => /^omp_[a-z_]+$/.test(line));
+    check(exit === 1 && isDeepStrictEqual(codes, ["omp_sdk_cancelled"]), "rpc-cancel-host-receipt");
+    check(requests === 1 && !completed && titles === 0 && discoveries > 0, "rpc-cancel-inference-after-signal");
+    const deadline = Date.now() + 5_000;
+    while (!cancelled && Date.now() < deadline) await Bun.sleep(20);
+    check(cancelled, "rpc-cancel-stream-not-cancelled");
+    const path = join(sessions, `${launch!.sessionId}.jsonl`);
+    const manager = await SessionManager.open(path, sessions, undefined, { throwIfMissing: true });
+    check(manager.getSessionId() === launch!.sessionId && manager.getSessionFile() === path && manager.getCwd() === "/home/job/workspace", "rpc-cancel-durable-identity");
+    const context = manager.buildSessionContext();
+    check(context.models[manager.getLastModelChangeRole() ?? "default"] === expectedModel, "rpc-cancel-durable-model");
+    check((context.configuredThinkingLevel ?? context.thinkingLevel) === expectedThinking, "rpc-cancel-durable-thinking");
+    check(context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("SDK-PROOF-PROMPT")), "rpc-cancel-durable-prompt");
+    check(!context.messages.some(message => message.role === "assistant" && JSON.stringify(message.content).includes("SDK-PROOF-COMPLETE")), "rpc-cancel-turn-completed");
+    await manager.close();
+    check(await readFile(saved, "utf8") === before.get("saved.jsonl"), "rpc-cancel-mutated-history");
+    const files = (await readdir(sessions)).filter(name => name.endsWith(".jsonl")).sort();
+    check(JSON.stringify(files) === JSON.stringify(["saved.jsonl", `${launch!.sessionId}.jsonl`].sort()), "rpc-cancel-extra-journal");
   } else {
     check(discoveries > 0 && (scenario === "auto" ? requests === 0 : completed) && (resumed || fresh ? exit !== 0 : exit === 0), "program-completion");
     if (oneShot || material) {

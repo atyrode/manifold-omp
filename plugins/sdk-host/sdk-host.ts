@@ -6,6 +6,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent";
 import type { SettingsOptions } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
+import { claimRpcInput } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-input";
 import { runRpcMode } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import { __ompSetGrammarDir } from "@oh-my-pi/pi-natives";
 import { MaterialOnlyIsolationSchema, PROMPT_MAX_BYTES } from "../api/index.ts";
@@ -16,14 +17,17 @@ import { readAutomation, readResumeOverrides, readSessionInput } from "../worker
 import { admitSdkSession, SdkSessionConfigSchema } from "./sdk-admission.ts";
 import { MATERIAL_SYSTEM_PROMPT, materialMessage, readMaterial, runMaterialPrintMode } from "./material.ts";
 import { loadAgentTools, type AgentToolAdapter } from "./agent-tools.ts";
+import { cancellableRpcInput, type CancellableRpcInput } from "./rpc-input.ts";
 import { attachTuiControl, parentChannel, type TuiControl } from "./tui-control.ts";
 
 // This entry is always a new, sanitized child, never imported by CLI passthrough.
 const materialOnly = process.argv[2] === "material-print";
 const cwd = materialOnly ? "/home/job/tmp" : "/home/job/workspace";
 const controller = new AbortController();
+// Host-owned cancellation reason: only this exact object classifies a failure as cancellation.
+const cancelled = new Error("SDK host cancelled");
 const stopped = Promise.withResolvers<void>();
-const cancel = () => { controller.abort(); stopped.resolve(); };
+const cancel = () => { controller.abort(cancelled); stopped.resolve(); };
 process.on("SIGTERM", cancel);
 process.on("SIGINT", cancel);
 process.on("SIGHUP", cancel);
@@ -34,6 +38,7 @@ let mode: InteractiveMode | undefined;
 let heldFile: number | undefined;
 let toolAdapter: AgentToolAdapter | undefined;
 let control: TuiControl | undefined;
+let rpcInput: CancellableRpcInput | undefined;
 let code = 1;
 try {
   if (Object.keys(process.env).some(name => name.startsWith("MANIFOLD_"))) throw new Error("omp_sdk_environment_invalid");
@@ -43,6 +48,8 @@ try {
   const kind = z.enum(["interactive", "print", "material-print", "resume", "rpc", "rpc-resume", "tui", "tui-resume"]).parse(process.argv[2]);
   const resume = kind === "resume" || kind === "rpc-resume" || kind === "tui-resume";
   const rpc = kind === "rpc" || kind === "rpc-resume";
+  // Claimed once, before SDK discovery. Cancellation errors this input, rejecting runRpcMode into the cleanup below.
+  if (rpc) rpcInput = cancellableRpcInput(claimRpcInput(), controller.signal);
   // An Agent's TUI harness: the stock renderer owns the terminal, the private IPC parent turns its dials.
   const tui = kind === "tui" || kind === "tui-resume";
   // The stock InteractiveMode renders these sessions; print and RPC replies are read as text.
@@ -208,8 +215,10 @@ try {
         ...(created.mcpManager ? { mcpManager: created.mcpManager } : {}),
       });
     } else if (rpc) {
+      // Stdin EOF keeps stock RPC mode's draining exit; cancellation is a hard stop that rejects here
+      // without draining accepted commands or flushing queued stdout.
       await runRpcMode(created.session, {
-        setToolUIContext: created.setToolUIContext,
+        setToolUIContext: created.setToolUIContext, input: rpcInput!.input,
         ...(created.subagentEventBus ? { subagentEventBus: created.subagentEventBus } : {}),
       });
     } else {
@@ -228,21 +237,28 @@ try {
     }
   } finally { controller.signal.removeEventListener("abort", abort); }
 } catch (error) {
-  const reason = error instanceof Error && /^omp_(?:resume|sdk|restricted|material|agent_tools)_[a-z_]+$/.test(error.message)
-    ? error.message : "omp_sdk_failed";
+  const reason = error === cancelled ? "omp_sdk_cancelled"
+    : error instanceof Error && /^omp_(?:resume|sdk|restricted|material|agent_tools)_[a-z_]+$/.test(error.message)
+      ? error.message : "omp_sdk_failed";
   writeSync(2, `${reason}\n`);
 } finally {
   toolAdapter?.close();
   control?.close();
+  // After tool/control close: releases a claimed RPC stdin reader still held, including after startup failures.
+  controller.abort(cancelled);
   try {
     await created?.session.abort();
     await created?.session.dispose();
     if (!created) await manager?.close();
   } finally {
+    // Joined before auth and held-file close; never rejects. A release failure adds its fixed code after the primary one.
+    const release = await rpcInput?.released;
+    if (release?.ok === false) code = 1;
     mode?.stop();
     auth?.close();
     if (heldFile !== undefined) closeSync(heldFile);
     process.off("SIGTERM", cancel); process.off("SIGINT", cancel); process.off("SIGHUP", cancel);
+    if (release?.ok === false) writeSync(2, "omp_sdk_rpc_input_release_failed\n");
   }
 }
 process.exit(code);

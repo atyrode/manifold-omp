@@ -70,6 +70,37 @@ function differingFields(before: unknown, after: unknown, path: string, differen
   differences.push({ path, before: fingerprint(before), after: fingerprint(after) });
 }
 
+/** Differing members of two published archives as metadata only: name, lengths, hashes, the
+ * first differing offset and its two numeric byte values, equal trailing bytes and the count of
+ * differing positions of equal-length members. Never member bytes: compiled workers inline docs,
+ * prompts and paths. */
+async function archiveMemberDifferences(before: Buffer, after: Buffer): Promise<unknown[]> {
+  const [left, right] = await Promise.all([new Bun.Archive(before).files(), new Bun.Archive(after).files()]);
+  const differences: unknown[] = [];
+  for (const member of [...new Set([...left.keys(), ...right.keys()])].sort()) {
+    const [leftBytes, rightBytes] = await Promise.all([left.get(member)?.arrayBuffer(), right.get(member)?.arrayBuffer()]);
+    const a = leftBytes && Buffer.from(leftBytes), b = rightBytes && Buffer.from(rightBytes);
+    if (a && b && a.equals(b)) continue;
+    const sha256 = [a, b].map(bytes => bytes && new Bun.CryptoHasher("sha256").update(bytes).digest("hex"));
+    const difference: Record<string, unknown> = { member, bytes: [a?.length, b?.length], sha256 };
+    if (a && b) {
+      const shared = Math.min(a.length, b.length);
+      let first = 0;
+      while (first < shared && a[first] === b[first]) first++;
+      let trailing = 0;
+      while (trailing < shared - first && a[a.length - 1 - trailing] === b[b.length - 1 - trailing]) trailing++;
+      let differingPositions: number | undefined;
+      if (a.length === b.length) {
+        differingPositions = 0;
+        for (let i = first; i < a.length - trailing; i++) if (a[i] !== b[i]) differingPositions++;
+      }
+      Object.assign(difference, { firstOffset: first, firstByteValues: [a[first], b[first]], trailingEqualBytes: trailing, differingPositions });
+    }
+    differences.push(difference);
+  }
+  return differences;
+}
+
 async function priorFamily(destination: string): Promise<Record<string, string>> {
   await mkdir(join(destination, "stale-member"), { recursive: true });
   await writeFile(join(destination, "stale-member", "retained.txt"), "prior nested bytes\n");
@@ -189,6 +220,16 @@ for (const destinationKind of ["default", "caller"] as const) {
         const after = JSON.parse(Buffer.from(secondBytes[file]!, "base64").toString());
         differingFields(before, after, file, differences);
         console.error("package_determinism_mismatch", JSON.stringify(differences));
+      }
+      // The byte assertion below stays the verdict; a failed diagnostic logs only its error class.
+      if (firstBytes[SDK_HOST_ASSET] !== undefined && secondBytes[SDK_HOST_ASSET] !== undefined && firstBytes[SDK_HOST_ASSET] !== secondBytes[SDK_HOST_ASSET]) {
+        try {
+          console.error("package_determinism_archive_mismatch", JSON.stringify({ file: SDK_HOST_ASSET, members: await archiveMemberDifferences(
+            Buffer.from(firstBytes[SDK_HOST_ASSET]!, "base64"), Buffer.from(secondBytes[SDK_HOST_ASSET]!, "base64")) }));
+        } catch (error) {
+          console.error("package_determinism_archive_diagnostic_failed",
+            error instanceof TypeError ? "typeerror" : error instanceof RangeError ? "rangeerror" : error instanceof Error ? "error" : "unknown");
+        }
       }
       expect(secondBytes).toEqual(firstBytes);
     }, 360_000);

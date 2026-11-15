@@ -166,7 +166,7 @@ export function loadNative() {
     }
     await mkdir(join(work, "state"), { mode: 0o700 });
     const cases = ["selected", "disabled", "preserve", "auto", "model-only", "model-suffix", "thinking-only", "both", "missing-model", "missing-thinking", "incompatible", "changed", "missing", "rpc-restricted", "cancel",
-      "restricted-six", "fresh-cli-preserve", "fresh-sdk-selected", "fresh-sdk-disabled", "fresh-sdk-filtered", "fresh-rpc-selected",
+      "restricted-six", "fresh-cli-preserve", "fresh-sdk-selected", "fresh-sdk-disabled", "fresh-sdk-filtered", "fresh-rpc-selected", "fresh-rpc-cancel",
       "print-cli-preserve", "print-sdk-selected",
       "material-valid", "material-tools", "material-extra", "material-digest", "material-utf8", "material-oversized",
       "tools-selected", "tools-omitted", "tools-description", "tools-schema", "tools-reserved-collision",
