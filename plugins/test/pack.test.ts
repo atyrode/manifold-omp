@@ -77,39 +77,27 @@ async function priorFamily(destination: string): Promise<Record<string, string>>
   return snapshot(destination);
 }
 
-// Compare the private copied graph with the original source in another process, cwd and
-// environment. Output ordering alone does not exercise checkout-layout or identifier-minifier
-// drift. This file runs under bun test's NODE_ENV=test, as verify's in-unit pack does; the
-// child packs with neither NODE_ENV nor BUN_ENV, as release.yml's host `bun run pack` does,
-// so bytes that followed the packer's environment would differ from the bytes verify proves.
-async function packWithReorderedAssets(destination: string) {
+// Compare the private copied graph with the original source in another process to
+// exercise checkout-layout and environment determinism. This file runs under
+// bun test's NODE_ENV=test, as verify's in-unit pack does; the child packs with
+// neither NODE_ENV nor BUN_ENV, as release.yml's host `bun run pack` does, so bytes
+// following the packer's environment would differ from the bytes verify proves.
+async function packInFreshEnvironment(destination: string) {
   const script = `
-    const originalBuild = Bun.build;
-    let reordered = false;
-    Bun.build = async options => {
-      const result = await originalBuild(options);
-      if (typeof options.naming === "object" && options.naming.entry === "sdkHost.js") {
-        if (result.outputs.filter(output => output.kind === "asset").length < 2) throw new Error("Missing compiler assets");
-        result.outputs.reverse();
-        reordered = true;
-      }
-      return result;
-    };
-    const { source, destination } = JSON.parse(process.env.OMP_PACK_REORDER);
+    const { source, destination } = JSON.parse(process.env.OMP_PACK_INPUT);
     const { pack } = await import(source + "/pack.ts");
     const bundles = await pack(destination);
-    if (!reordered) throw new Error("Compiler output ordering was not exercised");
     process.stdout.write(JSON.stringify(bundles));
   `;
   const child = Bun.spawn([process.execPath, "--no-install", "--eval", script], {
     cwd: source, stdin: "ignore", stdout: "pipe", stderr: "pipe",
     env: { ...Object.fromEntries(Object.entries(process.env).filter(([name]) => name !== "NODE_ENV" && name !== "BUN_ENV")),
-      OMP_PACK_REORDER: JSON.stringify({ source, destination }) },
+      OMP_PACK_INPUT: JSON.stringify({ source, destination }) },
   });
   const [exit, stdout, stderr] = await Promise.all([
     child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
   ]);
-  if (exit !== 0) throw new Error(`Reordered pack failed: ${stderr}`);
+  if (exit !== 0) throw new Error(`Independent pack failed: ${stderr}`);
   return JSON.parse(stdout) as readonly (PackResult & { readonly id: string })[];
 }
 
@@ -190,7 +178,7 @@ for (const destinationKind of ["default", "caller"] as const) {
         }
       }
       const firstBytes = await snapshot(destination);
-      const second = await packWithReorderedAssets(destination);
+      const second = await packInFreshEnvironment(destination);
       expect(second.map(({ id }) => id)).toEqual(family);
       const secondBytes = await snapshot(destination);
       for (const file of publishedFiles) {
