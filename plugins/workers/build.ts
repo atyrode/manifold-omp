@@ -527,12 +527,15 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
         // OMP packages stay inside this worker's prepared realization. The pinned
         // Manifold SDK owns its own transitive dependencies; resolving those from
         // an OMP graph would substitute versions or reject valid SDK imports.
-        // Every edge is preflighted and contained here, but a real file Bun's own resolver
-        // binds to the same path stays Bun's: only its resolution attaches the package.json
-        // module type. A plugin result is parsed with an unknown module type, so one file
-        // reached by both a plugin edge (the legacy helper's bare import) and a native edge
-        // (its package's relative import) took whichever parse arrived first, and identical
-        // inputs emitted `__toESM(require_x(), 1)` or `__toESM(require_x())`.
+        // Every edge is preflighted here for containment in the selected graph, but an
+        // ordinary real file that Bun's own resolver reaches from the same base stays Bun's:
+        // its bundler resolver picks the published entry (`module`, conditions) as compiled
+        // OMP does and attaches the package.json module type, so the runtime `resolveSync`
+        // preflight is not the authority on the exact file. A plugin result is parsed with
+        // an unknown module type, so one file reached by both a plugin edge (the legacy
+        // helper's bare import) and a native edge (its package's relative import) took
+        // whichever parse arrived first, and identical inputs emitted
+        // `__toESM(require_x(), 1)` or `__toESM(require_x())`.
         build.onResolve({ filter: /^[^./]/ }, async args => {
           if (args.path === "bun" || args.path.startsWith("bun:") || args.path.startsWith("node:") ||
               builtinModules.includes(args.path) || args.path.startsWith("@manifold/")) return undefined;
