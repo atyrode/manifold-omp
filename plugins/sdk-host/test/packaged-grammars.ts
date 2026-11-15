@@ -1,7 +1,6 @@
 import { connect, type Socket } from "node:net";
 import { open, readFile, readdir, readlink, realpath, stat } from "node:fs/promises";
-import { parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
-import type { AssistantMessage, AssistantMessageEvent, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
+import type { AssistantMessage, AssistantMessageEvent } from "@oh-my-pi/pi-ai/types";
 import { exerciseGrammarOperations, grammarCases, summaryCases } from "./grammar-operations.ts";
 import grammarMetadata from "../../runtime-data/omp-grammar-assets-v1/grammars-v1.json";
 
@@ -14,6 +13,41 @@ const completion = "GRAMMAR-PROOF-COMPLETE";
 const fences = "\n```nix\nlet cli_nix = 42; in cli_nix\n```\n```sql\nSELECT 42 AS cli_sql;\n```\n```vue\n<template><span>cli_vue</span></template>\n```";
 class ProofFailure extends Error { constructor(readonly code: string) { super(code); } }
 function check(value: unknown, code: string): asserts value { if (!value) throw new ProofFailure(code); }
+type WireMessage = { readonly role: string; readonly content?: unknown };
+type WireTool = { readonly name: string };
+type ToolResultDto = { readonly role: "toolResult"; readonly toolCallId: string; readonly isError: boolean;
+  readonly content: readonly { readonly type: string; readonly text?: string }[]; readonly details?: unknown };
+function isWireMessage(value: unknown): value is WireMessage {
+  return typeof value === "object" && value !== null && "role" in value && typeof value.role === "string";
+}
+function isWireTool(value: unknown): value is WireTool {
+  return typeof value === "object" && value !== null && "name" in value && typeof value.name === "string";
+}
+function isToolResult(value: unknown): value is ToolResultDto {
+  return typeof value === "object" && value !== null && "role" in value && value.role === "toolResult" &&
+    "toolCallId" in value && typeof value.toolCallId === "string" && "isError" in value && typeof value.isError === "boolean" &&
+    "content" in value && Array.isArray(value.content) && value.content.every((part: unknown) => typeof part === "object" && part !== null &&
+      "type" in part && typeof part.type === "string" && (part.type === "text" ? "text" in part && typeof part.text === "string" : !("text" in part)));
+}
+// Reads an own JSON property path; any non-object hop yields undefined so detail checks fail closed.
+function field(value: unknown, ...path: readonly string[]): unknown {
+  for (const key of path) {
+    if (typeof value !== "object" || value === null || !Object.hasOwn(value, key)) return undefined;
+    value = Reflect.get(value, key);
+  }
+  return value;
+}
+// The stock pi-native client posts `{ modelId, context, options, stream: true }` to /v1/pi/stream. This endpoint
+// decodes only the fields it consumes; pi-ai's server parser would statically load pi-utils and the native addon.
+function decodeRequest(body: unknown): { readonly messages: readonly WireMessage[]; readonly tools: readonly WireTool[] } {
+  check(typeof body === "object" && body !== null && "modelId" in body && typeof body.modelId === "string" && body.modelId.length > 0 &&
+    (!("stream" in body) || body.stream === true) && "context" in body && typeof body.context === "object" && body.context !== null &&
+    "messages" in body.context && Array.isArray(body.context.messages), "gateway-failed");
+  const messages: unknown[] = body.context.messages;
+  const tools: unknown = "tools" in body.context ? body.context.tools : [];
+  check(messages.every(isWireMessage) && Array.isArray(tools) && tools.every(isWireTool), "gateway-failed");
+  return { messages, tools };
+}
 function response(message: AssistantMessage): Response {
   const events: AssistantMessageEvent[] = [{ type: "start", partial: message }];
   for (const [contentIndex, content] of message.content.entries()) {
@@ -50,29 +84,29 @@ function tokenForeground(line: string, token: string): string | undefined {
   }
   return foreground;
 }
-function checkResults(messages: readonly { role: string }[], durable: boolean): void {
-  const results = messages.filter((message): message is ToolResultMessage => message.role === "toolResult");
+function checkResults(messages: readonly unknown[], durable: boolean): void {
+  const results = messages.filter(isToolResult);
   check(results.length === grammarCases.length + summaryCases.length, "tool-result-count");
   for (const item of grammarCases) {
     const result = results.find(result => result.toolCallId === `grammar-${item.language}`);
     check(result && !result.isError, `ast-${item.language}-execution`);
-    const text = result.content.filter(item => item.type === "text").map(item => item.text).join("\n");
+    const text = result.content.filter(part => part.type === "text").map(part => part.text).join("\n");
     check(text.includes(`${item.language}.${item.extension}`) && text.includes(item.source.trim().split("\n")[0]!) &&
       /\d+[|:]/.test(text), `ast-${item.language}-positive-match`);
     if (durable) {
-      const details = result.details as { xdev?: { tool?: string; inner?: { matchCount?: number; fileCount?: number; parseErrors?: unknown[] } } } | undefined;
-      check(details?.xdev?.tool === "ast_grep" && (details.xdev.inner?.matchCount ?? 0) > 0 &&
-        details.xdev.inner?.fileCount === 1 && !details.xdev.inner?.parseErrors?.length, `ast-${item.language}-durable-native-result`);
+      const inner = field(result.details, "xdev", "inner"), matchCount = field(inner, "matchCount"), parseErrors = field(inner, "parseErrors");
+      check(field(result.details, "xdev", "tool") === "ast_grep" && typeof matchCount === "number" && matchCount > 0 && field(inner, "fileCount") === 1 &&
+        (parseErrors === undefined || (Array.isArray(parseErrors) && parseErrors.length === 0)), `ast-${item.language}-durable-native-result`);
     }
   }
   for (const item of summaryCases) {
     const result = results.find(result => result.toolCallId === `summary-${item.language}`);
     check(result && !result.isError, `summary-${item.language}-execution`);
-    const text = result.content.filter(item => item.type === "text").map(item => item.text).join("\n");
+    const text = result.content.filter(part => part.type === "text").map(part => part.text).join("\n");
     check(text.includes(item.retained) && !text.includes(item.omitted), `summary-${item.language}-structural-elision`);
     if (durable) {
-      const details = result.details as { summary?: { elidedSpans?: number; elidedLines?: number } } | undefined;
-      check((details?.summary?.elidedSpans ?? 0) > 0 && (details?.summary?.elidedLines ?? 0) > 0,
+      const spans = field(result.details, "summary", "elidedSpans"), lines = field(result.details, "summary", "elidedLines");
+      check(typeof spans === "number" && spans > 0 && typeof lines === "number" && lines > 0,
         `summary-${item.language}-durable-parser-result`);
     }
   }
@@ -96,12 +130,12 @@ try {
         context_length: 200_000, max_output_tokens: 8192, input_modalities: ["text"],
       }] });
       check(request.method === "POST" && url.pathname === "/v1/pi/stream", "gateway-route");
-      const parsed = parseRequest(await request.json(), request.headers);
-      const names = (parsed.context.tools ?? []).map(tool => tool.name);
+      const parsed = decodeRequest(await request.json());
+      const names = parsed.tools.map(tool => tool.name);
       const message: AssistantMessage = { role: "assistant", api: "openai-completions", provider: "fixture", model: "openai/gpt-5",
         content: [{ type: "text", text: completion + (sdk ? "" : fences) }], stopReason: "stop", timestamp: Date.now(),
         usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
-      if (names.length === 0 || JSON.stringify(parsed.context.messages.at(-1)?.content).includes("<title-request>")) {
+      if (names.length === 0 || JSON.stringify(parsed.messages.at(-1)?.content ?? "").includes("<title-request>")) {
         check(!sdk, "headless-title-request");
         message.content = [{ type: "text", text: "Grammar proof" }];
         return response(message);
@@ -130,7 +164,7 @@ try {
           } })),
           ...summaryCases.map(item => ({ type: "toolCall" as const, id: `summary-${item.language}`, name: "read", arguments: { path: summaryPath(item) } })),
         ];
-      } else { checkResults(parsed.context.messages, false); completed = true; }
+      } else { checkResults(parsed.messages, false); completed = true; }
       return response(message);
     } catch (error) {
       failure = error instanceof ProofFailure ? error.code : "gateway-failed";
