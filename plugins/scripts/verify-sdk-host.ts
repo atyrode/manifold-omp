@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { fstatSync } from "node:fs";
+import { closeSync, fstatSync } from "node:fs";
 import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { dlopen, FFIType, type Library } from "bun:ffi";
 import { canonicalJobJson, JobOwnerConfigSchema, PluginBundleSchema, type JobOwnerConfig } from "@manifold/protocol";
 import { acquireManagedTool, HeldDirectory, type PinnedManagedTool } from "../../../manifold/packages/agent/src/index.ts";
 import { verifyBundledArtifacts } from "../../../manifold/packages/plugin-kit/src/artifacts.ts";
@@ -32,6 +33,25 @@ function check(value: unknown, code: string): asserts value {
 }
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
+const CHILD_FD_SYMBOLS = {
+  fcntl: { args: [FFIType.i32, FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+} as const;
+let childFdLibc: Library<typeof CHILD_FD_SYMBOLS> | undefined;
+/** Bun maps extra stdio straight onto child slots 3.., in order. As in core's launch, a held
+ * source numbered inside that range could be replaced before its own slot inherits it, so
+ * only such sources are duplicated (F_DUPFD_CLOEXEC) above every slot; callers close them. */
+function stageInherited(inherited: number[], staged: number[]): void {
+  const slots = inherited.length + 3;
+  for (const [index, source] of inherited.entries()) {
+    if (source === index + 3 || source >= slots) continue;
+    childFdLibc ??= dlopen("libc.so.6", CHILD_FD_SYMBOLS);
+    const duplicate = childFdLibc.symbols.fcntl(source, 1030, slots);
+    check(duplicate >= 0, "child-stdio-duplication");
+    inherited[index] = duplicate;
+    staged.push(duplicate);
+  }
+}
+
 /** Real packaged programs and SDK/model/relay semantics, synthetic inference only.
  * Agent-tool host replies are fixture-owned wire messages, not evidence of real
  * server authorization. The supported owner-managed acquisition verifies either
@@ -48,6 +68,7 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
   let allocated = false;
   let held: HeldDirectory | undefined;
   let failure: SdkHostVerificationFailure | undefined;
+  let setupCleanup: string | undefined;
   try {
     check(process.platform === "linux" && process.arch === "x64" && Bun.version === pins.bunVersion, "platform");
     const bindings = JobOwnerConfigSchema.shape.runtimeTools.parse({ system: systemBindings }).system!;
@@ -273,18 +294,26 @@ export function loadNative() {
         "--bind", join(work, "state"), "/proof-state", "--ro-bind", join(work, `${grammar ? "packaged-grammars" : "packaged-sdk-host"}.js`), "/control.js",
         "--ro-bind", join(home, ".omp/agent/config.yml"), "/home/job/.omp/agent/config.yml",
         "--ro-bind", join(home, ".omp/agent/models.yml"), "/home/job/.omp/agent/models.yml"];
+      // Bubblewrap resolves bind sources inside its new user namespace, where this parent's
+      // /proc/<pid>/fd links are refused. As core's launch does, hand each held descriptor
+      // over as an inherited slot instead of reopening a replaceable cache pathname:
+      // --ro-bind-fd mounts it readonly and closes it before exec, so no artifact or
+      // directory handle reaches the workload past its readonly mount.
+      const inherited: number[] = [];
+      const bindHeld = (fd: number, target: string) => {
+        args.push("--ro-bind-fd", String(inherited.length + 3), target);
+        inherited.push(fd);
+      };
       for (const [alias, artifact] of acquired) {
         if (scenario === "grammar-cli" && (alias === "sdkHost" || alias === "sdk-pi-natives")) continue;
         for (const bind of artifact.binds) {
           check(!bind.writable && (fstatSync(bind.fd).isFile() || fstatSync(bind.fd).isDirectory()), "managed-readonly-bind");
-          // Reopen the held parent's descriptor, not a replaceable cache pathname.
-          // No descriptor is inherited into the workload, including directory handles.
-          args.push("--ro-bind", `/proc/${process.pid}/fd/${bind.fd}`, bind.target);
+          bindHeld(bind.fd, bind.target);
         }
         for (const [name, file] of Object.entries(artifact.files)) {
           const destination = tools[alias]!["linux-x64"]!.files![name]!.relativeTarget ?? [name];
           check(fstatSync(file.fd).isFile(), "managed-companion-file");
-          args.push("--ro-bind", `/proc/${process.pid}/fd/${file.fd}`, `/runtime/bin/${destination.join("/")}`);
+          bindHeld(file.fd, `/runtime/bin/${destination.join("/")}`);
         }
       }
       for (const bind of bindings) {
@@ -296,8 +325,23 @@ export function loadNative() {
         XDG_STATE_HOME: "/home/job/.local/state", LANG: "C.UTF-8", LC_ALL: "C.UTF-8", TZ: "UTC", TERM: "xterm-256color" };
       for (const [key, value] of Object.entries(environment)) args.push("--setenv", key, value);
       args.push("--chdir", "/inputs", "--", "/runtime/bin/bun", "--no-env-file", "--no-install", "--config=/dev/null", "/control.js", scenario);
-      exited = false;
-      active = Bun.spawn([bubblewrap, ...args], { env: {}, stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+      const staged: number[] = [];
+      let spawned = false;
+      try {
+        stageInherited(inherited, staged);
+        active = Bun.spawn([bubblewrap, ...args], { env: {}, stdio: ["ignore", "pipe", "ignore", ...inherited] });
+        exited = false;
+        spawned = true;
+      } finally {
+        let closeError: unknown;
+        for (const fd of staged) {
+          try { closeSync(fd); } catch (error) {
+            closeError ??= error;
+            setupCleanup ??= failureClass(error);
+          }
+        }
+        if (closeError !== undefined && spawned) throw closeError;
+      }
       const timer = setTimeout(() => active?.kill("SIGKILL"), 90_000);
       const output = new Response(active.stdout).text();
       let status: number;
@@ -314,7 +358,7 @@ export function loadNative() {
   }
   // Release only once the workload is reaped and every descriptor into the tree is closed. A
   // failed release never replaces the primary code and never lets the proof report success.
-  let cleanup: string | undefined;
+  let cleanup = setupCleanup;
   const release = (step: () => void) => {
     try { step(); } catch (error) { cleanup ??= failureClass(error); }
   };
