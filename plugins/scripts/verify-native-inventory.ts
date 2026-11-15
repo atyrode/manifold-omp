@@ -6,7 +6,7 @@ import {
 import { ownerAction } from "../../../manifold/packages/plugin-kit/src/hub.ts";
 import { waitFor } from "../../../manifold/packages/testkit/src/index.ts";
 import {
-  GATEWAY_OPERATION_ID, GATEWAY_PLUGIN_ID, OMP_PLUGIN_ID, ProbeFailureReceiptSchema, RefusalSchema,
+  GATEWAY_OPERATION_ID, GATEWAY_PLUGIN_ID, OMP_PLUGIN_ID, OMP_VERSION, ProbeFailureReceiptSchema, RefusalSchema,
   type AccountReference, type ActionInput, type ActionReply, type ActionResult, type OmpAction,
 } from "../api/index.ts";
 
@@ -18,7 +18,7 @@ function word(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
 }
 const INVENTORY_OPERATION_ID = `${OMP_PLUGIN_ID}.inventory`;
-/** OpenAI's catalog is large and Anthropic's carries Claude Haiku 5.5, which no OMP before 18.8.6 lists. */
+/** Two synthetic unpaid providers exercise both the OpenAI and Anthropic bundled catalogs. */
 const SYNTHETIC_PROVIDERS = ["openai", "anthropic"] as const;
 
 /**
@@ -139,10 +139,11 @@ export async function verifyNativeInventory({ hub, target, broker, client }: {
       `gateway-${word(child.state)}-${word(result?.reason ?? String(result?.exitCode ?? "none"))}`);
     check(settled.state === "exited" && settled.result?.exitCode === 0, `job-${await ending(settled)}`);
     const receipt = await call("readInventory", { ...target, jobId: settled.jobId });
+    check(receipt.inventory.ompVersion === OMP_VERSION, "receipt-omp-version");
     const addresses = receipt.inventory.models.map(model => `${model.provider}/${model.id}`);
     check(addresses.some(address => address.startsWith("openai/")) &&
       receipt.inventory.models.every(model => SYNTHETIC_PROVIDERS.some(provider => provider === model.provider)), "receipt-models");
-    // The packed runtime's own `omp models --json --no-extensions` lists the model released with 18.8.6.
+    // The actual CLI catalog must retain the baseline Haiku support witness.
     check(addresses.includes("anthropic/claude-haiku-5-5"), "receipt-claude-haiku-5-5");
   } catch (error) {
     failed = true;

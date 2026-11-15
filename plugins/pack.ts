@@ -16,6 +16,7 @@ import {
 } from "../../manifold/packages/protocol/src/index.ts";
 import { buildWorkerArtifacts, containsPath, verifyPreparedDependencies, type WorkerArtifacts, type WorkerTarget } from "./workers/build.ts";
 import runtime from "./runtime-artifacts.json";
+import { SOURCE_ASSETS } from "./runtime-assets.ts";
 
 const pluginRoot = import.meta.dir;
 // This is also the explicit installation order: parent, native accounts, gateway.
@@ -391,12 +392,18 @@ export async function pack(outputDirectory?: string): Promise<readonly (PackResu
     const sums: string[] = [];
     const bundles: (PackResult & { readonly id: string })[] = [];
     let requirements: string | undefined;
+    const sourceAssets = new Map<string, Uint8Array>();
     for (const id of familyIds) {
       const directory = dirname(byId.get(id)!);
       const filename = `${id}.manifold-plugin.json`;
       const target: WorkerTarget = id === "atyrode.omp" ? "root" : id === "atyrode.omp.accounts" ? "accounts" : "gateway";
       const { manifest, built } = await generatedManifest(directory, id, target);
       if (target === "root") requirements = `${JSON.stringify({ requiredRuntimeTools: built.requiredRuntimeTools, system: built.systemRequirements }, null, 2)}\n`;
+      for (const [filename, bytes] of built.sourceAssets) {
+        const previous = sourceAssets.get(filename);
+        if (previous && Buffer.compare(previous, bytes) !== 0) throw new Error(`Conflicting release asset: ${filename}`);
+        sourceAssets.set(filename, bytes);
+      }
       let result;
       try {
         result = await recordManifoldSource(
@@ -409,6 +416,12 @@ export async function pack(outputDirectory?: string): Promise<readonly (PackResu
       directories.writeOutput(outputFd, filename, result.bytes);
       sums.push(`${result.sha256}  ${filename}`);
       bundles.push({ id, file: filename, sha256: result.sha256, bytes: result.bytes.byteLength });
+    }
+    if ([...sourceAssets.keys()].sort().join("\0") !== [...SOURCE_ASSETS].sort().join("\0"))
+      throw new Error("The complete SDK-host and grammar release assets must be packed with all three bundles");
+    for (const [filename, bytes] of [...sourceAssets].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)) {
+      directories.writeOutput(outputFd, filename, bytes);
+      sums.push(`${new Bun.CryptoHasher("sha256").update(bytes).digest("hex")}  ${filename}`);
     }
     const checksums = `${sums.join("\n")}\n`;
     directories.writeOutput(outputFd, "SHA256SUMS", checksums);

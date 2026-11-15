@@ -20,10 +20,10 @@ jobs:
     # a tag's verified bundles as release assets and installs nothing; this gate
     # packs and verifies the same way, so verify's in-unit pack must reproduce
     # the host pack's SHA256SUMS on every change, not first at a tag.
-    uses: atyrode/manifold/.github/workflows/plugins.yml@a7c2237b7cf8829ca93928339703c699300d6937
+    uses: atyrode/manifold/.github/workflows/plugins.yml@5693107cfb8b135f4753477d2d25e82b66925476
     with:
       plugins-dir: plugins
-      prepare-command: bun --no-env-file --no-install workers/build.ts --prepare-dependencies && bun --no-env-file --no-install scripts/prepare-ci.ts
+      prepare-command: bun --no-env-file --no-install workers/build.ts --prepare-dependencies && python3 scripts/prepare-grammar-assets.py && bun --no-env-file --no-install scripts/prepare-ci.ts
       pack-verify-command: |
         bun run pack
         OMP_VERIFY_EXPECTED_SUMS="$PWD/dist/SHA256SUMS" OMP_CONSUMER_SOURCE=github:${{ github.repository }}#${{ github.event.pull_request.head.sha || github.sha }} bun --no-env-file --no-install scripts/verify.ts

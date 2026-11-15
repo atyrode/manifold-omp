@@ -18,6 +18,7 @@ import { listSessions, resumeSession } from "../atyrode.omp/sessions.ts";
 import { digestOf, type OmpContext } from "../atyrode.omp/machine-server.ts";
 import manifest from "../atyrode.omp/manifest.json";
 import sdkRuntimeArtifacts from "../sdk-host/runtime-artifacts.json";
+import { ompRuntimeTools } from "../runtime-assets.ts";
 import { openSessionsRoot, prepareSessionFile, resolveSessionFile } from "../workers/harness/sessions.ts";
 import { materializeJobInputs } from "../../../manifold/packages/agent/src/job-inputs.ts";
 import { ABSENT_MODEL_ID, UNLISTED_MODEL_ID, UNLISTED_PUBLISHED_ID } from "./fixtures/models.ts";
@@ -25,7 +26,7 @@ import { ABSENT_MODEL_ID, UNLISTED_MODEL_ID, UNLISTED_PUBLISHED_ID } from "./fix
 function launchFixture() {
   const machineId = "fixture-machine";
   const machine = MachineHalfSchema.parse({ ...manifest.machine,
-    tools: { ...manifest.machine.tools, bun: sdkRuntimeArtifacts.tools.bun, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
+    tools: { ...manifest.machine.tools, omp: ompRuntimeTools, bun: sdkRuntimeArtifacts.tools.bun, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
   const pins = { installationRevision: "fixture-installation", artifactSha256: "a".repeat(64), resourceBindingDigest: "b".repeat(64) };
   const consent = (cap: Cap, ref: ManifoldRef) => ({ cap, node: formatManifoldUri(ref), enabled: true, revision: "fixture-consent" });
   const operations = ["harness", "harness-sessions", "resume"].map(name => `${OMP_PLUGIN_ID}.${name}`);

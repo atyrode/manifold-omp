@@ -2,12 +2,15 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { gunzipSync } from "node:zlib";
 import type { PackResult } from "../../../manifold/packages/plugin-kit/src/pack.ts";
 import type { pack } from "../pack.ts";
+import { GRAMMAR_ASSET, ompRuntimeTools, SDK_HOST_ASSET, SOURCE_ASSETS, sourceAssetUrl } from "../runtime-assets.ts";
 
 const source = resolve(import.meta.dir, "..");
 const family = ["atyrode.omp", "atyrode.omp.accounts", "atyrode.omp.gateway"];
-const publishedFiles = [...family.map(id => `${id}.manifold-plugin.json`), "SHA256SUMS", "native-requirements.json"].sort();
+const sourceAssets = [...SOURCE_ASSETS];
+const publishedFiles = [...family.map(id => `${id}.manifold-plugin.json`), ...sourceAssets, "SHA256SUMS", "native-requirements.json"].sort();
 let fixture: string;
 let scratch: string;
 let fixturePack: typeof pack;
@@ -24,6 +27,7 @@ beforeAll(async () => {
   // Each private graph retains every member, including its generated receipt.
   for (const graph of ["", "sdk-host"])
     await cp(join(source, graph, "node_modules"), join(fixture, graph, "node_modules"), { recursive: true, verbatimSymlinks: true });
+  await cp(join(source, ".runtime-cache", "omp-grammar-assets-v1"), join(fixture, ".runtime-cache", "omp-grammar-assets-v1"), { recursive: true });
   const module = await import(join(fixture, "pack.ts"));
   fixturePack = module.pack;
 }, 180_000);
@@ -66,6 +70,37 @@ function differingFields(before: unknown, after: unknown, path: string, differen
   differences.push({ path, before: fingerprint(before), after: fingerprint(after) });
 }
 
+/** Differing members of two published archives as metadata only: name, lengths, hashes, the
+ * first differing offset and its two numeric byte values, equal trailing bytes and the count of
+ * differing positions of equal-length members. Never member bytes: compiled workers inline docs,
+ * prompts and paths. */
+async function archiveMemberDifferences(before: Buffer, after: Buffer): Promise<unknown[]> {
+  const [left, right] = await Promise.all([new Bun.Archive(before).files(), new Bun.Archive(after).files()]);
+  const differences: unknown[] = [];
+  for (const member of [...new Set([...left.keys(), ...right.keys()])].sort()) {
+    const [leftBytes, rightBytes] = await Promise.all([left.get(member)?.arrayBuffer(), right.get(member)?.arrayBuffer()]);
+    const a = leftBytes && Buffer.from(leftBytes), b = rightBytes && Buffer.from(rightBytes);
+    if (a && b && a.equals(b)) continue;
+    const sha256 = [a, b].map(bytes => bytes && new Bun.CryptoHasher("sha256").update(bytes).digest("hex"));
+    const difference: Record<string, unknown> = { member, bytes: [a?.length, b?.length], sha256 };
+    if (a && b) {
+      const shared = Math.min(a.length, b.length);
+      let first = 0;
+      while (first < shared && a[first] === b[first]) first++;
+      let trailing = 0;
+      while (trailing < shared - first && a[a.length - 1 - trailing] === b[b.length - 1 - trailing]) trailing++;
+      let differingPositions: number | undefined;
+      if (a.length === b.length) {
+        differingPositions = 0;
+        for (let i = first; i < a.length - trailing; i++) if (a[i] !== b[i]) differingPositions++;
+      }
+      Object.assign(difference, { firstOffset: first, firstByteValues: [a[first], b[first]], trailingEqualBytes: trailing, differingPositions });
+    }
+    differences.push(difference);
+  }
+  return differences;
+}
+
 async function priorFamily(destination: string): Promise<Record<string, string>> {
   await mkdir(join(destination, "stale-member"), { recursive: true });
   await writeFile(join(destination, "stale-member", "retained.txt"), "prior nested bytes\n");
@@ -73,45 +108,138 @@ async function priorFamily(destination: string): Promise<Record<string, string>>
   return snapshot(destination);
 }
 
-// Compare the private copied graph with the original source in another process, cwd and
-// environment. Output ordering alone does not exercise checkout-layout or identifier-minifier
-// drift. This file runs under bun test's NODE_ENV=test, as verify's in-unit pack does; the
-// child packs with neither NODE_ENV nor BUN_ENV, as release.yml's host `bun run pack` does,
-// so bytes that followed the packer's environment would differ from the bytes verify proves.
-async function packWithReorderedAssets(destination: string) {
+// Compare the private copied graph with the original source in another process to
+// exercise checkout-layout and environment determinism. This file runs under
+// bun test's NODE_ENV=test, as verify's in-unit pack does; the child packs with
+// neither NODE_ENV nor BUN_ENV, as release.yml's host `bun run pack` does, so bytes
+// following the packer's environment would differ from the bytes verify proves.
+async function packInFreshEnvironment(destination: string) {
   const script = `
-    const originalBuild = Bun.build;
-    let reordered = false;
-    Bun.build = async options => {
-      const result = await originalBuild(options);
-      if (typeof options.naming === "object" && options.naming.entry === "sdkHost.js") {
-        if (result.outputs.filter(output => output.kind === "asset").length < 2) throw new Error("Missing compiler assets");
-        result.outputs.reverse();
-        reordered = true;
-      }
-      return result;
-    };
-    const { source, destination } = JSON.parse(process.env.OMP_PACK_REORDER);
+    const { source, destination } = JSON.parse(process.env.OMP_PACK_INPUT);
     const { pack } = await import(source + "/pack.ts");
     const bundles = await pack(destination);
-    if (!reordered) throw new Error("Compiler output ordering was not exercised");
     process.stdout.write(JSON.stringify(bundles));
   `;
   const child = Bun.spawn([process.execPath, "--no-install", "--eval", script], {
     cwd: source, stdin: "ignore", stdout: "pipe", stderr: "pipe",
     env: { ...Object.fromEntries(Object.entries(process.env).filter(([name]) => name !== "NODE_ENV" && name !== "BUN_ENV")),
-      OMP_PACK_REORDER: JSON.stringify({ source, destination }) },
+      OMP_PACK_INPUT: JSON.stringify({ source, destination }) },
   });
   const [exit, stdout, stderr] = await Promise.all([
     child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
   ]);
-  if (exit !== 0) throw new Error(`Reordered pack failed: ${stderr}`);
+  if (exit !== 0) throw new Error(`Independent pack failed: ${stderr}`);
   return JSON.parse(stdout) as readonly (PackResult & { readonly id: string })[];
+}
+
+/** Resolves undefined once `ms` elapse first; the timer never outlives the race. Real time is
+ * the bound here: it limits a real producer process tree, which no fake clock can advance. */
+async function within<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  const elapsed = Promise.withResolvers<undefined>();
+  const timer = setTimeout(() => elapsed.resolve(undefined), ms);
+  try {
+    return await Promise.race([promise, elapsed.promise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// The release producer itself: package.json's `pack` script through pack.sh, as release.yml's
+// `bun run pack`, under this Bun and none of the caller's environment, secrets, NODE_ENV or
+// BUN_ENV. It takes no destination and publishes into the original source's dist, so its
+// bytes are read from there after it exited cleanly. The script runs a shell, then pack.ts's
+// Bun and Git: the leader's exit does not prove that chain stopped, so it runs in its own
+// process group, which is killed and observed gone before the private environment is removed,
+// and retained otherwise.
+async function packWithCli(): Promise<Record<string, string>> {
+  const tools = ["bash", "sh", "dirname", "basename", "git"].map(tool => {
+    const path = Bun.which(tool);
+    if (path === null) throw new Error(`The pack CLI requires ${tool} on the host PATH`);
+    return path;
+  });
+  const root = await mkdtemp(join(scratch, "cli-environment-"));
+  const failures: unknown[] = [];
+  let removable = true;
+  try {
+    const xdg = Object.fromEntries(["CONFIG", "CACHE", "DATA", "STATE"].map(kind => [`XDG_${kind}_HOME`, join(root, kind.toLowerCase())]));
+    for (const directory of [join(root, "home"), join(root, "tmp"), ...Object.values(xdg)]) await mkdir(directory);
+    const child = Bun.spawn([process.execPath, "--no-env-file", "--no-install", "run", "pack"], {
+      cwd: source, stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true,
+      env: { PATH: [...new Set(tools.map(path => dirname(path)))].join(":"), HOME: join(root, "home"), TMPDIR: join(root, "tmp"),
+        ...xdg, BUN: process.execPath, OMP_PACK_GIT: tools.at(-1)! },
+    });
+    removable = false;
+    const signalGroup = (signal: NodeJS.Signals | 0) => {
+      try {
+        process.kill(-child.pid, signal);
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+        throw error;
+      }
+    };
+    const finished = Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+    // Exit and both pipes are joined only when every read resolved; a rejected read proves neither.
+    const joined = finished.then(() => true, () => false);
+    let closed = false;
+    try {
+      const outcome = await within(finished, 180_000);
+      if (outcome === undefined) failures.push(new Error("The pack CLI did not exit within 180 s"));
+      else {
+        closed = true;
+        if (outcome[0] !== 0) failures.push(new Error(`The pack CLI exited ${outcome[0]}: ${outcome[2].replaceAll(root, "<private>")}`));
+      }
+    } catch (error) {
+      failures.push(error);
+    } finally {
+      // Each settlement step runs even when an earlier one throws; none replaces the primary failure.
+      try { signalGroup("SIGKILL"); } catch (error) { failures.push(error); }
+      if (!closed) closed = await within(joined, 5_000) === true;
+      try {
+        // A killed group has no completion event to await; poll its ESRCH within a fixed bound.
+        const deadline = Date.now() + 5_000;
+        while (signalGroup(0) && Date.now() < deadline) await Bun.sleep(20);
+        removable = closed && !signalGroup(0);
+      } catch (error) {
+        failures.push(error);
+      }
+      if (!removable) failures.push(new Error("The pack CLI process group or its pipes outlived the deadline; its private environment is retained"));
+    }
+  } catch (error) {
+    failures.push(error);
+  }
+  if (removable) {
+    try { await rm(root, { recursive: true, force: true }); }
+    catch (error) { failures.push(error); }
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, "The pack CLI failed");
+  return snapshot(join(source, "dist"));
+}
+
+/** Logs bounded metadata of differing published members; the caller's byte assertion stays the
+ * verdict and a failed archive diagnostic logs only its error class. */
+async function logPublishedDifferences(label: string, before: Record<string, string>, after: Record<string, string>): Promise<void> {
+  for (const file of publishedFiles) {
+    if (!file.endsWith(".json") || before[file] === after[file] || before[file] === undefined || after[file] === undefined) continue;
+    const differences: unknown[] = [];
+    differingFields(JSON.parse(Buffer.from(before[file]!, "base64").toString()),
+      JSON.parse(Buffer.from(after[file]!, "base64").toString()), file, differences);
+    console.error(`${label}_mismatch`, JSON.stringify(differences));
+  }
+  if (before[SDK_HOST_ASSET] === undefined || after[SDK_HOST_ASSET] === undefined || before[SDK_HOST_ASSET] === after[SDK_HOST_ASSET]) return;
+  try {
+    console.error(`${label}_archive_mismatch`, JSON.stringify({ file: SDK_HOST_ASSET, members: await archiveMemberDifferences(
+      Buffer.from(before[SDK_HOST_ASSET]!, "base64"), Buffer.from(after[SDK_HOST_ASSET]!, "base64")) }));
+  } catch (error) {
+    console.error(`${label}_archive_diagnostic_failed`,
+      error instanceof TypeError ? "typeerror" : error instanceof RangeError ? "rangeerror" : error instanceof Error ? "error" : "unknown");
+  }
 }
 
 for (const destinationKind of ["default", "caller"] as const) {
   describe(`${destinationKind} destination`, () => {
-    for (const [part, id] of [["accounts", family[1]!], ["gateway", family[2]!]] as const) {
+    for (const part of ["accounts", "gateway"] as const) {
       test(`${part} compiler failure preserves the complete prior family`, async () => {
         const destination = destinationKind === "default" ? join(fixture, "dist") : join(scratch, `failure-${part}`);
         const previous = await priorFamily(destination);
@@ -119,7 +247,7 @@ for (const destinationKind of ["default", "caller"] as const) {
         const sourceBytes = await readFile(entrypoint);
         try {
           await writeFile(entrypoint, "export const invalid = ;\n");
-          await expect(fixturePack(destinationKind === "default" ? undefined : destination)).rejects.toThrow(`Packing ${id} failed`);
+          await expect(fixturePack(destinationKind === "default" ? undefined : destination)).rejects.toMatchObject({ cause: expect.anything() });
           expect(await snapshot(destination)).toEqual(previous);
         } finally {
           await writeFile(entrypoint, sourceBytes);
@@ -149,7 +277,10 @@ for (const destinationKind of ["default", "caller"] as const) {
       expect(finalNames).toEqual(publishedFiles);
       expect(first.map(({ id }) => id)).toEqual(family);
       expect(first.map(({ file }) => file)).toEqual(family.map(id => join(destination, `${id}.manifold-plugin.json`)));
-      expect(await readFile(join(destination, "SHA256SUMS"), "utf8")).toBe(first.map(({ id, sha256 }) => `${sha256}  ${id}.manifold-plugin.json\n`).join(""));
+      const assetSums = await Promise.all(sourceAssets.map(async filename =>
+        `${new Bun.CryptoHasher("sha256").update(await readFile(join(destination, filename))).digest("hex")}  ${filename}\n`));
+      expect(await readFile(join(destination, "SHA256SUMS"), "utf8")).toBe(
+        first.map(({ id, sha256 }) => `${sha256}  ${id}.manifold-plugin.json\n`).join("") + assetSums.join(""));
       for (const bundle of first) {
         const bytes = await readFile(bundle.file);
         expect(new Bun.CryptoHasher("sha256").update(bytes).digest("hex")).toBe(bundle.sha256);
@@ -159,37 +290,41 @@ for (const destinationKind of ["default", "caller"] as const) {
         expect(parsed.builtAgainst?.["@manifold/source"]).toBe(
           (await readFile(join(fixture, "MANIFOLD_REV"), "utf8")).trim(),
         );
+        for (const filename of sourceAssets) expect(parsed.files[filename]).toBeUndefined();
+        if (bundle.id === "atyrode.omp") {
+          const tools = parsed.manifest.machine.tools;
+          for (const platform of ["linux-x64", "linux-arm64"] as const) {
+            expect(tools.omp[platform]).toEqual(ompRuntimeTools[platform]);
+            const sdk = tools.sdkHost[platform];
+            const archive = await readFile(join(destination, SDK_HOST_ASSET));
+            expect(sdk.url).toBe(sourceAssetUrl(SDK_HOST_ASSET));
+            expect(sdk.bundleFile).toBeUndefined();
+            expect(sdk.sha256).toBe(new Bun.CryptoHasher("sha256").update(archive).digest("hex"));
+            expect(sdk.maxBytes).toBe(archive.length);
+            expect(sdk.maxExpandedBytes).toBe(gunzipSync(archive).length);
+            const grammar = tools.omp[platform].fileGroups[0].artifact;
+            const grammarArchive = await readFile(join(destination, GRAMMAR_ASSET));
+            expect(grammar.url).toBe(sourceAssetUrl(GRAMMAR_ASSET));
+            expect(grammar.bundleFile).toBeUndefined();
+            expect(grammar.sha256).toBe(new Bun.CryptoHasher("sha256").update(grammarArchive).digest("hex"));
+            expect(grammar.maxBytes).toBe(grammarArchive.length);
+            expect(grammar.maxExpandedBytes).toBe(gunzipSync(grammarArchive).length);
+            expect(1 + Object.keys(grammar.files).length).toBe(41);
+          }
+        }
       }
       const firstBytes = await snapshot(destination);
-      const second = await packWithReorderedAssets(destination);
+      const second = await packInFreshEnvironment(destination);
       expect(second.map(({ id }) => id)).toEqual(family);
       const secondBytes = await snapshot(destination);
-      for (const file of publishedFiles) {
-        if (!file.endsWith(".json") || firstBytes[file] === secondBytes[file] ||
-          firstBytes[file] === undefined || secondBytes[file] === undefined) continue;
-        const differences: unknown[] = [];
-        const before = JSON.parse(Buffer.from(firstBytes[file]!, "base64").toString());
-        const after = JSON.parse(Buffer.from(secondBytes[file]!, "base64").toString());
-        differingFields(before, after, file, differences);
-        const member = "omp-sdkHost.tar.gz";
-        if (typeof before.files?.[member] === "string" && typeof after.files?.[member] === "string" &&
-          before.files[member] !== after.files[member]) {
-          const entries = await Promise.all([before.files[member], after.files[member]].map(async encoded => {
-            const archive = await new Bun.Archive(Buffer.from(encoded, "base64")).files("sdkHost.js");
-            const entry = archive.get("sdkHost.js");
-            if (!entry) throw new Error("SDK-host archive is missing its declared entry");
-            return await entry.text();
-          }));
-          const [left, right] = entries as [string, string];
-          let offset = 0;
-          while (offset < Math.min(left.length, right.length) && left[offset] === right[offset]) offset++;
-          differences.push({ path: `${file}/files/${member}/sdkHost.js`, offset,
-            before: { length: left.length, excerpt: left.slice(Math.max(0, offset - 160), offset + 320) },
-            after: { length: right.length, excerpt: right.slice(Math.max(0, offset - 160), offset + 320) } });
-        }
-        console.error("package_determinism_mismatch", JSON.stringify(differences));
-      }
+      await logPublishedDifferences("package_determinism", firstBytes, secondBytes);
       expect(secondBytes).toEqual(firstBytes);
+      // CI once published API bytes and then different CLI bytes from the same commit, so the
+      // release CLI must publish exactly the family the API published and verify proves.
+      const cliBytes = await packWithCli();
+      await logPublishedDifferences("package_cli", firstBytes, cliBytes);
+      await publishedFamily(join(source, "dist"));
+      expect(cliBytes).toEqual(firstBytes);
     }, 360_000);
   });
 }
@@ -213,7 +348,7 @@ for (const graph of ["", "sdk-host"]) for (const dependency of ["@oh-my-pi/pi-ai
 for (const [filename, refusal] of [
   ["bun.lock", "Unreviewed bun.lock"],
   ["sdk-host/bun.lock", "Unreviewed bun.lock"],
-  ["patches/@oh-my-pi%2Fpi-ai@18.20.0.patch", "Unreviewed pi-ai patch"],
+  ["patches/@oh-my-pi%2Fpi-ai@18.20.1.patch", "Unreviewed pi-ai patch"],
 ] as const) {
   test(`${filename} drift refuses the previously prepared graph`, async () => {
     const destination = join(scratch, "changed-input");
@@ -280,6 +415,20 @@ test("tampered bundled CA data preserves the complete prior family", async () =>
   } finally {
     await writeFile(file, original);
   }
+}, 180_000);
+
+test("tampered prepared grammar bytes preserve the complete prior family", async () => {
+  const destination = join(scratch, "tampered-grammar-data");
+  const previous = await priorFamily(destination);
+  const file = join(fixture, ".runtime-cache", "omp-grammar-assets-v1", "grammars-v1.tar.gz");
+  const original = await readFile(file);
+  try {
+    const corrupted = Buffer.from(original);
+    corrupted[0] = corrupted[0]! ^ 1;
+    await writeFile(file, corrupted);
+    await expect(fixturePack(destination)).rejects.toThrow("grammar");
+    expect(await snapshot(destination)).toEqual(previous);
+  } finally { await writeFile(file, original); }
 }, 180_000);
 
 test("source, SDK, symlink and another run's staging destinations are refused without mutation", async () => {
@@ -424,11 +573,15 @@ test("compiler preparation cannot overwrite another directory through a replaced
 async function publishedFamily(directory: string): Promise<void> {
   expect((await readdir(directory)).sort()).toEqual(publishedFiles);
   const sums = (await readFile(join(directory, "SHA256SUMS"), "utf8")).trim().split("\n");
-  expect(sums.map(line => line.slice(66))).toEqual(family.map(id => `${id}.manifold-plugin.json`));
+  expect(sums.map(line => line.slice(66))).toEqual([...family.map(id => `${id}.manifold-plugin.json`), ...sourceAssets]);
   for (const [index, id] of family.entries()) {
     const bytes = await readFile(join(directory, `${id}.manifold-plugin.json`));
     expect(new Bun.CryptoHasher("sha256").update(bytes).digest("hex")).toBe(sums[index]!.slice(0, 64));
     expect(JSON.parse(bytes.toString("utf8")).manifest.id).toBe(id);
+  }
+  for (const [index, filename] of sourceAssets.entries()) {
+    const bytes = await readFile(join(directory, filename));
+    expect(new Bun.CryptoHasher("sha256").update(bytes).digest("hex")).toBe(sums[family.length + index]!.slice(0, 64));
   }
   expect(JSON.parse(await readFile(join(directory, "native-requirements.json"), "utf8")).requiredRuntimeTools).toEqual(["system"]);
 }

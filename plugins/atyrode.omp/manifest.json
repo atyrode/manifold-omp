@@ -1,8 +1,8 @@
 {
   "id": "atyrode.omp",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "title": "omp",
-  "description": "Independent OMP execution over governed native Manifold resources. Restricted automation uses the supported OMP 18.8.6 SDK registry with explicit tool names and no delegation. Operator resume preserves persisted exact model/thinking unless explicitly overridden; missing or incompatible state refuses before inference. Placement independently authorizes its container and terminal.",
+  "description": "Independent OMP execution over governed native Manifold resources. Restricted automation uses the supported OMP 18.20.1 SDK registry with explicit tool names and no delegation. Operator resume preserves persisted exact model/thinking unless explicitly overridden; missing or incompatible state refuses before inference. Placement independently authorizes its container and terminal.",
   "capabilities": [
     "containers:read",
     "containers:write",
@@ -22,7 +22,7 @@
     "operations:invoke"
   ],
   "dataVersion": {
-    "major": 1,
+    "major": 2,
     "minor": 0
   },
   "purges": [
@@ -137,25 +137,6 @@
               "task": {
                 "type": "object",
                 "properties": {
-                  "agentModelOverrides": {
-                    "type": "object",
-                    "propertyNames": {
-                      "type": "string",
-                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
-                    },
-                    "additionalProperties": {
-                      "anyOf": [
-                        {
-                          "type": "string",
-                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\/[A-Za-z0-9][A-Za-z0-9._/:-]{0,511}$"
-                        },
-                        {
-                          "type": "string",
-                          "pattern": "^@[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
-                        }
-                      ]
-                    }
-                  },
                   "agentAdvisor": {
                     "type": "object",
                     "properties": {
@@ -1052,7 +1033,7 @@
           "SSL_CERT_FILE": "/runtime/bin/ca-certificates",
           "GIT_SSL_CAINFO": "/runtime/bin/ca-certificates"
         },
-        "runtimeTools": ["bun", "ca-certificates", "system", "harness", "sdkHost", "sdk-pi-natives"],
+        "runtimeTools": ["omp", "bun", "ca-certificates", "system", "harness", "sdkHost", "sdk-pi-natives"],
         "executable": { "runtimeTool": "bun" },
         "inputFiles": {
           "models": {

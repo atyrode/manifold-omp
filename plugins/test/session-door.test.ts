@@ -8,6 +8,7 @@ import {
   INVENTORY_OPERATION_ID,
   LAUNCH_OPERATION_ID,
   OMP_PLUGIN_ID,
+  OMP_VERSION,
   OmpHarnessProfileSchema,
   RUNS_LOCATION_ID,
   SESSION_GUEST_PATH,
@@ -29,6 +30,7 @@ import { digestOf, type OmpContext } from "../atyrode.omp/machine-server.ts";
 import { handlers as rootHandlers } from "../atyrode.omp/server.ts";
 import rootManifest from "../atyrode.omp/manifest.json";
 import sdkRuntimeArtifacts from "../sdk-host/runtime-artifacts.json";
+import { ompRuntimeTools } from "../runtime-assets.ts";
 import { OPENROUTER_LISTING_TEMPLATE } from "../workers/gateway/template.ts";
 import { ProbeModelsConfigSchema } from "../workers/probe/inputs.ts";
 import { ustar } from "./fixtures/ustar.ts";
@@ -93,7 +95,7 @@ const session = {
   prompt: "summarise the repository",
   planYolo: false,
 };
-const machine = MachineHalfSchema.parse(rootManifest.machine);
+const machine = MachineHalfSchema.parse({ ...rootManifest.machine, tools: { omp: ompRuntimeTools } });
 const launch = machine.operations[LAUNCH_OPERATION_ID]!;
 const oneShot = machine.operations[SESSION_OPERATION_ID]!;
 
@@ -216,7 +218,7 @@ function publicJob(
 function fixture(options: { sdk?: boolean } = {}): Fixture {
   const installedMachine = options.sdk ? MachineHalfSchema.parse({
     ...machine,
-    tools: { ...machine.tools, bun: sdkRuntimeArtifacts.tools.bun, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] },
+    tools: { ...machine.tools, omp: ompRuntimeTools, bun: sdkRuntimeArtifacts.tools.bun, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] },
   }) : machine;
   const storage = new Map<string, string>();
   const archives = new Map<string, Buffer>();
@@ -874,7 +876,7 @@ test("a default inventory reports Codex from the account's listing, and an expli
     inputCostPerMillion: 1, outputCostPerMillion: 5, contextWindow: 500_000, maxTokens: 128_000, reasoning: true,
     thinkingLevels: ["low", "medium", "high"], images: true, quotaTier });
   const receipt = (...models: InventoryModel[]) =>
-    JSON.stringify({ schemaVersion: 1, kind: "inventory", ompVersion: "18.8.6", observedAt: 1, models });
+    JSON.stringify({ schemaVersion: 1, kind: "inventory", ompVersion: OMP_VERSION, observedAt: 1, models });
   const listed = row("openai-codex", CODEX_LISTED_ONLY, "openai-codex-responses", "chat");
   const pinned = row("anthropic", "claude-sonnet-4-5", "anthropic-messages", null);
 
@@ -965,8 +967,8 @@ test("a one-shot holds every model role its configuration leaves unset to the co
   const job = await f.client.call("runSession", { ...advised, reviewDigest });
   if ("refused" in job) throw new Error(job.refused);
   const roles: Record<string, string> = JSON.parse(String(f.posted[0]!.input.config)).modelRoles;
-  // The chat roles of OMP 18.8.6, in the CLI and in the SDK host.
-  for (const role of ["default", "slow", "vision", "plan", "commit", "tiny", "memory", "task", "advisor"])
+  // Native shared chat roles in both OMP 18.20.1 execution graphs.
+  for (const role of ["default", "slow", "vision", "plan", "commit", "tiny", "memory", "task", "advisor", "widget"])
     expect(roles[role]).toBe(configured);
   // A role the operator configured keeps its model.
   expect(roles.smol).toBe(smol);
@@ -1242,7 +1244,7 @@ test("set reviews spend on the same explicit selection, but not on a changed cat
   const f = fixture();
   const deployment = structuredClone(await f.ctx.jobs.describeDeployment({ machineId: target.machineId, pluginId: OMP_PLUGIN_ID }));
   deployment.installation!.machine = MachineHalfSchema.parse({ ...deployment.installation!.machine,
-    tools: { ...deployment.installation!.machine.tools, bun: sdkRuntimeArtifacts.tools.bun, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
+    tools: { ...deployment.installation!.machine.tools, omp: ompRuntimeTools, bun: sdkRuntimeArtifacts.tools.bun, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
   f.ctx.jobs.describeDeployment = async () => deployment;
   f.ctx.jobs.inspectInputs = async ({ inputs }) => ({ inputs: inputs.map(input => ({
     ...input, sha256: "a".repeat(64), bytes: 4096, files: 1,
@@ -1277,12 +1279,13 @@ test("restricted review binds exact tools and disables ambient skills without ch
   const f = fixture();
   const deployment = structuredClone(await f.ctx.jobs.describeDeployment({ machineId: target.machineId, pluginId: OMP_PLUGIN_ID }));
   deployment.installation!.machine = MachineHalfSchema.parse({ ...deployment.installation!.machine,
-    tools: { ...deployment.installation!.machine.tools, bun: sdkRuntimeArtifacts.tools.bun, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
+    tools: { ...deployment.installation!.machine.tools, omp: ompRuntimeTools, bun: sdkRuntimeArtifacts.tools.bun, "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
   f.ctx.jobs.describeDeployment = async () => deployment;
   const automation = { mode: "restricted" as const, toolNames: ["read" as const], delegation: "disabled" as const };
-  // Code composes passive task routes even when delegation is disabled.
+  // Shared task routing remains passive configuration when delegation is disabled.
   const input = { ...session, overlay: { ...session.overlay,
-    task: { agentModelOverrides: { task: "anthropic/claude-sonnet-4-5" }, agentAdvisor: { task: "off" as const }, prewalk: false } } };
+    modelRoles: { ...session.overlay.modelRoles, task: "anthropic/claude-sonnet-4-5" },
+    task: { agentAdvisor: { task: "off" as const }, prewalk: false } } };
   const reviewed = await f.client.call("reviewSession", { ...input, automation });
   if ("refused" in reviewed) throw new Error(reviewed.refused);
   expect(reviewed.automation).toEqual(automation);
@@ -1306,7 +1309,7 @@ for (const platform of ["linux-x64", "linux-arm64"] as const) {
         const f = fixture();
         const deployment = structuredClone(await f.ctx.jobs.describeDeployment({ machineId: target.machineId, pluginId: OMP_PLUGIN_ID }));
         const machine = MachineHalfSchema.parse({ ...deployment.installation!.machine,
-          tools: { ...deployment.installation!.machine!.tools, bun: sdkRuntimeArtifacts.tools.bun,
+          tools: { ...deployment.installation!.machine!.tools, omp: ompRuntimeTools, bun: sdkRuntimeArtifacts.tools.bun,
             "sdk-pi-natives": sdkRuntimeArtifacts.tools["pi-natives"] } });
         deployment.installation!.machine = machine;
         f.ctx.jobs.describeDeployment = async () => deployment;
@@ -1318,6 +1321,25 @@ for (const platform of ["linux-x64", "linux-arm64"] as const) {
         expect(f.posted).toEqual([]);
       });
     }
+  }
+}
+
+for (const platform of ["linux-x64", "linux-arm64"] as const) {
+  for (const drift of ["missing", "source", "member", "target"] as const) {
+    test(`ordinary session refuses ${platform} grammar group ${drift} drift before dispatch`, async () => {
+      const f = fixture();
+      const deployment = structuredClone(await f.ctx.jobs.describeDeployment({ machineId: target.machineId, pluginId: OMP_PLUGIN_ID }));
+      f.ctx.jobs.describeDeployment = async () => deployment;
+      const reviewDigest = await reviewDigestOf(f.client, session);
+      const omp = deployment.installation!.machine.tools!.omp![platform]!;
+      if (drift === "missing") delete omp.fileGroups;
+      else if (drift === "source") omp.fileGroups![0]!.artifact.sha256 = "f".repeat(64);
+      else if (drift === "member") omp.fileGroups![0]!.artifact.files!["file-0"]!.sha256 = "f".repeat(64);
+      else omp.fileGroups![0]!.target = ["other-grammars"];
+      expect(await f.client.call("reviewSession", session)).toEqual({ refused: "omp_resources_changed" });
+      expect(await f.client.call("runSession", { ...session, reviewDigest })).toEqual({ refused: "omp_resources_changed" });
+      expect(f.posted).toEqual([]);
+    });
   }
 }
 

@@ -77,6 +77,7 @@ import { effectiveOverlay, expectedDefaults, readDefaults } from "./state.ts";
 import { resolveSkills } from "./skills.ts";
 import { bundledProbeModels, liveListingThinking } from "./sdk-metadata.macro.ts" with { type: "macro" };
 import sdkRuntimeArtifacts from "../sdk-host/runtime-artifacts.json";
+import { ompRuntimeTools } from "../runtime-assets.ts";
 
 const registry = bundledProbeModels();
 const providers = Object.keys(registry);
@@ -233,7 +234,6 @@ function configuredModels(overlay: Overlay): string[] {
   return [
     ...Object.values(roles),
     ...Object.values(overlay.retry?.fallbackChains ?? {}).flat(),
-    ...Object.values(overlay.task?.agentModelOverrides ?? {}).map(ref => ref.startsWith("@") ? roles[ref.slice(1)] ?? "" : ref),
   ];
 }
 /**
@@ -720,8 +720,18 @@ function requireSkillRuntime(machine: MachineHalf | undefined, operationId: stri
     throw new OmpRefusal("skills_runtime_unsupported");
 }
 
+function supportsOmpGrammarRuntime(machine: MachineHalf | undefined, operationId: string): boolean {
+  return machine?.operations[operationId]?.runtimeTools.includes("omp") === true &&
+    (["linux-x64", "linux-arm64"] as const).every(platform =>
+      digestOf(machine?.tools?.omp?.[platform] ?? null) === digestOf(ompRuntimeTools[platform]));
+}
+function requireOmpGrammarRuntime(machine: MachineHalf | undefined, operationId: string): void {
+  if (!supportsOmpGrammarRuntime(machine, operationId)) throw new OmpRefusal("resources_changed");
+}
+
 function supportsSdkRuntime(machine: MachineHalf | undefined, operationId: string): boolean {
   const operation = machine?.operations[operationId];
+  if (!supportsOmpGrammarRuntime(machine, operationId)) return false;
   for (const platform of ["linux-x64", "linux-arm64"] as const) {
     const addon = machine?.tools?.["sdk-pi-natives"]?.[platform];
     const bun = machine?.tools?.bun?.[platform];
@@ -730,10 +740,11 @@ function supportsSdkRuntime(machine: MachineHalf | undefined, operationId: strin
       bun?.sha256 !== sdkRuntimeArtifacts.tools.bun[platform].sha256 ||
       bun.entrySha256 !== sdkRuntimeArtifacts.tools.bun[platform].entrySha256) return false;
   }
-  return sdkRuntimeArtifacts.sdkVersion === "18.8.6" &&
+  return sdkRuntimeArtifacts.sdkVersion === "18.20.1" &&
     operation?.executable?.runtimeTool === "bun" &&
     operation?.input.automation !== undefined && operation.input.resumeOverrides !== undefined &&
-    operation.runtimeTools?.includes("sdkHost") === true && operation.runtimeTools.includes("sdk-pi-natives");
+    operation.runtimeTools?.includes("omp") === true &&
+    operation.runtimeTools.includes("sdkHost") && operation.runtimeTools.includes("sdk-pi-natives");
 }
 function requireSdkRuntime(machine: MachineHalf | undefined, operationId: string) {
   if (!supportsSdkRuntime(machine, operationId)) throw new OmpRefusal("sdk_runtime_unsupported");
@@ -808,6 +819,7 @@ async function sessionRuntimePreparation(
     args.machineId,
     operationId,
   );
+  requireOmpGrammarRuntime(current.deployment.installation?.machine, operationId);
   const automation = args.isolation
     ? { mode: "restricted" as const, toolNames: [], delegation: "disabled" as const }
     : args.automation ?? { mode: "ordinary" as const };
@@ -938,6 +950,7 @@ async function oneShotPreparation(
   const operationId = args.isolation ? MATERIAL_SESSION_OPERATION_ID : SESSION_OPERATION_ID;
   const current = prepared.review.operationId === operationId ? prepared.current
     : await currentOperation(ctx, args.machineId, operationId);
+  requireOmpGrammarRuntime(current.deployment.installation?.machine, operationId);
   const declared = current.deployment.installation?.machine?.operations[operationId]?.limits;
   let limits: PublicJob["limits"] | undefined;
   if (args.inferenceLimits !== undefined) {

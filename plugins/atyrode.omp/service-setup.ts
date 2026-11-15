@@ -38,6 +38,7 @@ import {
   buildSharedBrokerPolicy,
 } from "./service-policies.ts";
 import runtimeArtifacts from "../runtime-artifacts.json";
+import { ompRuntimeTools } from "../runtime-assets.ts";
 
 const signInConfig = JSON.stringify({ startup: { setupWizard: false } });
 function expectBrokerRevision(actual: string | null, expected: string | null) {
@@ -54,6 +55,7 @@ function currentAccountRuntime(machine: MachineHalf | undefined): boolean {
       const installed = machine?.tools?.[alias]?.[platform];
       const reviewed = runtimeArtifacts.tools[alias][platform];
       if (installed?.sha256 !== reviewed.sha256 || installed.entrySha256 !== reviewed.entrySha256) return false;
+      if (alias === "omp" && digestOf(installed) !== digestOf(ompRuntimeTools[platform])) return false;
     }
   return true;
 }

@@ -3,23 +3,28 @@ import { lstat, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promi
 import { isAbsolute, join, resolve } from "node:path";
 import type { ActionInput, ActionResult, OmpAction } from "../api/index.ts";
 import type { TestAgent } from "../../../manifold/packages/testkit/src/index.ts";
+import { failureClass } from "./owned-root.ts";
 
 class VerificationFailure extends Error {
-  constructor(readonly code: string) { super("OMP native verification assertion failed"); }
+  constructor(readonly code: string, readonly diagnostic: { error?: string; cleanup?: string } = {}) {
+    super("OMP native verification assertion failed");
+  }
 }
 function check(value: unknown, code: string): asserts value {
   if (!value) throw new VerificationFailure(code);
 }
 
 process.umask(0o077);
-let outcome: { ok: boolean; code?: string };
-// Only verifier-owned phase identifiers cross IPC; never serialize an exception,
-// native denial message, request, credential, or server output to diagnose a failure.
+let outcome: { ok: boolean; code?: string; error?: string; cleanup?: string };
+// Only fixed verifier classifications and bounded public artifact digest prefixes cross IPC.
+// Never serialize an exception, native denial message, request, credential, or server output.
 let phase = "isolation";
 try {
   const root = process.env.OMP_VERIFY_ROOT;
   check(root && process.cwd() === join(root, "cwd") && process.env.HOME === join(root, "home")
     && process.env.PI_CODING_AGENT_DIR === join(root, "agent") && process.send, "missing-private-environment");
+  const publishedAssets = process.argv.length === 3 && process.argv[2] === "--published-assets";
+  check(process.argv.length === 2 || publishedAssets, "invalid-verification-arguments");
   // Intentional module-loading boundary: static imports would run before this
   // child verifies the launcher's empty credential environment and private HOME.
   phase = "import-pack";
@@ -45,8 +50,49 @@ try {
   // The family proven below is byte for byte the family being published.
   phase = "release-binding";
   const expectedSums = process.env.OMP_VERIFY_EXPECTED_SUMS;
-  check(expectedSums && isAbsolute(expectedSums) && await readFile(join(root, "bundles", "SHA256SUMS"), "utf8") === await readFile(expectedSums, "utf8"),
-    "packed-family-differs-from-release");
+  // Only exact text equality is accepted. On failure, the strict parse below only classifies
+  // the difference with a fixed label and bounded public digest prefixes; never a path or text.
+  const releaseMismatch = (error: string) => new VerificationFailure("packed-family-differs-from-release", { error });
+  if (!expectedSums) throw releaseMismatch("expected-sums-unset");
+  if (!isAbsolute(expectedSums)) throw releaseMismatch("expected-sums-relative");
+  const readSums = async (side: "actual" | "expected", file: string) => {
+    try { return await readFile(file, "utf8"); }
+    catch (error) { throw releaseMismatch(`${side}-sums-read-${failureClass(error)}`); }
+  };
+  const actualSums = await readSums("actual", join(root, "bundles", "SHA256SUMS"));
+  const releasedSums = await readSums("expected", expectedSums);
+  if (actualSums !== releasedSums) {
+    const labels = [["atyrode.omp.manifold-plugin.json", "root"], ["atyrode.omp.accounts.manifold-plugin.json", "accounts"],
+      ["atyrode.omp.gateway.manifold-plugin.json", "gateway"], ["omp-grammars-v1.tar.gz", "grammars"], ["omp-sdkHost.tar.gz", "sdkhost"]] as const;
+    const parseSums = (side: "actual" | "expected", text: string) => {
+      const entries = new Map<string, string>();
+      if (!text.endsWith("\n")) throw releaseMismatch(`${side}-sums-malformed`);
+      for (const line of text.slice(0, -1).split("\n")) {
+        const match = /^([0-9a-f]{64}) {2}(.+)$/.exec(line);
+        if (!match || match[0] !== line || !labels.some(([name]) => name === match[2]) || entries.has(match[2]!))
+          throw releaseMismatch(`${side}-sums-malformed`);
+        entries.set(match[2]!, match[1]!);
+      }
+      return entries;
+    };
+    const actual = parseSums("actual", actualSums);
+    const expected = parseSums("expected", releasedSums);
+    for (const [name, label] of labels) {
+      const actualHash = actual.get(name);
+      const expectedHash = expected.get(name);
+      if (actualHash === undefined) throw releaseMismatch(`${label}-missing-actual`);
+      if (expectedHash === undefined) throw releaseMismatch(`${label}-missing-expected`);
+      if (actualHash !== expectedHash)
+        throw releaseMismatch(`${label}-hash-a${actualHash.slice(0, 12)}-e${expectedHash.slice(0, 12)}`);
+    }
+    throw releaseMismatch("sums-order-only");
+  }
+  const { preparedSourceArtifacts, verifyPublishedRelease } = await import("./source-assets.ts");
+  const sourceBundle = PluginBundleSchema.parse(JSON.parse(await readFile(bundles[0]!.file, "utf8")));
+  check(sourceBundle.manifest.machine, "packed-root-machine-missing");
+  const preparedArtifactArchives = publishedAssets ? undefined
+    : await preparedSourceArtifacts(join(root, "bundles"), sourceBundle.manifest.machine);
+  if (publishedAssets) await verifyPublishedRelease();
   const policyFile = join(root, "agent-policy.txt");
   await writeFile(policyFile, "Disposable native proof policy A.\n", { mode: 0o600 });
   phase = "server-start";
@@ -55,6 +101,7 @@ try {
   const hub = { url: server.httpUrl, ownerKey: server.ownerKey };
   const installed: string[] = [];
   let cleanupFailed = false;
+  let nativeFailure: { error: unknown } | undefined;
   let agent: TestAgent | undefined;
   let nativeOwner: Bun.Subprocess<"ignore", "ignore", "ignore"> | undefined;
   const digest = (value: unknown) => createHash("sha256").update(canonicalJobJson(value)).digest("hex");
@@ -346,8 +393,9 @@ try {
         MANIFOLD_AGENT_POLICY_FILE: policyFile } });
     hub.url = server.httpUrl;
     const nativeRoot = resolve(import.meta.dir, "../../../manifold");
-    nativeOwner = Bun.spawn([process.execPath, "--no-env-file", "--no-install", "packages/agent/src/main.ts", "--terminal-host"], {
-      cwd: nativeRoot, env: { ...process.env, MANIFOLD_JOB_OWNER_CONFIG: config,
+    nativeOwner = Bun.spawn([process.execPath, "--no-env-file", "--no-install",
+      ...(publishedAssets ? ["packages/agent/src/main.ts", "--terminal-host"] : [resolve(import.meta.dir, "verify-native-owner.ts")])], {
+      cwd: publishedAssets ? nativeRoot : join(root, "cwd"), env: { ...process.env, MANIFOLD_JOB_OWNER_CONFIG: config,
         MANIFOLD_JOB_OWNER_SOCKET: socket, MANIFOLD_TERMINAL_HOST_SOCKET: `${socket}.terminal` },
       stdin: "ignore", stdout: "ignore", stderr: "ignore",
     });
@@ -417,8 +465,19 @@ try {
     phase = "packed-broker-worker-ready";
     await waitFor(async () => {
       const value = await instance();
-      check(!["unavailable", "stopped"].includes(value.state),
-        `packed-broker-${`${value.state}-${value.reason ?? "unstated"}`.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/-+$/, "").slice(0, 64)}`);
+      if (["unavailable", "stopped"].includes(value.state)) {
+        const runs = ListJobRunsResultSchema.parse(await ownerAction(hub, "engine.jobs.listRuns", {
+          machineId: target.machineId, pluginId: ACCOUNTS_PLUGIN_ID, operationId: BROKER_OPERATION_ID,
+        }));
+        const job = runs.runs.find(({ job }) => job?.authority.origin.kind === "service" &&
+          job.authority.origin.serviceId === BROKER_SERVICE_ID && job.authority.origin.revision === promoted.revision)?.job;
+        const result = job?.result;
+        // Failure-only, fixed scalar metadata: no native denial text or worker payload.
+        const exit = result?.exitCode === null || result?.exitCode === undefined ? "n"
+          : Math.max(-999, Math.min(999, result.exitCode));
+        const elapsed = result?.usage ? Math.min(999999, result.usage.elapsedMs) : "n";
+        throw new VerificationFailure(`packed-broker-${value.state}-${job?.state ?? "missing"}-x${exit}-t${elapsed}-s${result?.startedAt == null ? 0 : 1}`);
+      }
       return value.state === "ready" && value.configuration?.revision === promoted.revision;
     }, 60_000, 50);
     const retainedAccess = await call("reviewAccountRuntime", { expectedBrokerRevision: promoted.revision });
@@ -659,12 +718,16 @@ try {
     const { verifySdkHost, SdkHostVerificationFailure } = await import("./verify-sdk-host.ts");
     try {
       await verifySdkHost({ root, bubblewrap, systemBindings: system.system!,
-        bundlePath: bundles.find(bundle => bundle.id === OMP_PLUGIN_ID)!.file });
+        bundlePath: bundles.find(bundle => bundle.id === OMP_PLUGIN_ID)!.file,
+        ...(preparedArtifactArchives ? { preparedArtifactArchives } : {}) });
     } catch (error) {
       if (error instanceof SdkHostVerificationFailure)
-        throw new VerificationFailure(`sdk-${error.code}`);
+        throw new VerificationFailure(`sdk-${error.code}`, error.diagnostic);
       throw error;
     }
+  } catch (error) {
+    nativeFailure = { error };
+    throw error;
   } finally {
     try { await stopBroker(); } catch { cleanupFailed = true; }
     for (const id of installed.reverse()) {
@@ -687,12 +750,22 @@ try {
         cleanupFailed = true;
       }
     }
-    await server.stop();
-    check(!cleanupFailed, "native-cleanup-failed");
+    try { await server.stop(); } catch { cleanupFailed = true; }
+    if (cleanupFailed) {
+      const primary = nativeFailure?.error;
+      throw new VerificationFailure(nativeFailure
+        ? primary instanceof VerificationFailure ? primary.code : `${phase}-failed`
+        : "native-cleanup-failed", {
+        ...(primary instanceof VerificationFailure ? primary.diagnostic
+          : nativeFailure ? { error: failureClass(primary) } : {}),
+        cleanup: "native-cleanup-failed",
+      });
+    }
   }
   outcome = { ok: true };
 } catch (error) {
-  outcome = { ok: false, code: error instanceof VerificationFailure ? error.code : `${phase}-failed` };
+  outcome = { ok: false, code: error instanceof VerificationFailure ? error.code : `${phase}-failed`,
+    ...(error instanceof VerificationFailure ? error.diagnostic : { error: failureClass(error) }) };
 }
 if (!process.send || !process.connected) process.exit(1);
 const delivered = await new Promise<boolean>(resolve => {
