@@ -7,14 +7,16 @@ import {
   mkdtemp,
   readFile,
   realpath,
-  rm,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { HeldDirectory } from "../../../manifold/packages/agent/src/job-files.ts";
+import { failureClass, reclaimAllocatedRoot } from "./owned-root.ts";
 
-type Receipt = { ok: boolean; code?: string };
+type Diagnostic = { error?: string; cleanup?: string };
+type Receipt = { ok: boolean; code?: string } & Diagnostic;
 const publishedAssets = process.argv.length === 3 && process.argv[2] === "--published-assets";
 const success = {
   ok: true,
@@ -23,7 +25,7 @@ const success = {
   sourceAssets: publishedAssets ? "published-versioned-https-sha256" : "owned-prepared-source-bytes",
 } as const;
 class VerificationFailure extends Error {
-  constructor(readonly code: string) {
+  constructor(readonly code: string, readonly diagnostic: Diagnostic = {}) {
     super(`OMP verification failed: ${code}`);
   }
 }
@@ -38,13 +40,24 @@ function receipt(value: unknown): Receipt | undefined {
     typeof value.ok !== "boolean"
   )
     return undefined;
-  if (
-    "code" in value &&
-    (typeof value.code !== "string" ||
-      !/^[a-z][a-z0-9-]{0,79}$/.test(value.code))
-  )
-    return undefined;
+  for (const key of ["code", "error", "cleanup"]) {
+    const field = (value as Record<string, unknown>)[key];
+    if (key in value && (typeof field !== "string" || !/^[a-z][a-z0-9-]{0,79}$/.test(field)))
+      return undefined;
+  }
   return value as Receipt;
+}
+/** A failed release never replaces the primary code, and never lets a run report success. */
+function settle(failure: { error: unknown } | undefined, cleanup: string | undefined): void {
+  if (cleanup === undefined) {
+    if (failure) throw failure.error;
+    return;
+  }
+  if (failure?.error instanceof VerificationFailure)
+    throw new VerificationFailure(failure.error.code, { cleanup, ...failure.error.diagnostic });
+  throw failure
+    ? new VerificationFailure("verification-launcher-failed", { error: failureClass(failure.error), cleanup })
+    : new VerificationFailure("verification-cleanup-failed", { cleanup });
 }
 
 async function verifyConsumer(): Promise<void> {
@@ -96,7 +109,7 @@ async function delegated(): Promise<void> {
     uid !== undefined && gid !== undefined && uid !== 0,
     "ordinary-host-user-required",
   );
-  const root = await mkdtemp(join(tmpdir(), "omp-native-unit-"));
+  const root = await mkdtemp(join(await realpath(tmpdir()), "omp-native-unit-"));
   const unit = `omp-native-verify-${randomUUID()}`;
   const manager = systemMode ? [sudo!, "-n"] : [];
   const managerEnv = {
@@ -106,8 +119,11 @@ async function delegated(): Promise<void> {
   };
   let safeToRemove = true;
   let reported: Receipt | undefined;
+  let held: HeldDirectory | undefined;
+  let failure: { error: unknown } | undefined;
   try {
     await chmod(root, 0o700);
+    held = HeldDirectory.openAbsolute(root, { private: true });
     await Promise.all(
       ["home", "tmp"].map((name) => mkdir(join(root, name), { mode: 0o700 })),
     );
@@ -209,11 +225,16 @@ async function delegated(): Promise<void> {
     } finally {
       clearTimeout(timer);
     }
-    check(
-      exit === 0 && reported?.ok === true,
-      reported?.code ?? "delegated-native-proof-failed",
-    );
-  } finally {
+    if (!(exit === 0 && reported?.ok === true))
+      throw new VerificationFailure(
+        reported?.code ?? "delegated-native-proof-failed",
+        { ...(reported?.error ? { error: reported.error } : {}), ...(reported?.cleanup ? { cleanup: reported.cleanup } : {}) },
+      );
+  } catch (error) {
+    failure = { error };
+  }
+  let cleanup: string | undefined;
+  try {
     // Stop only the exact unit this invocation named; never remove a live owner's
     // backing directory merely because its systemd-run client has exited.
     if (!safeToRemove) {
@@ -262,9 +283,20 @@ async function delegated(): Promise<void> {
         clearTimeout(stateTimer);
       }
     }
-    if (safeToRemove) await rm(root, { recursive: true, force: true });
-    check(safeToRemove, "unit-termination-unobserved-state-retained");
+  } catch (error) {
+    cleanup = failureClass(error);
   }
+  if (!safeToRemove) {
+    held?.close();
+    throw new VerificationFailure("unit-termination-unobserved-state-retained", cleanup ? { cleanup } : {});
+  }
+  try {
+    if (!held) throw new Error("directory_unheld");
+    reclaimAllocatedRoot(root, held);
+  } catch (error) {
+    cleanup ??= failureClass(error);
+  }
+  settle(failure, cleanup);
 }
 
 async function isolated(): Promise<void> {
@@ -307,13 +339,16 @@ async function isolated(): Promise<void> {
     "+cpu +memory +pids",
   );
 
-  const root = await mkdtemp(join(tmpdir(), "omp-native-verify-"));
+  const root = await mkdtemp(join(await realpath(tmpdir()), "omp-native-verify-"));
   let safeToRemove = true;
   let timer: NodeJS.Timeout | undefined;
   let killTimer: NodeJS.Timeout | undefined;
   let result: Receipt | undefined;
+  let held: HeldDirectory | undefined;
+  let failure: { error: unknown } | undefined;
   try {
     await chmod(root, 0o700);
+    held = HeldDirectory.openAbsolute(root, { private: true });
     await Promise.all(
       [
         "home",
@@ -406,7 +441,7 @@ async function isolated(): Promise<void> {
       if (
         result ||
         !parsed ||
-        Object.keys(parsed).some((key) => !["ok", "code"].includes(key))
+        Object.keys(parsed).some((key) => !["ok", "code", "error", "cleanup"].includes(key))
       )
         invalidReceipt = true;
       else result = parsed;
@@ -430,15 +465,27 @@ async function isolated(): Promise<void> {
     while (groupExists() && Date.now() < deadline) await Bun.sleep(20);
     safeToRemove = !groupExists();
     check(safeToRemove, "child-termination-unobserved-state-retained");
-    check(
-      code === 0 && result?.ok === true && !invalidReceipt,
-      invalidReceipt ? "invalid-result" : (result?.code ?? "child-failed"),
-    );
-  } finally {
-    clearTimeout(timer);
-    clearTimeout(killTimer);
-    if (safeToRemove) await rm(root, { recursive: true, force: true });
+    if (code !== 0 || result?.ok !== true || invalidReceipt)
+      throw new VerificationFailure(invalidReceipt ? "invalid-result" : (result?.code ?? "child-failed"), {
+        ...(result?.error ? { error: result.error } : {}),
+        ...(result?.cleanup ? { cleanup: result.cleanup } : {}),
+      });
+  } catch (error) {
+    failure = { error };
   }
+  clearTimeout(timer);
+  clearTimeout(killTimer);
+  // Only once the whole workload process group is proven gone.
+  let cleanup: string | undefined;
+  if (safeToRemove) {
+    try {
+      if (!held) throw new Error("directory_unheld");
+      reclaimAllocatedRoot(root, held);
+    } catch (error) {
+      cleanup = failureClass(error);
+    }
+  } else held?.close();
+  settle(failure, cleanup);
 }
 
 try {
@@ -457,10 +504,10 @@ try {
   else await delegated();
   console.log(JSON.stringify(success));
 } catch (error) {
-  const code =
+  const failure =
     error instanceof VerificationFailure
-      ? error.code
-      : "verification-launcher-failed";
-  console.log(JSON.stringify({ ok: false, code }));
+      ? error
+      : new VerificationFailure("verification-launcher-failed", { error: failureClass(error) });
+  console.log(JSON.stringify({ ok: false, code: failure.code, ...failure.diagnostic }));
   process.exitCode = 1;
 }

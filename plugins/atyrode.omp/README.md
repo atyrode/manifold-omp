@@ -337,6 +337,8 @@ Verify packs the family again inside that unit and proves the bundles it packed.
 
 The default source gate acquires the actual locally produced SDK-host and grammar archives through Manifold's trusted constructor-only prepared-archive seam, with the same declared HTTPS URLs, SHA-256, member bounds, authority and custody checks. Its provenance is **owned-prepared-source-bytes**, not a download from the future release. No environment, RPC, plugin input or production CLI staging switch can inject this map. After publication, `bun run verify --published-assets` uses normal HTTPS acquisition without a prepared map and disposable owner state; that separate proof establishes the published release bytes.
 
+Disposable artifact groups remain read-only while consumers run. Once all owned workloads and descriptors are closed, verification reclaims only its held private roots through Manifold's identity-checked, no-follow, same-mount tree removal; it never changes deployed runtime permissions. A failed proof retains its primary phase/code separately from bounded error-class and cleanup-class diagnostics. No worker output, credentials, request, environment or control-binding value enters those receipts, and cleanup failure cannot turn a run into success.
+
 ## Releases
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`. Tag `v<version>` on a commit `main` has, where `<version>` is the version the three family manifests and the root `package.json` carry. The workflow refuses any other tag before the gate runs.

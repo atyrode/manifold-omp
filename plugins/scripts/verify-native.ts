@@ -3,16 +3,19 @@ import { lstat, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promi
 import { isAbsolute, join, resolve } from "node:path";
 import type { ActionInput, ActionResult, OmpAction } from "../api/index.ts";
 import type { TestAgent } from "../../../manifold/packages/testkit/src/index.ts";
+import { failureClass } from "./owned-root.ts";
 
 class VerificationFailure extends Error {
-  constructor(readonly code: string) { super("OMP native verification assertion failed"); }
+  constructor(readonly code: string, readonly diagnostic: { error?: string; cleanup?: string } = {}) {
+    super("OMP native verification assertion failed");
+  }
 }
 function check(value: unknown, code: string): asserts value {
   if (!value) throw new VerificationFailure(code);
 }
 
 process.umask(0o077);
-let outcome: { ok: boolean; code?: string };
+let outcome: { ok: boolean; code?: string; error?: string; cleanup?: string };
 // Only verifier-owned phase identifiers cross IPC; never serialize an exception,
 // native denial message, request, credential, or server output to diagnose a failure.
 let phase = "isolation";
@@ -63,6 +66,7 @@ try {
   const hub = { url: server.httpUrl, ownerKey: server.ownerKey };
   const installed: string[] = [];
   let cleanupFailed = false;
+  let nativeFailure: { error: unknown } | undefined;
   let agent: TestAgent | undefined;
   let nativeOwner: Bun.Subprocess<"ignore", "ignore", "ignore"> | undefined;
   const digest = (value: unknown) => createHash("sha256").update(canonicalJobJson(value)).digest("hex");
@@ -426,8 +430,19 @@ try {
     phase = "packed-broker-worker-ready";
     await waitFor(async () => {
       const value = await instance();
-      check(!["unavailable", "stopped"].includes(value.state),
-        `packed-broker-${`${value.state}-${value.reason ?? "unstated"}`.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/-+$/, "").slice(0, 64)}`);
+      if (["unavailable", "stopped"].includes(value.state)) {
+        const runs = ListJobRunsResultSchema.parse(await ownerAction(hub, "engine.jobs.listRuns", {
+          machineId: target.machineId, pluginId: ACCOUNTS_PLUGIN_ID, operationId: BROKER_OPERATION_ID,
+        }));
+        const job = runs.runs.find(({ job }) => job?.authority.origin.kind === "service" &&
+          job.authority.origin.serviceId === BROKER_SERVICE_ID && job.authority.origin.revision === promoted.revision)?.job;
+        const result = job?.result;
+        // Failure-only, fixed scalar metadata: no native denial text or worker payload.
+        const exit = result?.exitCode === null || result?.exitCode === undefined ? "n"
+          : Math.max(-999, Math.min(999, result.exitCode));
+        const elapsed = result?.usage ? Math.min(999999, result.usage.elapsedMs) : "n";
+        throw new VerificationFailure(`packed-broker-${value.state}-${job?.state ?? "missing"}-x${exit}-t${elapsed}-s${result?.startedAt == null ? 0 : 1}`);
+      }
       return value.state === "ready" && value.configuration?.revision === promoted.revision;
     }, 60_000, 50);
     const retainedAccess = await call("reviewAccountRuntime", { expectedBrokerRevision: promoted.revision });
@@ -672,9 +687,12 @@ try {
         ...(preparedArtifactArchives ? { preparedArtifactArchives } : {}) });
     } catch (error) {
       if (error instanceof SdkHostVerificationFailure)
-        throw new VerificationFailure(`sdk-${error.code}`);
+        throw new VerificationFailure(`sdk-${error.code}`, error.diagnostic);
       throw error;
     }
+  } catch (error) {
+    nativeFailure = { error };
+    throw error;
   } finally {
     try { await stopBroker(); } catch { cleanupFailed = true; }
     for (const id of installed.reverse()) {
@@ -697,12 +715,22 @@ try {
         cleanupFailed = true;
       }
     }
-    await server.stop();
-    check(!cleanupFailed, "native-cleanup-failed");
+    try { await server.stop(); } catch { cleanupFailed = true; }
+    if (cleanupFailed) {
+      const primary = nativeFailure?.error;
+      throw new VerificationFailure(nativeFailure
+        ? primary instanceof VerificationFailure ? primary.code : `${phase}-failed`
+        : "native-cleanup-failed", {
+        ...(primary instanceof VerificationFailure ? primary.diagnostic
+          : nativeFailure ? { error: failureClass(primary) } : {}),
+        cleanup: "native-cleanup-failed",
+      });
+    }
   }
   outcome = { ok: true };
 } catch (error) {
-  outcome = { ok: false, code: error instanceof VerificationFailure ? error.code : `${phase}-failed` };
+  outcome = { ok: false, code: error instanceof VerificationFailure ? error.code : `${phase}-failed`,
+    ...(error instanceof VerificationFailure ? error.diagnostic : { error: failureClass(error) }) };
 }
 if (!process.send || !process.connected) process.exit(1);
 const delivered = await new Promise<boolean>(resolve => {

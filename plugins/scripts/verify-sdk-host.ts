@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { fstatSync } from "node:fs";
-import { mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { canonicalJobJson, JobOwnerConfigSchema, PluginBundleSchema, type JobOwnerConfig } from "@manifold/protocol";
 import { acquireManagedTool, HeldDirectory, type PinnedManagedTool } from "../../../manifold/packages/agent/src/index.ts";
@@ -9,6 +9,7 @@ import { RESTRICTED_TOOL_NAMES } from "../api/automation.ts";
 import pins from "../sdk-host/runtime-artifacts.json";
 import baselinePins from "../runtime-artifacts.json";
 import { ompRuntimeTools } from "../runtime-assets.ts";
+import { failureClass, reclaimAllocatedRoot } from "./owned-root.ts";
 import { grammarCases, summaryCases } from "../sdk-host/test/grammar-operations.ts";
 
 export interface VerifySdkHostOptions {
@@ -20,7 +21,11 @@ export interface VerifySdkHostOptions {
 }
 
 export class SdkHostVerificationFailure extends Error {
-  constructor(readonly code: string) { super(`Packaged SDK verification: ${code}`); }
+  /** `error`: class of an unstructured primary failure; `cleanup`: class of a failed release.
+   * Both come from `failureClass`, never a message, path or workload output. */
+  constructor(readonly code: string, readonly diagnostic: { error?: string; cleanup?: string } = {}) {
+    super(`Packaged SDK verification: ${code}`);
+  }
 }
 function check(value: unknown, code: string): asserts value {
   if (!value) throw new SdkHostVerificationFailure(code);
@@ -40,11 +45,16 @@ export async function verifySdkHost({ root, bubblewrap, systemBindings, bundlePa
   let exited = true;
   const acquired = new Map<string, PinnedManagedTool>();
   let cache: HeldDirectory | undefined;
+  let allocated = false;
+  let held: HeldDirectory | undefined;
+  let failure: SdkHostVerificationFailure | undefined;
   try {
     check(process.platform === "linux" && process.arch === "x64" && Bun.version === pins.bunVersion, "platform");
     const bindings = JobOwnerConfigSchema.shape.runtimeTools.parse({ system: systemBindings }).system!;
     check(bindings.every(bind => bind.kind === "file" && /^(?:\/lib(?:64)?\/|\/usr\/lib\/|\/nix\/store\/)/.test(bind.target)), "system-closure");
     await mkdir(work, { mode: 0o700 });
+    allocated = true;
+    held = HeldDirectory.openAbsolute(work, { private: true });
     const cacheDirectory = join(work, "artifacts");
     await mkdir(cacheDirectory, { mode: 0o700 });
     cache = HeldDirectory.openAbsolute(cacheDirectory, { private: true });
@@ -299,12 +309,27 @@ export function loadNative() {
       active = undefined;
     }
   } catch (error) {
-    throw error instanceof SdkHostVerificationFailure ? error : new SdkHostVerificationFailure(`${phase}-failed`);
-  } finally {
-    if (active && !exited) { active.kill("SIGKILL"); await active.exited; exited = true; }
-    for (const artifact of acquired.values()) artifact.close();
-    cache?.close();
-    if (exited) await rm(work, { recursive: true, force: true });
+    failure = error instanceof SdkHostVerificationFailure ? error
+      : new SdkHostVerificationFailure(`${phase}-failed`, { error: failureClass(error) });
   }
+  // Release only once the workload is reaped and every descriptor into the tree is closed. A
+  // failed release never replaces the primary code and never lets the proof report success.
+  let cleanup: string | undefined;
+  const release = (step: () => void) => {
+    try { step(); } catch (error) { cleanup ??= failureClass(error); }
+  };
+  try {
+    if (active && !exited) { active.kill("SIGKILL"); await active.exited; exited = true; }
+  } catch (error) { cleanup ??= failureClass(error); }
+  for (const artifact of acquired.values()) release(() => artifact.close());
+  release(() => cache?.close());
+  if (allocated) release(() => {
+    if (!exited) { held?.close(); throw new Error("workload_unreaped"); }
+    if (!held) throw new Error("directory_unheld");
+    if (cleanup !== undefined) { held.close(); throw new Error("descriptor_unreleased"); }
+    reclaimAllocatedRoot(work, held);
+  });
+  if (cleanup !== undefined) throw new SdkHostVerificationFailure(failure?.code ?? "cleanup-failed", { ...failure?.diagnostic, cleanup });
+  if (failure) throw failure;
 }
 
