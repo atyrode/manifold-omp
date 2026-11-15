@@ -1,17 +1,35 @@
 name: Release
 
-# A `v*` tag publishes the three native family bundles, the complete SDK-host and
-# grammar archives, and their SHA256SUMS. `bundles` refuses a tag that does not name the
-# family version on a commit main has, then runs the repository gate on the
-# tagged commit beside Manifold at plugins/MANIFOLD_REV; verify repacks the
-# family in its disposable unit and fails unless it reproduces the packed bytes.
-# Only `publish-candidate` and `promote` can write, and neither runs repository
-# code. Public HTTPS/native proof must pass between publication and promotion;
-# a failed proof leaves its candidate held, never deleted, replaced or promoted.
+# A `v*` tag push publishes the three native family bundles, the complete SDK-host
+# and grammar archives, and their SHA256SUMS. A manual dispatch from main with both
+# `tag` and `release_id` instead recovers that existing tag's held draft or
+# published prerelease: the dispatched (controller) revision supplies only this
+# workflow, while every source check, build and proof runs on the commit the tag
+# names. `bundles` refuses a tag that does not name the family version on a commit
+# main has, then runs the repository gate on the tagged commit beside Manifold at
+# plugins/MANIFOLD_REV; verify repacks the family in its disposable unit and fails
+# unless it reproduces the packed bytes. A push creates its draft and uploads those
+# bytes by release ID; a recovery never creates, uploads, replaces or deletes
+# assets. Either way the release becomes or stays a held prerelease only if its
+# assets are exactly the freshly qualified bytes; only a draft is patched, and an
+# already published prerelease is left unmutated. Only `publish-candidate` and
+# `promote` can write, and neither runs repository code. Public HTTPS/native proof
+# must pass between publication and promotion; a failed check or proof leaves its
+# draft or candidate held, never deleted, replaced or promoted.
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag whose held draft or published prerelease to recover (vMAJOR.MINOR.PATCH)
+        required: true
+        type: string
+      release_id:
+        description: Numeric ID of that tag's held draft or published prerelease
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -19,29 +37,84 @@ permissions:
 jobs:
   bundles:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.source.outputs.tag }}
+      source-sha: ${{ steps.source.outputs.source-sha }}
+      release-id: ${{ steps.source.outputs.release-id }}
+      controller-sha: ${{ steps.source.outputs.controller-sha }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          path: caller
-          persist-credentials: false
-      - name: Require the tag to name the family version on a commit main has
+      # A push builds the commit its tag names. A recovery must be dispatched from
+      # main; its inputs are validated before any API call, and its tag's commit,
+      # not the controller's, is the source every later job checks out and binds.
+      - name: Select the tagged source commit and any held release
+        id: source
         env:
-          TAG: ${{ github.ref_name }}
+          EVENT: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_RELEASE_ID: ${{ inputs.release_id }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
+          case "$EVENT" in
+            push)
+              [ -z "$INPUT_TAG" ] && [ -z "$INPUT_RELEASE_ID" ] || { echo "A tag push takes no recovery inputs"; exit 1; }
+              tag="$GITHUB_REF_NAME"
+              release_id=""
+              ;;
+            workflow_dispatch)
+              [ "$GITHUB_REF" = refs/heads/main ] || { echo "Recovery runs only from refs/heads/main, not $GITHUB_REF"; exit 1; }
+              [ -n "$INPUT_TAG" ] && [ -n "$INPUT_RELEASE_ID" ] || { echo "Recovery requires both tag and release_id"; exit 1; }
+              [[ "$INPUT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must be vMAJOR.MINOR.PATCH"; exit 1; }
+              [[ "$INPUT_RELEASE_ID" =~ ^[1-9][0-9]{0,19}$ ]] || { echo "release_id must be a positive release ID"; exit 1; }
+              tag="$INPUT_TAG"
+              release_id="$INPUT_RELEASE_ID"
+              ;;
+            *) echo "Unsupported event $EVENT"; exit 1 ;;
+          esac
+          source="$(gh api "repos/$REPOSITORY/commits/refs/tags/$tag" --jq .sha)"
+          [[ "$source" =~ ^[0-9a-f]{40}$ ]] || { echo "tag $tag does not name a commit"; exit 1; }
+          if [ "$EVENT" = push ]; then
+            [ "$source" = "$GITHUB_SHA" ] || { echo "tag $tag now names $source; this push was $GITHUB_SHA"; exit 1; }
+          else
+            status="$(gh api "repos/$REPOSITORY/compare/main...$GITHUB_SHA" --jq .status)"
+            case "$status" in
+              identical | behind) ;;
+              *) echo "Controller $GITHUB_SHA is $status relative to main; dispatch from main"; exit 1 ;;
+            esac
+          fi
+          status="$(gh api "repos/$REPOSITORY/compare/main...$source" --jq .status)"
+          case "$status" in
+            identical | behind) ;;
+            *) echo "$source is $status relative to main; tag a commit main has"; exit 1 ;;
+          esac
+          {
+            echo "tag=$tag"
+            echo "source-sha=$source"
+            echo "release-id=$release_id"
+            echo "controller-sha=$GITHUB_SHA"
+          } >> "$GITHUB_OUTPUT"
+          printf 'Tag %s; source %s; controller %s; release %s\n' "$tag" "$source" "$GITHUB_SHA" "${release_id:-created by this run}" \
+            >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ steps.source.outputs.source-sha }}
+          path: caller
+          persist-credentials: false
+      - name: Require the checked-out source to name the tag's family version
+        env:
+          TAG: ${{ steps.source.outputs.tag }}
+          SOURCE_SHA: ${{ steps.source.outputs.source-sha }}
+        run: |
+          set -euo pipefail
+          head="$(git -C caller rev-parse HEAD)"
+          [ "$head" = "$SOURCE_SHA" ] || { echo "Checked out $head; tag $TAG names $SOURCE_SHA"; exit 1; }
           want="${TAG#v}"
           for manifest in caller/package.json caller/plugins/atyrode.omp/manifest.json \
             caller/plugins/atyrode.omp/accounts/manifest.json caller/plugins/atyrode.omp/gateway/manifest.json; do
             got="$(jq -er .version "$manifest")"
             [ "$got" = "$want" ] || { echo "$manifest is version $got; tag $TAG names $want"; exit 1; }
           done
-          status="$(gh api "repos/$REPOSITORY/compare/main...$GITHUB_SHA" --jq .status)"
-          case "$status" in
-            identical | behind) ;;
-            *) echo "$GITHUB_SHA is $status relative to main; tag a commit main has"; exit 1 ;;
-          esac
       - name: Read the pinned Manifold revision
         id: manifold
         env:
@@ -117,8 +190,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      release-id: ${{ steps.publish.outputs.id }}
     env:
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ needs.bundles.outputs.tag }}
+      SOURCE_SHA: ${{ needs.bundles.outputs.source-sha }}
+      REPOSITORY: ${{ github.repository }}
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -144,34 +221,76 @@ jobs:
             got="$(jq -er .manifest.version "$bundle")"
             [ "$got" = "$want" ] || { echo "$bundle is version $got; tag $TAG names $want"; exit 1; }
           done
-      - name: Upload the complete asset set as a draft, then publish a held prerelease
+      # A push creates its draft and uploads the qualified bytes to that captured ID;
+      # a recovery binds its held draft or published prerelease by ID and never
+      # creates, uploads, replaces or deletes assets. The tag already exists, so
+      # creation binds to it.
+      - name: Create and fill a draft by ID, or bind the held release
+        id: candidate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPOSITORY: ${{ github.repository }}
+          REQUESTED_RELEASE_ID: ${{ needs.bundles.outputs.release-id }}
+          CONTROLLER_SHA: ${{ needs.bundles.outputs.controller-sha }}
         run: |
           set -euo pipefail
           commit="$(gh api "repos/$REPOSITORY/commits/refs/tags/$TAG" --jq .sha)"
-          [ "$commit" = "$GITHUB_SHA" ] || { echo "tag $TAG now names $commit; this run built $GITHUB_SHA"; exit 1; }
-          gh release create "$TAG" --repo "$REPOSITORY" --verify-tag \
-            --draft --prerelease --latest=false --title "$TAG" --generate-notes \
-            dist/*.manifold-plugin.json dist/omp-sdkHost.tar.gz dist/omp-grammars-v1.tar.gz dist/SHA256SUMS
-          metadata="$(gh api "repos/$REPOSITORY/releases/tags/$TAG")"
-          jq -e '.draft == true and .prerelease == true' <<< "$metadata" >/dev/null
-          expected="$(printf '%s\n' dist/* | xargs -n1 basename | sort)"
-          uploaded="$(jq -r '.assets[].name' <<< "$metadata" | sort)"
-          [ "$uploaded" = "$expected" ] || { echo "Draft asset set differs; refusing publication"; exit 1; }
-          for file in dist/*; do
-            name="$(basename "$file")"
-            size="$(stat -c %s "$file")"
-            jq -e --arg name "$name" --argjson size "$size" \
-              '.assets[] | select(.name == $name) | .size == $size' <<< "$metadata" >/dev/null
-          done
+          [ "$commit" = "$SOURCE_SHA" ] || { echo "tag $TAG now names $commit; this run built $SOURCE_SHA"; exit 1; }
+          if [ -n "$REQUESTED_RELEASE_ID" ]; then
+            id="$REQUESTED_RELEASE_ID"
+          else
+            id="$(gh api --method POST "repos/$REPOSITORY/releases" -f tag_name="$TAG" -f target_commitish="$SOURCE_SHA" \
+              -f name="$TAG" -F draft=true -F prerelease=true -F generate_release_notes=true -f make_latest=false --jq .id)"
+            [[ "$id" =~ ^[1-9][0-9]{0,19}$ ]] || { echo "Draft creation returned no release ID"; exit 1; }
+            echo "Created held draft release $id for $TAG" | tee -a "$GITHUB_STEP_SUMMARY"
+            # The previous step proved dist holds exactly the fixed canonical asset names.
+            for file in dist/*; do
+              name="$(basename "$file")"
+              [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "Unsafe asset name $name"; exit 1; }
+              gh api --method POST "https://uploads.github.com/repos/$REPOSITORY/releases/$id/assets?name=$name" \
+                -H "Content-Type: application/octet-stream" --input "$file" --silent
+            done
+          fi
+          echo "Controller $CONTROLLER_SHA binds release $id to $TAG at $SOURCE_SHA"
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+      # Only an exact draft or published prerelease state is accepted; a draft is
+      # then published as a prerelease, while a published prerelease is unmutated.
+      - name: Hold the release as a prerelease only if it holds exactly the qualified bytes
+        id: publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.candidate.outputs.id }}
+        run: |
+          set -euo pipefail
+          want="$(for file in dist/*; do
+            jq -n --arg name "$(basename "$file")" --argjson size "$(stat -c %s "$file")" \
+              --arg digest "sha256:$(sha256sum "$file" | cut -d' ' -f1)" '{name, size, digest}'
+          done | jq -cs 'sort_by(.name)')"
+          metadata="$(gh api "repos/$REPOSITORY/releases/$RELEASE_ID")"
+          jq -e --arg id "$RELEASE_ID" --arg tag "$TAG" --argjson want "$want" '
+            (.id | tostring) == $id and .tag_name == $tag
+            and ((.draft == true and .prerelease == true) or (.draft == false and .prerelease == true))
+            and (.assets | length) == ($want | length)
+            and ([.assets[] | select(.state == "uploaded") | {name, size, digest}] | sort_by(.name)) == $want
+          ' <<< "$metadata" >/dev/null || {
+            echo "Release $RELEASE_ID is not a held $TAG draft or prerelease holding exactly the qualified assets; refusing publication"
+            jq '{id, tag_name, draft, prerelease, assets: [.assets[] | {name, state, size, digest}]}' <<< "$metadata"
+            exit 1
+          }
           commit="$(gh api "repos/$REPOSITORY/commits/refs/tags/$TAG" --jq .sha)"
-          [ "$commit" = "$GITHUB_SHA" ] || { echo "Tag moved before candidate publication"; exit 1; }
-          gh release edit "$TAG" --repo "$REPOSITORY" --draft=false --prerelease --latest=false
+          [ "$commit" = "$SOURCE_SHA" ] || { echo "Tag moved before candidate publication"; exit 1; }
+          if jq -e '.draft == true' <<< "$metadata" >/dev/null; then
+            published="$(gh api --method PATCH "repos/$REPOSITORY/releases/$RELEASE_ID" \
+              -F draft=false -F prerelease=true -f make_latest=false)"
+          else
+            echo "Release $RELEASE_ID is already a published $TAG prerelease; leaving it unmutated" | tee -a "$GITHUB_STEP_SUMMARY"
+            published="$metadata"
+          fi
+          jq -e --arg id "$RELEASE_ID" --arg tag "$TAG" \
+            '(.id | tostring) == $id and .tag_name == $tag and .draft == false and .prerelease == true' <<< "$published" >/dev/null
+          echo "id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
 
   public-proof:
-    needs: publish-candidate
+    needs: [bundles, publish-candidate]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -179,11 +298,14 @@ jobs:
       release-id: ${{ steps.release.outputs.id }}
       assets-digest: ${{ steps.release.outputs.assets }}
     env:
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ needs.bundles.outputs.tag }}
+      SOURCE_SHA: ${{ needs.bundles.outputs.source-sha }}
+      RELEASE_ID: ${{ needs.publish-candidate.outputs.release-id }}
       REPOSITORY: ${{ github.repository }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ needs.bundles.outputs.source-sha }}
           path: caller
           persist-credentials: false
       - name: Read the pinned Manifold revision
@@ -216,13 +338,15 @@ jobs:
         run: |
           set -euo pipefail
           commit="$(gh api "repos/$REPOSITORY/commits/refs/tags/$TAG" --jq .sha)"
-          [ "$commit" = "$GITHUB_SHA" ] || { echo "Candidate tag differs from built source"; exit 1; }
-          metadata="$(gh api "repos/$REPOSITORY/releases/tags/$TAG")"
-          jq -e '.draft == false and .prerelease == true' <<< "$metadata" >/dev/null
+          [ "$commit" = "$SOURCE_SHA" ] || { echo "Candidate tag differs from built source"; exit 1; }
+          [ "$(git -C caller rev-parse HEAD)" = "$SOURCE_SHA" ] || { echo "Proof checkout differs from built source"; exit 1; }
+          metadata="$(gh api "repos/$REPOSITORY/releases/$RELEASE_ID")"
+          jq -e --arg id "$RELEASE_ID" --arg tag "$TAG" \
+            '(.id | tostring) == $id and .tag_name == $tag and .draft == false and .prerelease == true' <<< "$metadata" >/dev/null
           expected="$(printf '%s\n' atyrode.omp.manifold-plugin.json atyrode.omp.accounts.manifold-plugin.json \
             atyrode.omp.gateway.manifold-plugin.json omp-sdkHost.tar.gz omp-grammars-v1.tar.gz SHA256SUMS | sort)"
           [ "$(jq -r '.assets[].name' <<< "$metadata" | sort)" = "$expected" ]
-          echo "id=$(jq -er .id <<< "$metadata")" >> "$GITHUB_OUTPUT"
+          echo "id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
           echo "assets=$(jq -cS '[.assets[] | {id,name,size,digest,updated_at}] | sort_by(.name)' <<< "$metadata" | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           # No bearer or owner credentials accompany these versioned HTTPS downloads.
           mkdir public-release
@@ -231,6 +355,12 @@ jobs:
               "https://github.com/$REPOSITORY/releases/download/$TAG/$file" --output "public-release/$file"
           done <<< "$expected"
           (cd public-release && sha256sum --check --strict SHA256SUMS)
+          while IFS= read -r file; do
+            digest="sha256:$(sha256sum "public-release/$file" | cut -d' ' -f1)"
+            jq -e --arg name "$file" --arg digest "$digest" --argjson size "$(stat -c %s "public-release/$file")" \
+              '[.assets[] | select(.name == $name and .state == "uploaded" and .size == $size and .digest == $digest)] | length == 1' <<< "$metadata" >/dev/null ||
+              { echo "Public $file differs from the candidate's recorded size or digest"; exit 1; }
+          done <<< "$expected"
       - name: Prepare the independent graphs and fresh native containment fixtures
         run: |
           set -euo pipefail
@@ -252,18 +382,19 @@ jobs:
           EXPECTED_RELEASE: ${{ steps.release.outputs.id }}
         run: |
           set -euo pipefail
-          metadata="$(gh api "repos/$REPOSITORY/releases/tags/$TAG")"
+          metadata="$(gh api "repos/$REPOSITORY/releases/$EXPECTED_RELEASE")"
           [ "$(jq -er .id <<< "$metadata")" = "$EXPECTED_RELEASE" ]
           actual="$(jq -cS '[.assets[] | {id,name,size,digest,updated_at}] | sort_by(.name)' <<< "$metadata" | sha256sum | cut -d' ' -f1)"
           [ "$actual" = "$EXPECTED_ASSETS" ] || { echo "Published assets changed during proof"; exit 1; }
 
   promote:
-    needs: public-proof
+    needs: [bundles, public-proof]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     env:
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ needs.bundles.outputs.tag }}
+      SOURCE_SHA: ${{ needs.bundles.outputs.source-sha }}
       REPOSITORY: ${{ github.repository }}
       EXPECTED_RELEASE: ${{ needs.public-proof.outputs.release-id }}
       EXPECTED_ASSETS: ${{ needs.public-proof.outputs.assets-digest }}
@@ -275,10 +406,12 @@ jobs:
         run: |
           set -euo pipefail
           commit="$(gh api "repos/$REPOSITORY/commits/refs/tags/$TAG" --jq .sha)"
-          [ "$commit" = "$GITHUB_SHA" ] || { echo "Tag differs from proven source"; exit 1; }
-          metadata="$(gh api "repos/$REPOSITORY/releases/tags/$TAG")"
-          jq -e '.draft == false and .prerelease == true' <<< "$metadata" >/dev/null
-          [ "$(jq -er .id <<< "$metadata")" = "$EXPECTED_RELEASE" ]
+          [ "$commit" = "$SOURCE_SHA" ] || { echo "Tag differs from proven source"; exit 1; }
+          metadata="$(gh api "repos/$REPOSITORY/releases/$EXPECTED_RELEASE")"
+          jq -e --arg id "$EXPECTED_RELEASE" --arg tag "$TAG" \
+            '(.id | tostring) == $id and .tag_name == $tag and .draft == false and .prerelease == true' <<< "$metadata" >/dev/null
           actual="$(jq -cS '[.assets[] | {id,name,size,digest,updated_at}] | sort_by(.name)' <<< "$metadata" | sha256sum | cut -d' ' -f1)"
           [ "$actual" = "$EXPECTED_ASSETS" ] || { echo "Assets differ from the public proof"; exit 1; }
-          gh release edit "$TAG" --repo "$REPOSITORY" --prerelease=false --latest
+          promoted="$(gh api --method PATCH "repos/$REPOSITORY/releases/$EXPECTED_RELEASE" -F prerelease=false -f make_latest=true)"
+          jq -e --arg id "$EXPECTED_RELEASE" \
+            '(.id | tostring) == $id and .draft == false and .prerelease == false' <<< "$promoted" >/dev/null
