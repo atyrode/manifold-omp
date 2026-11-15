@@ -132,6 +132,111 @@ async function packInFreshEnvironment(destination: string) {
   return JSON.parse(stdout) as readonly (PackResult & { readonly id: string })[];
 }
 
+/** Resolves undefined once `ms` elapse first; the timer never outlives the race. Real time is
+ * the bound here: it limits a real producer process tree, which no fake clock can advance. */
+async function within<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  const elapsed = Promise.withResolvers<undefined>();
+  const timer = setTimeout(() => elapsed.resolve(undefined), ms);
+  try {
+    return await Promise.race([promise, elapsed.promise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// The release producer itself: package.json's `pack` script through pack.sh, as release.yml's
+// `bun run pack`, under this Bun and none of the caller's environment, secrets, NODE_ENV or
+// BUN_ENV. It takes no destination and publishes into the original source's dist, so its
+// bytes are read from there after it exited cleanly. The script runs a shell, then pack.ts's
+// Bun and Git: the leader's exit does not prove that chain stopped, so it runs in its own
+// process group, which is killed and observed gone before the private environment is removed,
+// and retained otherwise.
+async function packWithCli(): Promise<Record<string, string>> {
+  const tools = ["bash", "sh", "dirname", "basename", "git"].map(tool => {
+    const path = Bun.which(tool);
+    if (path === null) throw new Error(`The pack CLI requires ${tool} on the host PATH`);
+    return path;
+  });
+  const root = await mkdtemp(join(scratch, "cli-environment-"));
+  const failures: unknown[] = [];
+  let removable = true;
+  try {
+    const xdg = Object.fromEntries(["CONFIG", "CACHE", "DATA", "STATE"].map(kind => [`XDG_${kind}_HOME`, join(root, kind.toLowerCase())]));
+    for (const directory of [join(root, "home"), join(root, "tmp"), ...Object.values(xdg)]) await mkdir(directory);
+    const child = Bun.spawn([process.execPath, "--no-env-file", "--no-install", "run", "pack"], {
+      cwd: source, stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true,
+      env: { PATH: [...new Set(tools.map(path => dirname(path)))].join(":"), HOME: join(root, "home"), TMPDIR: join(root, "tmp"),
+        ...xdg, BUN: process.execPath, OMP_PACK_GIT: tools.at(-1)! },
+    });
+    removable = false;
+    const signalGroup = (signal: NodeJS.Signals | 0) => {
+      try {
+        process.kill(-child.pid, signal);
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+        throw error;
+      }
+    };
+    const finished = Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+    // Exit and both pipes are joined only when every read resolved; a rejected read proves neither.
+    const joined = finished.then(() => true, () => false);
+    let closed = false;
+    try {
+      const outcome = await within(finished, 180_000);
+      if (outcome === undefined) failures.push(new Error("The pack CLI did not exit within 180 s"));
+      else {
+        closed = true;
+        if (outcome[0] !== 0) failures.push(new Error(`The pack CLI exited ${outcome[0]}: ${outcome[2].replaceAll(root, "<private>")}`));
+      }
+    } catch (error) {
+      failures.push(error);
+    } finally {
+      // Each settlement step runs even when an earlier one throws; none replaces the primary failure.
+      try { signalGroup("SIGKILL"); } catch (error) { failures.push(error); }
+      if (!closed) closed = await within(joined, 5_000) === true;
+      try {
+        // A killed group has no completion event to await; poll its ESRCH within a fixed bound.
+        const deadline = Date.now() + 5_000;
+        while (signalGroup(0) && Date.now() < deadline) await Bun.sleep(20);
+        removable = closed && !signalGroup(0);
+      } catch (error) {
+        failures.push(error);
+      }
+      if (!removable) failures.push(new Error("The pack CLI process group or its pipes outlived the deadline; its private environment is retained"));
+    }
+  } catch (error) {
+    failures.push(error);
+  }
+  if (removable) {
+    try { await rm(root, { recursive: true, force: true }); }
+    catch (error) { failures.push(error); }
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, "The pack CLI failed");
+  return snapshot(join(source, "dist"));
+}
+
+/** Logs bounded metadata of differing published members; the caller's byte assertion stays the
+ * verdict and a failed archive diagnostic logs only its error class. */
+async function logPublishedDifferences(label: string, before: Record<string, string>, after: Record<string, string>): Promise<void> {
+  for (const file of publishedFiles) {
+    if (!file.endsWith(".json") || before[file] === after[file] || before[file] === undefined || after[file] === undefined) continue;
+    const differences: unknown[] = [];
+    differingFields(JSON.parse(Buffer.from(before[file]!, "base64").toString()),
+      JSON.parse(Buffer.from(after[file]!, "base64").toString()), file, differences);
+    console.error(`${label}_mismatch`, JSON.stringify(differences));
+  }
+  if (before[SDK_HOST_ASSET] === undefined || after[SDK_HOST_ASSET] === undefined || before[SDK_HOST_ASSET] === after[SDK_HOST_ASSET]) return;
+  try {
+    console.error(`${label}_archive_mismatch`, JSON.stringify({ file: SDK_HOST_ASSET, members: await archiveMemberDifferences(
+      Buffer.from(before[SDK_HOST_ASSET]!, "base64"), Buffer.from(after[SDK_HOST_ASSET]!, "base64")) }));
+  } catch (error) {
+    console.error(`${label}_archive_diagnostic_failed`,
+      error instanceof TypeError ? "typeerror" : error instanceof RangeError ? "rangeerror" : error instanceof Error ? "error" : "unknown");
+  }
+}
+
 for (const destinationKind of ["default", "caller"] as const) {
   describe(`${destinationKind} destination`, () => {
     for (const part of ["accounts", "gateway"] as const) {
@@ -212,26 +317,14 @@ for (const destinationKind of ["default", "caller"] as const) {
       const second = await packInFreshEnvironment(destination);
       expect(second.map(({ id }) => id)).toEqual(family);
       const secondBytes = await snapshot(destination);
-      for (const file of publishedFiles) {
-        if (!file.endsWith(".json") || firstBytes[file] === secondBytes[file] ||
-          firstBytes[file] === undefined || secondBytes[file] === undefined) continue;
-        const differences: unknown[] = [];
-        const before = JSON.parse(Buffer.from(firstBytes[file]!, "base64").toString());
-        const after = JSON.parse(Buffer.from(secondBytes[file]!, "base64").toString());
-        differingFields(before, after, file, differences);
-        console.error("package_determinism_mismatch", JSON.stringify(differences));
-      }
-      // The byte assertion below stays the verdict; a failed diagnostic logs only its error class.
-      if (firstBytes[SDK_HOST_ASSET] !== undefined && secondBytes[SDK_HOST_ASSET] !== undefined && firstBytes[SDK_HOST_ASSET] !== secondBytes[SDK_HOST_ASSET]) {
-        try {
-          console.error("package_determinism_archive_mismatch", JSON.stringify({ file: SDK_HOST_ASSET, members: await archiveMemberDifferences(
-            Buffer.from(firstBytes[SDK_HOST_ASSET]!, "base64"), Buffer.from(secondBytes[SDK_HOST_ASSET]!, "base64")) }));
-        } catch (error) {
-          console.error("package_determinism_archive_diagnostic_failed",
-            error instanceof TypeError ? "typeerror" : error instanceof RangeError ? "rangeerror" : error instanceof Error ? "error" : "unknown");
-        }
-      }
+      await logPublishedDifferences("package_determinism", firstBytes, secondBytes);
       expect(secondBytes).toEqual(firstBytes);
+      // CI once published API bytes and then different CLI bytes from the same commit, so the
+      // release CLI must publish exactly the family the API published and verify proves.
+      const cliBytes = await packWithCli();
+      await logPublishedDifferences("package_cli", firstBytes, cliBytes);
+      await publishedFamily(join(source, "dist"));
+      expect(cliBytes).toEqual(firstBytes);
     }, 360_000);
   });
 }
