@@ -44,7 +44,7 @@ const languageSources: readonly Omit<GrammarCase, "pattern">[] = [
   { language: "ruby", extension: "rb", source: "def proof\n  1\nend" },
   { language: "scala", extension: "scala", source: "object Proof { val value = 1 }" },
   { language: "solidity", extension: "sol", source: "contract Proof { uint256 value; }" },
-  { language: "sql", extension: "sql", source: "SELECT 1;" },
+  { language: "sql", extension: "sql", source: "SELECT 1" },
   { language: "starlark", extension: "bzl", source: "proof = 1\n" },
   { language: "svelte", extension: "svelte", source: "<h1>proof</h1>" },
   { language: "swift", extension: "swift", source: "let proof = 1" },
