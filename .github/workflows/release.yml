@@ -2,19 +2,20 @@ name: Release
 
 # A `v*` tag push publishes the three native family bundles, the complete SDK-host
 # and grammar archives, and their SHA256SUMS. A manual dispatch from main with both
-# `tag` and `draft_id` instead recovers that existing tag's held draft: the
-# dispatched (controller) revision supplies only this workflow, while every source
-# check, build and proof runs on the commit the tag names. `bundles` refuses a tag
-# that does not name the family version on a commit main has, then runs the
-# repository gate on the tagged commit beside Manifold at plugins/MANIFOLD_REV;
-# verify repacks the family in its disposable unit and fails unless it reproduces
-# the packed bytes. A push creates its draft and uploads those bytes by release ID;
-# a recovery never creates, uploads, replaces or deletes assets. Either way the
-# draft becomes a held prerelease only if its assets are exactly the freshly
-# qualified bytes. Only `publish-candidate` and `promote` can write, and neither
-# runs repository code. Public HTTPS/native proof must pass between publication and
-# promotion; a failed check or proof leaves its draft or candidate held, never
-# deleted, replaced or promoted.
+# `tag` and `release_id` instead recovers that existing tag's held draft or
+# published prerelease: the dispatched (controller) revision supplies only this
+# workflow, while every source check, build and proof runs on the commit the tag
+# names. `bundles` refuses a tag that does not name the family version on a commit
+# main has, then runs the repository gate on the tagged commit beside Manifold at
+# plugins/MANIFOLD_REV; verify repacks the family in its disposable unit and fails
+# unless it reproduces the packed bytes. A push creates its draft and uploads those
+# bytes by release ID; a recovery never creates, uploads, replaces or deletes
+# assets. Either way the release becomes or stays a held prerelease only if its
+# assets are exactly the freshly qualified bytes; only a draft is patched, and an
+# already published prerelease is left unmutated. Only `publish-candidate` and
+# `promote` can write, and neither runs repository code. Public HTTPS/native proof
+# must pass between publication and promotion; a failed check or proof leaves its
+# draft or candidate held, never deleted, replaced or promoted.
 
 on:
   push:
@@ -22,11 +23,11 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag whose held draft to recover (vMAJOR.MINOR.PATCH)
+        description: Existing release tag whose held draft or published prerelease to recover (vMAJOR.MINOR.PATCH)
         required: true
         type: string
-      draft_id:
-        description: Numeric ID of that tag's held draft release
+      release_id:
+        description: Numeric ID of that tag's held draft or published prerelease
         required: true
         type: string
 
@@ -39,35 +40,35 @@ jobs:
     outputs:
       tag: ${{ steps.source.outputs.tag }}
       source-sha: ${{ steps.source.outputs.source-sha }}
-      draft-id: ${{ steps.source.outputs.draft-id }}
+      release-id: ${{ steps.source.outputs.release-id }}
       controller-sha: ${{ steps.source.outputs.controller-sha }}
     steps:
       # A push builds the commit its tag names. A recovery must be dispatched from
       # main; its inputs are validated before any API call, and its tag's commit,
       # not the controller's, is the source every later job checks out and binds.
-      - name: Select the tagged source commit and any held draft
+      - name: Select the tagged source commit and any held release
         id: source
         env:
           EVENT: ${{ github.event_name }}
           INPUT_TAG: ${{ inputs.tag }}
-          INPUT_DRAFT_ID: ${{ inputs.draft_id }}
+          INPUT_RELEASE_ID: ${{ inputs.release_id }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           case "$EVENT" in
             push)
-              [ -z "$INPUT_TAG" ] && [ -z "$INPUT_DRAFT_ID" ] || { echo "A tag push takes no recovery inputs"; exit 1; }
+              [ -z "$INPUT_TAG" ] && [ -z "$INPUT_RELEASE_ID" ] || { echo "A tag push takes no recovery inputs"; exit 1; }
               tag="$GITHUB_REF_NAME"
-              draft_id=""
+              release_id=""
               ;;
             workflow_dispatch)
               [ "$GITHUB_REF" = refs/heads/main ] || { echo "Recovery runs only from refs/heads/main, not $GITHUB_REF"; exit 1; }
-              [ -n "$INPUT_TAG" ] && [ -n "$INPUT_DRAFT_ID" ] || { echo "Recovery requires both tag and draft_id"; exit 1; }
+              [ -n "$INPUT_TAG" ] && [ -n "$INPUT_RELEASE_ID" ] || { echo "Recovery requires both tag and release_id"; exit 1; }
               [[ "$INPUT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must be vMAJOR.MINOR.PATCH"; exit 1; }
-              [[ "$INPUT_DRAFT_ID" =~ ^[1-9][0-9]{0,19}$ ]] || { echo "draft_id must be a positive release ID"; exit 1; }
+              [[ "$INPUT_RELEASE_ID" =~ ^[1-9][0-9]{0,19}$ ]] || { echo "release_id must be a positive release ID"; exit 1; }
               tag="$INPUT_TAG"
-              draft_id="$INPUT_DRAFT_ID"
+              release_id="$INPUT_RELEASE_ID"
               ;;
             *) echo "Unsupported event $EVENT"; exit 1 ;;
           esac
@@ -90,10 +91,10 @@ jobs:
           {
             echo "tag=$tag"
             echo "source-sha=$source"
-            echo "draft-id=$draft_id"
+            echo "release-id=$release_id"
             echo "controller-sha=$GITHUB_SHA"
           } >> "$GITHUB_OUTPUT"
-          printf 'Tag %s; source %s; controller %s; draft %s\n' "$tag" "$source" "$GITHUB_SHA" "${draft_id:-created by this run}" \
+          printf 'Tag %s; source %s; controller %s; release %s\n' "$tag" "$source" "$GITHUB_SHA" "${release_id:-created by this run}" \
             >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -221,20 +222,21 @@ jobs:
             [ "$got" = "$want" ] || { echo "$bundle is version $got; tag $TAG names $want"; exit 1; }
           done
       # A push creates its draft and uploads the qualified bytes to that captured ID;
-      # a recovery binds its held draft by ID and never creates, uploads, replaces or
-      # deletes assets. The tag already exists, so creation binds to it.
-      - name: Create and fill a draft by ID, or bind the held draft
-        id: draft
+      # a recovery binds its held draft or published prerelease by ID and never
+      # creates, uploads, replaces or deletes assets. The tag already exists, so
+      # creation binds to it.
+      - name: Create and fill a draft by ID, or bind the held release
+        id: candidate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DRAFT_ID: ${{ needs.bundles.outputs.draft-id }}
+          REQUESTED_RELEASE_ID: ${{ needs.bundles.outputs.release-id }}
           CONTROLLER_SHA: ${{ needs.bundles.outputs.controller-sha }}
         run: |
           set -euo pipefail
           commit="$(gh api "repos/$REPOSITORY/commits/refs/tags/$TAG" --jq .sha)"
           [ "$commit" = "$SOURCE_SHA" ] || { echo "tag $TAG now names $commit; this run built $SOURCE_SHA"; exit 1; }
-          if [ -n "$DRAFT_ID" ]; then
-            id="$DRAFT_ID"
+          if [ -n "$REQUESTED_RELEASE_ID" ]; then
+            id="$REQUESTED_RELEASE_ID"
           else
             id="$(gh api --method POST "repos/$REPOSITORY/releases" -f tag_name="$TAG" -f target_commitish="$SOURCE_SHA" \
               -f name="$TAG" -F draft=true -F prerelease=true -F generate_release_notes=true -f make_latest=false --jq .id)"
@@ -250,11 +252,13 @@ jobs:
           fi
           echo "Controller $CONTROLLER_SHA binds release $id to $TAG at $SOURCE_SHA"
           echo "id=$id" >> "$GITHUB_OUTPUT"
-      - name: Publish the draft as a held prerelease only if it holds exactly the qualified bytes
+      # Only an exact draft or published prerelease state is accepted; a draft is
+      # then published as a prerelease, while a published prerelease is unmutated.
+      - name: Hold the release as a prerelease only if it holds exactly the qualified bytes
         id: publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_ID: ${{ steps.draft.outputs.id }}
+          RELEASE_ID: ${{ steps.candidate.outputs.id }}
         run: |
           set -euo pipefail
           want="$(for file in dist/*; do
@@ -263,18 +267,24 @@ jobs:
           done | jq -cs 'sort_by(.name)')"
           metadata="$(gh api "repos/$REPOSITORY/releases/$RELEASE_ID")"
           jq -e --arg id "$RELEASE_ID" --arg tag "$TAG" --argjson want "$want" '
-            (.id | tostring) == $id and .tag_name == $tag and .draft == true and .prerelease == true
+            (.id | tostring) == $id and .tag_name == $tag
+            and ((.draft == true and .prerelease == true) or (.draft == false and .prerelease == true))
             and (.assets | length) == ($want | length)
             and ([.assets[] | select(.state == "uploaded") | {name, size, digest}] | sort_by(.name)) == $want
           ' <<< "$metadata" >/dev/null || {
-            echo "Release $RELEASE_ID is not a $TAG draft holding exactly the qualified assets; refusing publication"
+            echo "Release $RELEASE_ID is not a held $TAG draft or prerelease holding exactly the qualified assets; refusing publication"
             jq '{id, tag_name, draft, prerelease, assets: [.assets[] | {name, state, size, digest}]}' <<< "$metadata"
             exit 1
           }
           commit="$(gh api "repos/$REPOSITORY/commits/refs/tags/$TAG" --jq .sha)"
           [ "$commit" = "$SOURCE_SHA" ] || { echo "Tag moved before candidate publication"; exit 1; }
-          published="$(gh api --method PATCH "repos/$REPOSITORY/releases/$RELEASE_ID" \
-            -F draft=false -F prerelease=true -f make_latest=false)"
+          if jq -e '.draft == true' <<< "$metadata" >/dev/null; then
+            published="$(gh api --method PATCH "repos/$REPOSITORY/releases/$RELEASE_ID" \
+              -F draft=false -F prerelease=true -f make_latest=false)"
+          else
+            echo "Release $RELEASE_ID is already a published $TAG prerelease; leaving it unmutated" | tee -a "$GITHUB_STEP_SUMMARY"
+            published="$metadata"
+          fi
           jq -e --arg id "$RELEASE_ID" --arg tag "$TAG" \
             '(.id | tostring) == $id and .tag_name == $tag and .draft == false and .prerelease == true' <<< "$published" >/dev/null
           echo "id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
