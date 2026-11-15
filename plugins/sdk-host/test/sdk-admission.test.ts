@@ -86,8 +86,10 @@ for (const laterThinking of [undefined, "low", "high"] as const) {
     ? "saved-session resume restores primary medium thinking after a retry fallback's high suffix"
     : `saved-session resume preserves later explicit ${laterThinking} thinking after a retry fallback`, async () => {
     const thinking = getBundledModel("openai", "gpt-5").thinking;
-    if (thinking === undefined || !thinking.efforts.includes("low") ||
-      !thinking.efforts.includes("medium") || !thinking.efforts.includes("high"))
+    const low = thinking?.efforts.find(effort => effort === "low");
+    const medium = thinking?.efforts.find(effort => effort === "medium");
+    const high = thinking?.efforts.find(effort => effort === "high");
+    if (thinking === undefined || low === undefined || medium === undefined || high === undefined)
       throw new Error("retry_fallback_fixture_requires_controllable_effort_metadata");
     const primary = buildModel({ ...model, reasoning: true, thinking });
     const fallback = buildModel({ ...replacement, reasoning: true, thinking });
@@ -106,7 +108,7 @@ for (const laterThinking of [undefined, "low", "high"] as const) {
       const file = manager.getSessionFile()!;
       try {
         manager.appendModelChange("fixture/saved");
-        manager.appendThinkingLevelChange("medium", "medium");
+        manager.appendThinkingLevelChange(medium, medium);
         // Upstream #19273: retry recovery records the suffix separately, immediately after
         // a model change marked as an ephemeral, resolved retry fallback.
         manager.appendModelChange("fixture/replacement", EPHEMERAL_MODEL_CHANGE_ROLE, true);
@@ -114,8 +116,8 @@ for (const laterThinking of [undefined, "low", "high"] as const) {
         if (laterThinking !== undefined) {
           // A later user change supersedes the hop. Re-selecting high after low also records
           // a real change, rather than inventing an unchanged high selection upstream omits.
-          manager.appendThinkingLevelChange("low", "low");
-          if (laterThinking === "high") manager.appendThinkingLevelChange("high", "high");
+          manager.appendThinkingLevelChange(low, low);
+          if (laterThinking === "high") manager.appendThinkingLevelChange(high, high);
         }
         // Persist a metadata-only fixture without requiring any provider turn.
         await manager.ensureOnDisk();
@@ -124,7 +126,7 @@ for (const laterThinking of [undefined, "low", "high"] as const) {
       const resumed = await SessionManager.open(file, sessions, undefined, { throwIfMissing: true });
       try {
         expect(admitSdkSession(catalog, resumed, defaults, undefined))
-          .toEqual({ model: primary, thinkingLevel: laterThinking ?? "medium" });
+          .toEqual({ model: primary, thinkingLevel: laterThinking === undefined ? medium : laterThinking === "low" ? low : high });
       } finally { await resumed.close(); }
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
