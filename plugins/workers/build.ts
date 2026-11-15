@@ -507,6 +507,7 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
   for (const [name, { graph: graphName, source }] of Object.entries(entries)) {
     const graph = graphs[graphName];
     const modules = await realpath(join(graph.root, "node_modules"));
+    const graphRoot = await realpath(graph.root);
     await Promise.all(["@oh-my-pi/pi-ai", "@oh-my-pi/pi-catalog", "@oh-my-pi/pi-utils"].map(packageName => packageRoot(graph, packageName)));
     const codingAgent = graphName === "sdkHost" ? await packageRoot(graph, "@oh-my-pi/pi-coding-agent") : undefined;
     const legacyPlugin = codingAgent ? await legacyPiPlugin(graph, codingAgent) : undefined;
@@ -526,6 +527,12 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
         // OMP packages stay inside this worker's prepared realization. The pinned
         // Manifold SDK owns its own transitive dependencies; resolving those from
         // an OMP graph would substitute versions or reject valid SDK imports.
+        // Every edge is preflighted and contained here, but a real file Bun's own resolver
+        // binds to the same path stays Bun's: only its resolution attaches the package.json
+        // module type. A plugin result is parsed with an unknown module type, so one file
+        // reached by both a plugin edge (the legacy helper's bare import) and a native edge
+        // (its package's relative import) took whichever parse arrived first, and identical
+        // inputs emitted `__toESM(require_x(), 1)` or `__toESM(require_x())`.
         build.onResolve({ filter: /^[^./]/ }, async args => {
           if (args.path === "bun" || args.path.startsWith("bun:") || args.path.startsWith("node:") ||
               builtinModules.includes(args.path) || args.path.startsWith("@manifold/")) return undefined;
@@ -534,19 +541,26 @@ export async function buildWorkerArtifacts(target: WorkerTarget): Promise<Worker
           if (sdkImport) {
             const path = await realpath(Bun.resolveSync(args.path, dirname(args.importer)));
             if (!containsPath(manifoldRoot, path)) throw new Error(`Manifold dependency escapes its checkout: ${args.path}`);
-            return { path, namespace: "file" };
+            return undefined;
           }
           const packaged = args.importer !== undefined && args.importer !== "" && containsPath(modules, args.importer);
           // The upstream virtual helper also uses the file namespace. Only sources
           // observed by our real file loader exist on disk and carry import attributes.
           const onDisk = packaged && importedFiles.has(args.importer);
-          const from = packaged ? dirname(args.importer) : graph.root;
+          // Bun resolves from the importer's directory. A packaged importer (including the
+          // helper's virtual module anchored in its package) or an owned source under this
+          // graph's root reaches the selected node_modules that way. An owned source shared
+          // from outside it, such as the SDK host's ../workers and ../api imports, would
+          // reach the baseline graph, so those edges stay bound to the selected graph here.
+          const native = packaged || (args.importer !== undefined && args.importer !== "" && containsPath(graphRoot, args.importer));
+          const from = native ? dirname(args.importer) : graph.root;
           const path = await realpath(Bun.resolveSync(args.path, from));
           if (!containsPath(modules, path)) throw new Error(`Worker dependency escapes ${graphName}: ${args.path}`);
           // A plugin's resolution drops the import's attributes, so Bun would bundle a package file
           // imported `with { type: "text" }` as a module and hand the importer an object instead of
           // its source (18.4's accessibility audit then fails to parse at SDK host startup).
-          return { path, namespace: onDisk && await importsAsText(args.importer, args.path) ? "omp-text" : "file" };
+          if (onDisk && await importsAsText(args.importer, args.path)) return { path, namespace: "omp-text" };
+          return native ? undefined : { path, namespace: "file" };
         });
         build.onLoad({ filter: /.*/, namespace: "omp-text" }, async args => {
           importedFiles.add(args.path);
