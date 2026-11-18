@@ -8,6 +8,7 @@ import { acquireManagedTool, HeldDirectory, type PinnedManagedTool } from "../..
 import { verifyBundledArtifacts } from "../../../manifold/packages/plugin-kit/src/artifacts.ts";
 import { RESTRICTED_TOOL_NAMES } from "../api/automation.ts";
 import pins from "../sdk-host/runtime-artifacts.json";
+import { CODEX_WIRE_VERSION } from "../workers/codex-wire.ts";
 import baselinePins from "../runtime-artifacts.json";
 import { ompRuntimeTools } from "../runtime-assets.ts";
 import { failureClass, reclaimAllocatedRoot } from "./owned-root.ts";
@@ -191,7 +192,7 @@ export function loadNative() {
       const selected = scenario === "selected" || scenario === "fresh-sdk-selected" || scenario === "fresh-sdk-filtered" || scenario === "fresh-rpc-selected" || scenario === "print-sdk-selected";
       const preserve = scenario === "fresh-cli-preserve" || scenario === "print-cli-preserve" || scenario === "grammar-cli";
       const config = {
-        extensions: [], disabledProviders: [], extendedContext: false, startup: { setupWizard: false },
+        extensions: [], disabledProviders: [], extendedContext: false, startup: { setupWizard: false }, providers: { webKeyless: false },
         modelRoles: {
           default: native || scenario === "selected" || scenario === "disabled" || scenario === "cancel" ? "fixture/openai/gpt-5" : "fixture/openai/gpt-4.1",
           smol: "fixture/openai/gpt-4.1:medium", task: "fixture/openai/o3:medium", slow: "fixture/openai/gpt-5:high",
@@ -345,7 +346,7 @@ export function loadNative() {
         check((await stat(await realpath(bind.source))).isFile(), "system-file");
         args.push("--ro-bind", bind.source, bind.target);
       }
-      const environment = { HOME: "/home/job", PI_CODING_AGENT_DIR: "/home/job/.omp/agent", PI_CONFIG_DIR: ".omp", PI_NATIVES_DIR: "/tmp/omp-native", PATH: "/runtime/bin",
+      const environment = { PI_AI_CODEX_CLIENT_VERSION: CODEX_WIRE_VERSION, HOME: "/home/job", PI_CODING_AGENT_DIR: "/home/job/.omp/agent", PI_CONFIG_DIR: ".omp", PI_NATIVES_DIR: "/tmp/omp-native", PATH: "/runtime/bin",
         TMPDIR: "/home/job/tmp", XDG_CONFIG_HOME: "/home/job/.config", XDG_CACHE_HOME: "/home/job/.cache", XDG_DATA_HOME: "/home/job/.local/share",
         XDG_STATE_HOME: "/home/job/.local/state", LANG: "C.UTF-8", LC_ALL: "C.UTF-8", TZ: "UTC", TERM: "xterm-256color" };
       for (const [key, value] of Object.entries(environment)) args.push("--setenv", key, value);

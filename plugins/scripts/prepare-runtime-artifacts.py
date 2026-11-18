@@ -4,7 +4,7 @@
 Requires Python 3 and GNU readelf on PATH. Downloaded executables are inspected,
 never executed; npm package lifecycle scripts and provider APIs are not invoked.
 
-Usage: python3 scripts/prepare-runtime-artifacts.py 18.22.0 --cache-dir /tmp/omp-runtime-18.22.0
+Usage: python3 scripts/prepare-runtime-artifacts.py 18.22.2 --cache-dir /tmp/omp-runtime-18.22.2
 The JSON report supplies both runtime graphs, which retain their own relativeTarget
 names. Bun, CA, grammar assets and the dependency locks are independently owned.
 """

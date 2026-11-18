@@ -24,6 +24,7 @@ test("source settings cannot load extensions, broker credentials or retry/fallba
     extensions: [],
     disabledProviders: ["ollama", "lm-studio", "llama.cpp"],
     extendedContext: false,
+    providers: { webKeyless: false },
     startup: { setupWizard: false },
   };
   for (const change of [
@@ -32,14 +33,17 @@ test("source settings cannot load extensions, broker credentials or retry/fallba
     { retry: { modelFallback: true } },
     { cwd: "/host" },
     { startup: { setupWizard: true } },
+    { providers: undefined },
+    { providers: { webKeyless: true } },
   ]) {
     expect(ProbeConfigSchema.safeParse({ ...config, ...change }).success).toBe(false);
   }
   expect(ProbeConfigSchema.safeParse(config).success).toBe(true);
 });
 test("ambient authority is removed rather than forwarded to OMP", () => {
-  const environment = { HOME: "/host", PATH: "/host/bin", MANIFOLD_JOB_CONTEXT_FD: "9", OPENAI_API_KEY: "host-secret", OMP_AUTH_BROKER_TOKEN: "broker-secret", BUN_OPTIONS: "--preload /host/evil.ts", NODE_OPTIONS: "--require /host/evil.cjs", HTTPS_PROXY: "http://external", PI_REQ_DEBUG: "1" };
+  const environment = { HOME: "/host", PATH: "/host/bin", MANIFOLD_JOB_CONTEXT_FD: "9", OPENAI_API_KEY: "host-secret", OMP_AUTH_BROKER_TOKEN: "broker-secret", BUN_OPTIONS: "--preload /host/evil.ts", NODE_OPTIONS: "--require /host/evil.cjs", HTTPS_PROXY: "http://external", PI_AI_CODEX_CLIENT_VERSION: "untrusted", PI_REQ_DEBUG: "1" };
   isolateProbeEnvironment(environment);
+  expect(environment.PI_AI_CODEX_CLIENT_VERSION).toBe("0.169.0");
   expect(JSON.stringify(environment)).not.toContain("host-secret");
   expect(JSON.stringify(environment)).not.toContain("broker-secret");
   expect(JSON.stringify(environment)).not.toContain("/host");

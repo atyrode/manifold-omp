@@ -225,6 +225,7 @@ export function nativeModelConfiguration(pool: RuntimeAccountPool, overlay?: Ove
         (provider) => !selected.includes(provider),
       ),
       extendedContext: true,
+      providers: { webKeyless: false },
       startup: { setupWizard: false },
     },
   };
@@ -740,7 +741,7 @@ function supportsSdkRuntime(machine: MachineHalf | undefined, operationId: strin
       bun?.sha256 !== sdkRuntimeArtifacts.tools.bun[platform].sha256 ||
       bun.entrySha256 !== sdkRuntimeArtifacts.tools.bun[platform].entrySha256) return false;
   }
-  return sdkRuntimeArtifacts.sdkVersion === "18.22.0" &&
+  return sdkRuntimeArtifacts.sdkVersion === "18.22.2" &&
     operation?.executable?.runtimeTool === "bun" &&
     operation?.input.automation !== undefined && operation.input.resumeOverrides !== undefined &&
     operation.runtimeTools?.includes("omp") === true &&

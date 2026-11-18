@@ -1,5 +1,6 @@
 import { accessSync, closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readlinkSync, readSync, readdirSync, symlinkSync } from "node:fs";
 import { z } from "zod";
+import { CODEX_WIRE_VERSION } from "../codex-wire.ts";
 import { identifier, modelId, ThinkingLevelSchema } from "../../api/contracts.ts";
 import {
   GATEWAY_DISCOVERY_TIMEOUT_MS, PROBE_MODEL_LIMIT, ProbeError, ListedProvidersSchema, SealedIdentitiesSchema, inventoryAdmits, parseBenchmarkInput,
@@ -35,6 +36,7 @@ export const ProbeConfigSchema = z.strictObject({
   extensions: z.array(z.never()).length(0),
   disabledProviders: z.array(identifier).max(256),
   extendedContext: z.boolean(),
+  providers: z.strictObject({ webKeyless: z.literal(false) }),
   startup: z.strictObject({ setupWizard: z.literal(false) }),
 });
 
@@ -117,7 +119,7 @@ export function isolateProbeEnvironment(environment: NodeJS.ProcessEnv): void {
   Object.assign(environment, probeChildEnvironment());
 }
 export function probeChildEnvironment(): Record<string, string> {
-  return { HOME: PROBE_HOME, XDG_CONFIG_HOME: `${PROBE_HOME}/.config`, XDG_CACHE_HOME: `${PROBE_HOME}/.cache`,
+  return { PI_AI_CODEX_CLIENT_VERSION: CODEX_WIRE_VERSION, HOME: PROBE_HOME, XDG_CONFIG_HOME: `${PROBE_HOME}/.config`, XDG_CACHE_HOME: `${PROBE_HOME}/.cache`,
     XDG_DATA_HOME: `${PROBE_HOME}/.local/share`, XDG_STATE_HOME: `${PROBE_HOME}/.local/state`,
     PI_CODING_AGENT_DIR: PROBE_AGENT, PI_CONFIG_DIR: ".omp", PI_NATIVES_DIR: "/tmp/omp-native", TMPDIR: `${PROBE_HOME}/tmp`,
     PATH: "/runtime/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8", TZ: "UTC", NO_COLOR: "1" };

@@ -7,6 +7,7 @@ import { parseRequest, type PiNativeParsedRequest } from "@oh-my-pi/pi-ai/provid
 import type { AssistantMessage, Message } from "@oh-my-pi/pi-ai/types";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { MATERIAL_TRIGGER, materialMessage } from "../material.ts";
+import { CODEX_WIRE_VERSION } from "../../workers/codex-wire.ts";
 
 const text = (message: { content: Message["content"] }) => typeof message.content === "string" ? message.content
   : message.content.map(part => part.type === "text" ? part.text : `[${part.type}]`).join("");
@@ -57,6 +58,7 @@ test.each(["/summarize the sealed material", "Summarize the sealed material"])(
       join(import.meta.dir, "material-session-driver.ts"), join(root, "request.json")], {
       cwd: join(root, "cwd"), stdin: "ignore", stdout: "pipe", stderr: "pipe",
       env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: join(root, "home"), TMPDIR: join(root, "tmp"),
+        PI_AI_CODEX_CLIENT_VERSION: CODEX_WIRE_VERSION,
         PI_CODING_AGENT_DIR: join(root, "agent"), XDG_CONFIG_HOME: join(root, "home", ".config"),
         XDG_CACHE_HOME: join(root, "home", ".cache"), XDG_DATA_HOME: join(root, "home", ".local", "share"),
         XDG_STATE_HOME: join(root, "home", ".local", "state"), LANG: "C.UTF-8", TZ: "UTC" },

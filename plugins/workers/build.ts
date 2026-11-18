@@ -37,13 +37,13 @@ const dependencyMarker = ".omp-prepared-dependencies.json";
 const graphs = {
   baseline: {
     root, version: runtime.sdkVersion, nativeAlias: "pi-natives", native: runtime.tools["pi-natives"],
-    lockSha256: "51588a9f688f482d8ad8e728454a9c781384e73cd28eaa50ef205d6b19fdc092",
+    lockSha256: "a6b88d8ab14b079090127755d485d5147d8d27416fae7eca1a350aef5a40e517",
     loaderSha256: "395d21d431121f469ba5a6016c42ac06a5abfa1b8021abc0efbf475dfb0c7ccd",
-    patch: { file: "patches/@oh-my-pi%2Fpi-ai@18.22.0.patch", sha256: "70afb022302f0c2113dbd5122d8a22f16137466024a22931ed2f0a6da22fe36a" },
+    patch: { file: "patches/@oh-my-pi%2Fpi-ai@18.22.2.patch", sha256: "70afb022302f0c2113dbd5122d8a22f16137466024a22931ed2f0a6da22fe36a" },
   },
   sdkHost: {
     root: join(root, "sdk-host"), version: sdkRuntime.sdkVersion, nativeAlias: "sdk-pi-natives", native: sdkRuntime.tools["pi-natives"],
-    lockSha256: "82f55f9512f20d75bb2b284d5c6329f6e4792505fc248db1c88d5a5f51fc1ee9",
+    lockSha256: "3ede9ba06c56c5746ac33d59895a0c6bdbba0c30185060bcde04fc36d85177d4",
     loaderSha256: "395d21d431121f469ba5a6016c42ac06a5abfa1b8021abc0efbf475dfb0c7ccd",
     patch: undefined,
   },

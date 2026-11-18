@@ -299,7 +299,7 @@ describe("native account-pool gateway", () => {
     expect(() => parseInputs(broker, { anthropic: ["chosen"] }, serviceBearer, null)).toThrow();
     const environment: NodeJS.ProcessEnv = { PATH: "/bin", MANIFOLD_JOB_CONTEXT_FD: "3", ANTHROPIC_API_KEY: "private", HOME: "/source", HTTP_PROXY: "secret", PI_DEBUG_STARTUP: "1" };
     isolateEnvironment(environment);
-    expect(environment).toEqual({ PATH: "/bin", MANIFOLD_JOB_CONTEXT_FD: "3", HOME: "/inputs" });
+    expect(environment).toEqual({ PATH: "/bin", MANIFOLD_JOB_CONTEXT_FD: "3", HOME: "/inputs", PI_AI_CODEX_CLIENT_VERSION: "0.169.0" });
   });
 
   test("the fourth sealed input is required and only admits a strict bounded policy or null", () => {
@@ -468,7 +468,7 @@ describe("native account-pool gateway", () => {
       serviceBearer, null), controller.signal, routed);
     const url = `http://127.0.0.1:${gateway.port}`;
     try {
-      expect(listings).toEqual([{ url: "https://chatgpt.com/backend-api/codex/models?client_version=0.159.0", method: "GET",
+      expect(listings).toEqual([{ url: "https://chatgpt.com/backend-api/codex/models?client_version=0.169.0", method: "GET",
         authorization: "Bearer fixture-access-3", account: "fixture-account-3" }]);
       const headers = { Authorization: `Bearer ${serviceBearer}`, "x-omp-install-id": "00000000-0000-4000-8000-000000000001" };
       const listed: { data: { id: string; owned_by: string; inventory?: { quotaTier: string | null; inputCostPerMillion: number; contextWindow: number } }[] } =

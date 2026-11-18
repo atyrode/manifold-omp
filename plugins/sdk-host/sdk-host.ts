@@ -89,6 +89,7 @@ try {
     ...config,
     // Seal auxiliary delegation settings alongside the SDK's spawn policy.
     "startup.setupWizard": false,
+    "providers.webKeyless": config.providers.webKeyless,
     ...(restricted ? {
       "lsp.enabled": false, "advisor.enabled": false,
       "prewalk.enabled": false, "retry.modelFallback": false,
@@ -102,6 +103,7 @@ try {
     agentDir: PROBE_AGENT, configFiles: restricted ? [] : [`${PROBE_AGENT}/config.yml`],
     overrides: restricted ? settingsOverrides : {
       "startup.setupWizard": false,
+      "providers.webKeyless": config.providers.webKeyless,
       // Host-published schemas must reach the model without an extra required
       // intent argument. This is an in-memory setting only for this opt-in.
       ...(agentTools ? { "tools.intentTracing": false } : {}),

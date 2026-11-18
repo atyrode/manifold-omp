@@ -53,7 +53,7 @@ try {
       modelOverride: selection.patterns, ...(selection.role === undefined ? {} : { modelRole: selection.role }),
       ...(agent.thinkingLevel === undefined ? {} : { thinkingLevel: agent.thinkingLevel }),
       parentActiveModelPattern: scenario.active, settings, authStorage: auth, modelRegistry: registry,
-      structured: false, restrictToolNames: true, enableMCP: false, enableLsp: false, enableIrc: false,
+      restrictToolNames: true, enableMCP: false, enableLsp: false, enableIrc: false,
       skills: [], rules: [], contextFiles: [], promptTemplates: [], noContextFiles: true,
       artifactsDir: join(input.root, "sessions"), persistArtifacts: true, keepAlive: false,
       maxRuntimeMs: 20_000,

@@ -107,7 +107,7 @@ export async function verifyNativeMaterial({ root, target, hub, producerJobId, m
       return value.targets.every(item => item.state === "ready");
     }, 480000, 100);
     const input = {
-      config: JSON.stringify({ extensions: [], disabledProviders: [canary], extendedContext: false, startup: { setupWizard: false },
+      config: JSON.stringify({ extensions: [], disabledProviders: [canary], extendedContext: false, startup: { setupWizard: false }, providers: { webKeyless: false },
         modelRoles: { default: "fixture/openai/gpt-5" }, skills: { enabled: false } }),
       models: JSON.stringify({ providers: { fixture: { baseUrl: "http://invalid.example", apiKey: "NATIVE-CONFIG-SECRET-SENTINEL",
         transport: "pi-native", discovery: { type: "proxy" } } } }),
