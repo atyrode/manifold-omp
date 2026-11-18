@@ -71,6 +71,23 @@ function lifecycleFixture(options: {
 }
 const renewal = (index: number) => `renew-${index} ${LEASE_MS} ${RENEWAL_JUSTIFICATION}`;
 
+test("outside-work pauses report idle without completing the Run or stopping its lease", async () => {
+  const f = lifecycleFixture();
+  f.lifecycle.start();
+  f.lifecycle.track({ type: "agent_start" });
+  f.lifecycle.track({ type: "agent_pause", awaiting: false });
+  f.lifecycle.track({ type: "agent_pause", awaiting: true });
+  await settle();
+  expect(f.sent).toEqual(["working", "idle"]);
+  await f.advance(LEASE_MS / 2);
+  expect(f.sent).toEqual(["working", "idle", renewal(1)]);
+  f.lifecycle.track({ type: "agent_start" });
+  f.lifecycle.track({ type: "agent_end" });
+  await settle();
+  expect(f.sent.slice(3)).toEqual(["working", "done"]);
+  await f.lifecycle.stop();
+});
+
 test("renews at half of each lease with its justification, then from each renewal's own expiry", async () => {
   const f = lifecycleFixture();
   f.lifecycle.start();
@@ -135,7 +152,7 @@ test("past 64 open dialogs reporting ends on blocked, never the session and neve
   // The child's message listener calls this directly: a throw would reach the operator's terminal.
   for (const id of dialogs) expect(() => f.lifecycle.track({ type: "extension_ui_request", method: "select", id })).not.toThrow();
   for (const id of dialogs) f.lifecycle.track({ type: "extension_ui_request", method: "cancel", targetId: id });
-  f.lifecycle.track({ type: "agent_end", willContinue: false });
+  f.lifecycle.track({ type: "agent_end" });
   await settle();
   expect(f.sent).toEqual(["working", "blocked"]);
   await f.advance(LEASE_MS / 2);
@@ -218,7 +235,7 @@ test("the session's model rides one report per change: the first after launch, t
   await settle();
   expect(f.sent.slice(2)).toEqual(["working"]);
   // A switch rides the next report once; the report the switch queued then finds it sent.
-  f.lifecycle.track({ type: "agent_end", willContinue: false });
+  f.lifecycle.track({ type: "agent_end" });
   f.lifecycle.serve(o3);
   await settle();
   expect(f.sent.slice(3)).toEqual(["done openai/o3"]);
@@ -271,7 +288,7 @@ test.each([
   // Its activity still goes, alone.
   expect(f.sent).toEqual(["idle", "idle openai/gpt-5", "idle"]);
   f.lifecycle.track({ type: "agent_start" });
-  f.lifecycle.track({ type: "agent_end", willContinue: false });
+  f.lifecycle.track({ type: "agent_end" });
   await settle();
   // Accepted on the next report, then settled.
   expect(f.sent.slice(3)).toEqual(["working openai/gpt-5", "done"]);

@@ -12,7 +12,7 @@ import { runSubagentRunRequest, subagentRunRequest } from "@oh-my-pi/pi-coding-a
 const input = JSON.parse(readFileSync(process.argv[2]!, "utf8")) as {
   root: string;
   origin: string;
-  cases: { agent: string; task: string; smol: string; active: string }[];
+  cases: { agent: string; task: string; smol: string; slow?: string; active: string }[];
 };
 const originalFetch = globalThis.fetch;
 globalThis.fetch = ((request: string | URL | Request, init?: RequestInit) => {
@@ -41,6 +41,7 @@ try {
     if (!agent || agent.source !== "bundled") throw new Error("precedence_bundled_agent_missing");
     settings.setModelRole("task", scenario.task);
     settings.setModelRole("smol", scenario.smol);
+    settings.setModelRole("slow", scenario.slow ?? "fixture/slow:high");
     const selection = resolveAgentModelSelection({
       ...(agent.model === undefined ? {} : { agentModel: agent.model }), settings, activeModelPattern: scenario.active,
     });
@@ -52,7 +53,7 @@ try {
       modelOverride: selection.patterns, ...(selection.role === undefined ? {} : { modelRole: selection.role }),
       ...(agent.thinkingLevel === undefined ? {} : { thinkingLevel: agent.thinkingLevel }),
       parentActiveModelPattern: scenario.active, settings, authStorage: auth, modelRegistry: registry,
-      structured: false, restrictToolNames: true, enableMCP: false, enableLsp: false, enableIrc: false,
+      restrictToolNames: true, enableMCP: false, enableLsp: false, enableIrc: false,
       skills: [], rules: [], contextFiles: [], promptTemplates: [], noContextFiles: true,
       artifactsDir: join(input.root, "sessions"), persistArtifacts: true, keepAlive: false,
       maxRuntimeMs: 20_000,

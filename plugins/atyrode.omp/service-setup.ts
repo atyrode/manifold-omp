@@ -40,7 +40,7 @@ import {
 import runtimeArtifacts from "../runtime-artifacts.json";
 import { ompRuntimeTools } from "../runtime-assets.ts";
 
-const signInConfig = JSON.stringify({ startup: { setupWizard: false } });
+const signInConfig = JSON.stringify({ startup: { setupWizard: false }, providers: { webKeyless: false } });
 function expectBrokerRevision(actual: string | null, expected: string | null) {
   if (actual !== expected) throw new OmpRefusal("broker_revision_changed");
 }

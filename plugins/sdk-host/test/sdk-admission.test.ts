@@ -16,6 +16,7 @@ import { resolveRoleModelFull } from "@oh-my-pi/pi-coding-agent/session/role-mod
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionMaintenance, type SessionMaintenanceHost } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { cfgProvidersWebKeyless } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { loadBundledAgents } from "@oh-my-pi/pi-coding-agent/task/agents";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { resolveImageQuestionModel } from "@oh-my-pi/pi-coding-agent/utils/image-question";
@@ -212,7 +213,6 @@ test("bundled agents route through shared roles and unconfigured specialists inh
       sonic: { role: "smol", model: "cheap", thinking: medium },
       reviewer: { role: "slow", model: "review", thinking: high },
       "security-reviewer": { role: undefined, model: "active", thinking: low },
-      seance: { role: undefined, model: "active", thinking: low },
     });
     // No selector on these specialists: absent an active selector, OMP itself uses the default.
     for (const agent of loadBundledAgents().filter(agent => agent.model === undefined)) {
@@ -257,7 +257,7 @@ test("a one-shot's pinned roles leave OMP's later selections nothing but its con
   try {
     // Without the one-shot layer the workspace can choose the shared roles.
     expect(await selections({ default: configured })).toEqual({
-      advisor: other, agents: { task: other, scout: other, sonic: other, reviewer: other, "security-reviewer": served, seance: served },
+      advisor: other, agents: { task: other, scout: other, sonic: other, reviewer: other, "security-reviewer": served },
       planHandoff: other, compaction: [served, other],
     });
     expect(await selections(pinnedModelRoles({ default: configured }))).toEqual({
@@ -294,7 +294,8 @@ async function oneShotRegistry(root: string, configured: string, published: Publ
   };
   const agentDir = join(root, crypto.randomUUID());
   const workspace = join(agentDir, "workspace");
-  mkdirSync(workspace, { recursive: true });
+  mkdirSync(join(workspace, ".omp"), { recursive: true });
+  writeFileSync(join(workspace, ".omp/config.yml"), JSON.stringify({ providers: { webKeyless: true } }));
   // The owner fills in the service proxy's endpoint and bearer.
   writeFileSync(join(agentDir, "models.yml"), JSON.stringify({ providers: Object.fromEntries(
     Object.entries(native.models.providers).map(([name, provider]) =>
@@ -302,6 +303,7 @@ async function oneShotRegistry(root: string, configured: string, published: Publ
   const config = { ...native.config, modelRoles: pinnedModelRoles({ default: configured }), enabledModels: [exactModelScope(configured)] };
   writeFileSync(join(agentDir, "config.yml"), JSON.stringify(config));
   const settings = await Settings.loadReadOnly({ cwd: workspace, agentDir, configFiles: [join(agentDir, "config.yml")] });
+  expect(cfgProvidersWebKeyless.get(settings)).toBe(false);
   const registry = new ModelRegistry(await AuthStorage.create(join(agentDir, "auth.db")), join(agentDir, "models.yml"),
     { settings, cacheDbPath: join(agentDir, "models.db"), fetch: gateway as typeof fetch });
   // As the SDK host discovers before it admits the session.
@@ -405,7 +407,7 @@ test("a one-shot configured with a live-listed model is admitted with exactly th
 
 test("the SDK host admits a startup scope only when it names exactly the configured model", () => {
   const configured = "openrouter/stealth/space-bunny-alpha:medium";
-  const config = { extensions: [], disabledProviders: [], extendedContext: true, startup: { setupWizard: false },
+  const config = { extensions: [], disabledProviders: [], extendedContext: true, startup: { setupWizard: false }, providers: { webKeyless: false },
     modelRoles: { default: configured } };
   expect(SdkSessionConfigSchema.safeParse(config).success).toBe(true);
   expect(SdkSessionConfigSchema.safeParse({ ...config, enabledModels: [exactModelScope(configured)] }).success).toBe(true);

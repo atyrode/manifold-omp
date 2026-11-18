@@ -34,11 +34,16 @@ export class OmpRpcActivity {
         this.#maintenance.add(frame.type.replace(/_start$/, ""));
         next = this.#waiting.size ? "blocked" : "working";
         break;
-      case "agent_end":
-        this.#working = frame.willContinue === true;
-        if (!this.#working) this.#waiting.clear();
-        next = this.#waiting.size ? "blocked" : this.#working || this.#maintenance.size ? "working" : "done";
+      case "agent_pause":
+      case "agent_end": {
+        // SDK sessions emit pauses directly; upstream RPC encodes them as nonterminal ends.
+        const paused = frame.type === "agent_pause" || frame.isTerminal === false;
+        const awaiting = frame.type === "agent_pause" ? frame.awaiting === true : frame.awaitingAsyncWork === true;
+        this.#working = paused && !awaiting;
+        if (!paused) this.#waiting.clear();
+        next = this.#waiting.size ? "blocked" : this.#working || this.#maintenance.size ? "working" : paused ? "idle" : "done";
         break;
+      }
       case "auto_retry_end":
       case "auto_compaction_end":
         this.#maintenance.delete(frame.type.replace(/_end$/, ""));

@@ -3,10 +3,13 @@ import { randomUUID } from "node:crypto";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent";
 import { attachTuiControl, type TuiChannel, type TuiSession } from "../tui-control.ts";
 import { TuiChildMessageSchema, type TuiActivityFrame, type TuiChildMessage, type TuiCommand } from "../../tui-control-ipc.ts";
+import { OmpRpcActivity } from "../../workers/harness/rpc.ts";
 
 type Model = { provider: string; id: string };
 type SetToolUIContext = CreateAgentSessionResult["setToolUIContext"];
 type UIContext = Parameters<SetToolUIContext>[0];
+type SessionEvent = Parameters<Parameters<TuiSession["subscribe"]>[0]>[0];
+type FixtureEvent = { type: string; awaiting?: boolean; yielded?: boolean; messages?: unknown[] };
 const settle = () => new Promise<void>(resolve => setImmediate(resolve));
 const levels = ["off", "minimal", "low", "medium", "high", "xhigh"];
 
@@ -21,7 +24,7 @@ function sessionFixture(options: {
 } = {}) {
   const served = [{ provider: "openai", id: "gpt-5" }];
   const calls: string[] = [];
-  let listener: ((event: { type: string; isTerminal?: boolean }) => void) | undefined;
+  let listener: ((event: FixtureEvent) => void) | undefined;
   let refreshed = false;
   let model: Model | undefined = served[0];
   let thinking: string | undefined = "low";
@@ -49,7 +52,7 @@ function sessionFixture(options: {
   };
   // Only the members `TuiSession` picks are implemented.
   const session = fixture as unknown as TuiSession;
-  return { session, calls, emit: (event: { type: string; isTerminal?: boolean }) => listener?.(event),
+  return { session, calls, emit: (event: FixtureEvent) => listener?.(event),
     subscribed: () => listener !== undefined,
     /** The operator's own selector, or a retry fallback: the session changes model with no dial. */
     select: (next: Model) => fixture.setModel(next) };
@@ -197,17 +200,17 @@ test("a message outside the channel's schema stops the session and applies nothi
   }
 });
 
-test("activity forwards only lifecycle event names, and an agent end continues only when the session says so", () => {
+test("activity forwards only lifecycle event names, with terminal session ends", () => {
   const session = sessionFixture();
   const tui = attached(session.session);
   for (const event of [
     { type: "agent_start" }, { type: "message_update" }, { type: "tool_execution_start" }, { type: "model_changed" },
-    { type: "agent_end", isTerminal: false }, { type: "agent_end", isTerminal: true }, { type: "agent_end" },
+    { type: "agent_end" },
     { type: "auto_retry_start" }, { type: "auto_retry_end" }, { type: "auto_compaction_start" }, { type: "auto_compaction_end" },
   ]) session.emit(event);
   expect(tui.events()).toEqual([
     { type: "agent_start" },
-    { type: "agent_end", willContinue: true }, { type: "agent_end", willContinue: false }, { type: "agent_end", willContinue: false },
+    { type: "agent_end" },
     { type: "auto_retry_start" }, { type: "auto_retry_end" }, { type: "auto_compaction_start" }, { type: "auto_compaction_end" },
   ]);
   tui.control.ready();
@@ -218,6 +221,39 @@ test("activity forwards only lifecycle event names, and an agent end continues o
   expect(tui.sent.at(-1)).toEqual({ type: "tui_ready" });
   expect(session.subscribed()).toBe(false);
   expect(tui.listening()).toBe(false);
+});
+
+test.each([
+  ["session continuation", false, false, "working"],
+  ["queued input", true, false, "working"],
+  ["outside work", true, true, "idle"],
+] as const)("a pause for %s preserves the open run until its terminal end", (_, yielded, awaiting, expected) => {
+  const session = sessionFixture();
+  const tui = attached(session.session);
+  const activity = new OmpRpcActivity();
+  const report = (event: FixtureEvent) => {
+    const index = tui.events().length;
+    session.emit(event);
+    const frame = tui.events()[index];
+    if (!frame) throw new Error("missing activity frame");
+    activity.consume(frame);
+    return activity.activity;
+  };
+  expect(report({ type: "agent_start" })).toBe("working");
+  const pause: Extract<SessionEvent, { type: "agent_pause" }> = {
+    type: "agent_pause", yielded, awaiting,
+    messages: [{ role: "user", content: "TRANSCRIPT-SECRET", timestamp: 0 }],
+  };
+  expect(report(pause)).toBe(expected);
+  expect(tui.events().at(-1)).toEqual({ type: "agent_pause", awaiting });
+  expect(JSON.stringify(tui.sent)).not.toContain("TRANSCRIPT-SECRET");
+  expect(tui.stopped()).toBe(0);
+  expect(tui.listening()).toBe(true);
+  expect(session.subscribed()).toBe(true);
+  // A paused run may resume, or its outside wake source may disappear without another loop.
+  expect(report({ type: "agent_start" })).toBe("working");
+  expect(report(pause)).toBe(expected);
+  expect(report({ type: "agent_end" })).toBe("done");
 });
 
 test("an operator dialog reports blocked for exactly its duration, and its question and answer never leave the TUI", async () => {

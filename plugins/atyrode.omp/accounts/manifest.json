@@ -1,6 +1,6 @@
 {
   "id": "atyrode.omp.accounts",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "title": "omp accounts",
   "description": "Independent OMP accounts over governed native Manifold resources.",
   "capabilities": [
@@ -122,6 +122,7 @@
         },
         "environment": {
           "SSL_CERT_FILE": "/runtime/bin/ca-certificates",
+          "PI_AI_CODEX_CLIENT_VERSION": "0.169.0",
           "PI_CONFIG_DIR": "omp",
           "PI_CODING_AGENT_DIR": "/home/job/omp/agent"
         },

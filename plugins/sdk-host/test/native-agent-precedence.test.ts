@@ -6,6 +6,7 @@ import { expect, test } from "bun:test";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { parseRequest, type PiNativeParsedRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai/types";
+import { CODEX_WIRE_VERSION } from "../../workers/codex-wire.ts";
 
 test("native executor applies shared-role suffixes before bundled thinking defaults and inherits unconfigured specialists", async () => {
   const root = mkdtempSync(join(tmpdir(), "omp-native-precedence-"));
@@ -25,8 +26,8 @@ test("native executor applies shared-role suffixes before bundled thinking defau
     { agent: "sonic", task: "fixture/task:medium", smol: "fixture/smol:high", active: "fixture/active:low", model: "smol", thinking: high, role: "smol", declared: "medium" },
     { agent: "security-reviewer", task: "fixture/task:medium", smol: "fixture/smol:medium", active: "fixture/active:low", model: "active", thinking: low, role: null, declared: null },
     { agent: "security-reviewer", task: "fixture/task:medium", smol: "fixture/smol:medium", active: "fixture/active:high", model: "active", thinking: high, role: null, declared: null },
-    { agent: "seance", task: "fixture/task:medium", smol: "fixture/smol:medium", active: "fixture/active:low", model: "active", thinking: low, role: null, declared: null },
-    { agent: "seance", task: "fixture/task:medium", smol: "fixture/smol:medium", active: "fixture/active:high", model: "active", thinking: high, role: null, declared: null },
+    { agent: "reviewer", task: "fixture/task:medium", smol: "fixture/smol:medium", slow: "fixture/slow:low", active: "fixture/active:high", model: "slow", thinking: low, role: "slow", declared: null },
+    { agent: "reviewer", task: "fixture/task:medium", smol: "fixture/smol:medium", slow: "fixture/slow:medium", active: "fixture/active:low", model: "slow", thinking: medium, role: "slow", declared: null },
     { agent: "reviewer", task: "fixture/task:medium", smol: "fixture/smol:low", active: "fixture/active:low", model: "slow", thinking: high, role: "slow", declared: null },
   ];
   const bearer = `SYNTHETIC-NATIVE-PRECEDENCE-${randomUUID()}`;
@@ -67,6 +68,7 @@ test("native executor applies shared-role suffixes before bundled thinking defau
       join(import.meta.dir, "native-agent-precedence-driver.ts"), join(root, "request.json")], {
       cwd: join(root, "cwd"), stdin: "ignore", stdout: "pipe", stderr: "pipe",
       env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: join(root, "home"), TMPDIR: join(root, "tmp"),
+        PI_AI_CODEX_CLIENT_VERSION: CODEX_WIRE_VERSION,
         PI_CODING_AGENT_DIR: join(root, "agent"), XDG_CONFIG_HOME: join(root, "home", ".config"),
         XDG_CACHE_HOME: join(root, "home", ".cache"), XDG_DATA_HOME: join(root, "home", ".local", "share"),
         XDG_STATE_HOME: join(root, "home", ".local", "state"), LANG: "C.UTF-8", TZ: "UTC" },

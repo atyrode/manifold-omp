@@ -138,7 +138,7 @@ test("activity follows RPC lifecycle and outstanding questions, not model conten
   expect(activity.consume({ type: "extension_ui_request", id: "question-b", method: "input" })).toBeNull();
   expect(activity.answer("question-a")).toBeNull();
   expect(activity.answer("question-b")).toBe("working");
-  expect(activity.consume({ type: "agent_end", willContinue: true })).toBeNull();
+  expect(activity.consume({ type: "agent_end", isTerminal: false })).toBeNull();
   expect(activity.consume({ type: "agent_end" })).toBe("done");
   expect(activity.consume({ type: "agent_start" })).toBe("working");
   expect(activity.consume({ type: "extension_ui_request", id: "cancelled-question", method: "input" })).toBe("blocked");
@@ -147,6 +147,40 @@ test("activity follows RPC lifecycle and outstanding questions, not model conten
   expect(() => activity.answer("unowned-question")).toThrow("rpc_request_unavailable");
   expect(activity.consume({ type: "auto_compaction_start" })).toBe("working");
   expect(activity.consume({ type: "auto_compaction_end" })).toBe("idle");
+});
+
+test.each(["session", "rpc"] as const)("%s pauses idle only for outside work, preserving dialogs and maintenance", transport => {
+  const activity = new OmpRpcActivity();
+  const pause = (awaiting: boolean) => transport === "session"
+    ? { type: "agent_pause", awaiting }
+    : { type: "agent_end", isTerminal: false, yielded: true, ...(awaiting ? { awaitingAsyncWork: true } : {}) };
+  expect(activity.consume({ type: "agent_start" })).toBe("working");
+  expect(activity.consume(pause(false))).toBeNull();
+  expect(activity.activity).toBe("working");
+  expect(activity.consume(pause(true))).toBe("idle");
+  expect(activity.consume({ type: "agent_start" })).toBe("working");
+  expect(activity.consume({ type: "extension_ui_request", id: "paused-question", method: "confirm" })).toBe("blocked");
+  expect(activity.consume(pause(true))).toBeNull();
+  expect(activity.answer("paused-question")).toBe("idle");
+  expect(activity.consume({ type: "auto_retry_start" })).toBe("working");
+  expect(activity.consume({ type: "auto_compaction_start" })).toBeNull();
+  expect(activity.consume(pause(true))).toBeNull();
+  expect(activity.consume({ type: "auto_retry_end" })).toBeNull();
+  expect(activity.consume({ type: "auto_compaction_end" })).toBe("idle");
+  // Finishing maintenance cannot idle a continuation that is already scheduled.
+  expect(activity.consume(pause(false))).toBe("working");
+  expect(activity.consume({ type: "auto_retry_start" })).toBeNull();
+  expect(activity.consume({ type: "auto_retry_end" })).toBeNull();
+  expect(activity.consume({ type: "extension_ui_request", id: "continuing-question", method: "input" })).toBe("blocked");
+  expect(activity.consume(pause(false))).toBeNull();
+  expect(activity.answer("continuing-question")).toBe("working");
+  expect(activity.consume(pause(true))).toBe("idle");
+  // An outside wake source can disappear without resuming the model.
+  expect(activity.consume({ type: "agent_end", isTerminal: true })).toBe("done");
+  expect(activity.consume({ type: "agent_start" })).toBe("working");
+  expect(activity.consume({ type: "extension_ui_request", id: "terminal-question", method: "input" })).toBe("blocked");
+  expect(activity.consume({ type: "agent_end" })).toBe("done");
+  expect(() => activity.answer("terminal-question")).toThrow("rpc_request_unavailable");
 });
 
 test("native follow-up frames cannot switch sessions or declare activity", async () => {

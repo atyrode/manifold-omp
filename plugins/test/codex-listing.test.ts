@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
+import { CODEX_CLIENT_VERSION } from "@oh-my-pi/pi-catalog/wire/codex";
+import accountsManifest from "../atyrode.omp/accounts/manifest.json";
+import { isolateEnvironment as isolateBroker } from "../workers/broker/inputs.ts";
+import { isolateEnvironment as isolateGateway } from "../workers/gateway/inputs.ts";
+import { probeChildEnvironment } from "../workers/probe/inputs.ts";
 import { bundledProbeModels } from "../atyrode.omp/sdk-metadata.macro.ts" with { type: "macro" };
 import {
   inventoryAdmits, LISTED_PROVIDER_ROWS, OMP_VERSION, parseBenchmarkObservation, parseInventoryObservation, PROBE_MODEL_LIMIT, type InventoryModel,
@@ -33,6 +38,17 @@ function backend(answer: () => Response = () => Response.json({ models: [entry(L
 }
 const accounts = async (provider: string) => provider === "openai-codex" ? [account] : null;
 
+test("native launches pin the SDK wire version instead of discovering it from npm", () => {
+  for (const isolate of [isolateBroker, isolateGateway]) {
+    const environment = { PI_AI_CODEX_CLIENT_VERSION: "unreviewed" };
+    isolate(environment);
+    expect(environment.PI_AI_CODEX_CLIENT_VERSION).toBe(CODEX_CLIENT_VERSION);
+  }
+  expect(probeChildEnvironment().PI_AI_CODEX_CLIENT_VERSION).toBe(CODEX_CLIENT_VERSION);
+  expect(accountsManifest.machine.operations["atyrode.omp.accounts.sign-in"].environment.PI_AI_CODEX_CLIENT_VERSION)
+    .toBe(CODEX_CLIENT_VERSION);
+});
+
 describe("the gateway publishes the Codex models the account's listing carries", () => {
   test("a Codex model the pinned SDK lacks is published as OMP resolves it, and an unlisted bundled one is not", async () => {
     // The premise: no bundled row, so only the live listing can make it serveable.
@@ -52,7 +68,7 @@ describe("the gateway publishes the Codex models the account's listing carries",
     expect(resolvePublished(models, `openai-codex/${UNLISTED_BUNDLED}`)).toBeUndefined();
     // One request, to Codex's own listing endpoint, with the pooled account's token and id.
     expect(requests.map(request => [request.method, request.url, request.headers.get("authorization"), request.headers.get("chatgpt-account-id")]))
-      .toEqual([["GET", "https://chatgpt.com/backend-api/codex/models?client_version=0.159.0", `Bearer ${account.accessToken}`, account.accountId]]);
+      .toEqual([["GET", "https://chatgpt.com/backend-api/codex/models?client_version=0.169.0", `Bearer ${account.accessToken}`, account.accountId]]);
     expect(requests[0]!.redirect).toBe("error");
     // The SDK's model cache is in memory only: nothing is written where the worker runs.
     expect(existsSync(":memory:")).toBe(false);

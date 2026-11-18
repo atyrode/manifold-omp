@@ -1,4 +1,5 @@
 import { accessSync, constants, closeSync, fstatSync, openSync, readdirSync, readSync } from "node:fs";
+import { CODEX_WIRE_VERSION } from "../codex-wire.ts";
 import { GatewayRequestLimitsSchema, RuntimeAccountPoolSchema, type GatewayRequestLimits, type RuntimeAccountPool } from "../../api/contracts.ts";
 
 export const INPUT_LIMIT = 128 * 1024;
@@ -76,8 +77,9 @@ export function isolateEnvironment(environment: NodeJS.ProcessEnv): void {
   for (const key of Object.keys(environment)) {
     if (!["PATH", "LANG", "LC_ALL", "TZ", "MANIFOLD_JOB_CONTEXT_FD"].includes(key)) delete environment[key];
   }
-  // getInstallId has no public memory-only setter in SDK 18.20.1. Its supported
+  // getInstallId has no public memory-only setter in SDK 18.22.2. Its supported
   // read-only-filesystem path caches an ephemeral UUID in memory. The verified
   // sealed input root is empty apart from inputs and cannot acquire ~/.omp.
   environment.HOME = "/inputs";
+  environment.PI_AI_CODEX_CLIENT_VERSION = CODEX_WIRE_VERSION;
 }

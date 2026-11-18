@@ -8,6 +8,7 @@ import type { WorkerContext } from "@manifold/sdk/worker";
 import type { ActionRunnerResponse } from "@manifold/protocol";
 import { z } from "zod";
 import { prepareOmpNativeDirectory, probeChildEnvironment } from "../probe/inputs.ts";
+import { CODEX_WIRE_VERSION } from "../codex-wire.ts";
 import { openSessionsRoot, prepareSessionFile, SESSIONS_ROOT, SessionIdSchema } from "./sessions.ts";
 import { OmpRpcActivity, OmpSendInputSchema, rpcFrames, RPC_FRAME_BYTES } from "./rpc.ts";
 import { ADMISSION_CONTEXT_BYTES, writeAdmissionContext, type AdmissionContextFile } from "./admission.ts";
@@ -189,7 +190,7 @@ export async function runOmpNative(context: WorkerContext): Promise<boolean> {
       clearTimeout(timeout);
     }
   }
-  const environment: NodeJS.ProcessEnv = { ...process.env, PI_NATIVES_DIR: "/tmp/omp-native" };
+  const environment: NodeJS.ProcessEnv = { ...process.env, PI_NATIVES_DIR: "/tmp/omp-native", PI_AI_CODEX_CLIENT_VERSION: CODEX_WIRE_VERSION };
   for (const name of Object.keys(environment)) if (name.startsWith("MANIFOLD_")) delete environment[name];
   const child = spawn("/runtime/bin/omp", [...(sessionFile ? ["--session", `${SESSIONS_ROOT}/${sessionFile}`] : []), ...process.argv.slice(3)], {
     cwd: "/home/job/workspace", env: environment, stdio: print ? ["inherit", "pipe", "inherit"] : "inherit",
@@ -354,7 +355,7 @@ export async function runOmpHarness(context: WorkerContext): Promise<boolean> {
               process.stdout.write(`\n${String(frame.title ?? "OMP needs input")}\n`);
               if (Array.isArray(frame.options)) process.stdout.write(`${frame.options.join("\n")}\n`);
             } else if (frame.method === "cancel" && typeof frame.targetId === "string") prompts.delete(frame.targetId);
-          } else if (frame.type === "agent_end" && frame.willContinue !== true) prompts.clear();
+          } else if (frame.type === "agent_end" && frame.isTerminal !== false) prompts.clear();
           const next = activity.consume(frame);
           if (next) void reportActivity(next).catch(stop);
           if (frame.type === "message_update") {

@@ -11,7 +11,7 @@ const input = JSON.parse(readFileSync(process.argv[2]!, "utf8")) as { root: stri
 const agentDir = join(input.root, "agent");
 const cwd = join(input.root, "cwd");
 const config = SdkSessionConfigSchema.parse({ extensions: [], disabledProviders: [], extendedContext: false,
-  startup: { setupWizard: false }, modelRoles: { default: "fixture/openai/gpt-5" }, skills: { enabled: false } });
+  startup: { setupWizard: false }, providers: { webKeyless: false }, modelRoles: { default: "fixture/openai/gpt-5" }, skills: { enabled: false } });
 const settings = await Settings.init({ inMemory: true, cwd: input.root, agentDir, configFiles: [], overrides: {
   ...config, "startup.setupWizard": false, "lsp.enabled": false, "advisor.enabled": false,
   "prewalk.enabled": false, "retry.modelFallback": false, "task.agentAdvisor": { task: "off" }, "task.prewalk": false,

@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
+import { CODEX_WIRE_VERSION } from "../../workers/codex-wire.ts";
 
 interface MemoryObservation {
   backend: "off" | "mnemopi";
@@ -38,6 +39,7 @@ async function observeMemory(backend: "off" | "mnemopi", rejectPrimary = false, 
       cwd: join(root, "cwd"), stdin: "ignore", stdout: "pipe", stderr: "pipe",
       // No inherited provider keys, login state, proxy, Bun preload, or user config.
       env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: join(root, "home"), TMPDIR: join(root, "tmp"),
+        PI_AI_CODEX_CLIENT_VERSION: CODEX_WIRE_VERSION,
         PI_CODING_AGENT_DIR: join(root, "agent"), XDG_CONFIG_HOME: join(root, "home", ".config"),
         XDG_CACHE_HOME: join(root, "home", ".cache"), XDG_DATA_HOME: join(root, "home", ".local", "share"),
         XDG_STATE_HOME: join(root, "home", ".local", "state"), LANG: "C.UTF-8", TZ: "UTC",

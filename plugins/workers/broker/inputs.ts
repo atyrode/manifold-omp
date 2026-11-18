@@ -1,4 +1,5 @@
 import { accessSync, constants, closeSync, fstatSync, openSync, readdirSync, readSync } from "node:fs";
+import { CODEX_WIRE_VERSION } from "../codex-wire.ts";
 import { BrokerClientAccessSchema, type BrokerClientAccess } from "../../api/contracts.ts";
 
 const INPUT_LIMIT = 128 * 1024;
@@ -60,4 +61,5 @@ export function isolateEnvironment(environment: NodeJS.ProcessEnv): void {
     if (!["PATH", "LANG", "LC_ALL", "TZ", "MANIFOLD_JOB_CONTEXT_FD"].includes(key)) delete environment[key];
   }
   environment.HOME = "/inputs";
+  environment.PI_AI_CODEX_CLIENT_VERSION = CODEX_WIRE_VERSION;
 }

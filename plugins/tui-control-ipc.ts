@@ -16,10 +16,11 @@ export type TuiCommand = z.infer<typeof TuiCommandSchema>;
 export const TuiParentMessageSchema = z.strictObject({ type: z.literal("tui_command"), id: z.uuid(), command: TuiCommandSchema });
 export type TuiParentMessage = z.infer<typeof TuiParentMessageSchema>;
 
-/** Shaped exactly as the RPC frames `OmpRpcActivity` already consumes. */
+/** Activity-only session events; `OmpRpcActivity` also consumes the upstream RPC wire shape. */
 export const TuiActivityFrameSchema = z.union([
   z.strictObject({ type: z.enum(["agent_start", "auto_compaction_start", "auto_compaction_end", "auto_retry_start", "auto_retry_end"]) }),
-  z.strictObject({ type: z.literal("agent_end"), willContinue: z.boolean() }),
+  z.strictObject({ type: z.literal("agent_pause"), awaiting: z.boolean() }),
+  z.strictObject({ type: z.literal("agent_end") }),
   z.strictObject({ type: z.literal("extension_ui_request"), method: z.enum(["select", "confirm", "input", "editor"]), id: z.uuid() }),
   z.strictObject({ type: z.literal("extension_ui_request"), method: z.literal("cancel"), targetId: z.uuid() }),
 ]);
