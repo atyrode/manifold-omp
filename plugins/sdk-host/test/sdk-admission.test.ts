@@ -212,7 +212,6 @@ test("bundled agents route through shared roles and unconfigured specialists inh
       sonic: { role: "smol", model: "cheap", thinking: medium },
       reviewer: { role: "slow", model: "review", thinking: high },
       "security-reviewer": { role: undefined, model: "active", thinking: low },
-      seance: { role: undefined, model: "active", thinking: low },
     });
     // No selector on these specialists: absent an active selector, OMP itself uses the default.
     for (const agent of loadBundledAgents().filter(agent => agent.model === undefined)) {
@@ -257,7 +256,7 @@ test("a one-shot's pinned roles leave OMP's later selections nothing but its con
   try {
     // Without the one-shot layer the workspace can choose the shared roles.
     expect(await selections({ default: configured })).toEqual({
-      advisor: other, agents: { task: other, scout: other, sonic: other, reviewer: other, "security-reviewer": served, seance: served },
+      advisor: other, agents: { task: other, scout: other, sonic: other, reviewer: other, "security-reviewer": served },
       planHandoff: other, compaction: [served, other],
     });
     expect(await selections(pinnedModelRoles({ default: configured }))).toEqual({

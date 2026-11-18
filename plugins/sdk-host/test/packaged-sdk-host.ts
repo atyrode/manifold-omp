@@ -230,7 +230,7 @@ function checkBlockedCollision(messages: readonly { role: string }[]) {
 
 /** Real bundled discovery routes only through shared roles, retaining native inheritance. */
 async function verifyBundledRegistry(): Promise<void> {
-  const names = ["reviewer", "scout", "seance", "security-reviewer", "sonic", "task"];
+  const names = ["reviewer", "scout", "security-reviewer", "sonic", "task"];
   const discovered = await discoverAgents("/home/job/workspace", "/home/job");
   check(isDeepStrictEqual(discovered.agents.map(agent => agent.name).sort(), names) &&
     discovered.agents.every(agent => agent.source === "bundled"), "bundled-discovery-replaced");
@@ -245,7 +245,6 @@ async function verifyBundledRegistry(): Promise<void> {
     sonic: { role: "smol", patterns: ["fixture/openai/gpt-4.1:medium"] },
     reviewer: { role: "slow", patterns: ["fixture/openai/gpt-5:high"] },
     "security-reviewer": { role: undefined, patterns: ["fixture/openai/o3:low"] },
-    seance: { role: undefined, patterns: ["fixture/openai/o3:low"] },
   }), "bundled-shared-role-inheritance");
 }
 

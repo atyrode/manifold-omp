@@ -354,7 +354,7 @@ export async function runOmpHarness(context: WorkerContext): Promise<boolean> {
               process.stdout.write(`\n${String(frame.title ?? "OMP needs input")}\n`);
               if (Array.isArray(frame.options)) process.stdout.write(`${frame.options.join("\n")}\n`);
             } else if (frame.method === "cancel" && typeof frame.targetId === "string") prompts.delete(frame.targetId);
-          } else if (frame.type === "agent_end" && frame.willContinue !== true) prompts.clear();
+          } else if (frame.type === "agent_end" && frame.isTerminal !== false) prompts.clear();
           const next = activity.consume(frame);
           if (next) void reportActivity(next).catch(stop);
           if (frame.type === "message_update") {

@@ -25,8 +25,8 @@ test("native executor applies shared-role suffixes before bundled thinking defau
     { agent: "sonic", task: "fixture/task:medium", smol: "fixture/smol:high", active: "fixture/active:low", model: "smol", thinking: high, role: "smol", declared: "medium" },
     { agent: "security-reviewer", task: "fixture/task:medium", smol: "fixture/smol:medium", active: "fixture/active:low", model: "active", thinking: low, role: null, declared: null },
     { agent: "security-reviewer", task: "fixture/task:medium", smol: "fixture/smol:medium", active: "fixture/active:high", model: "active", thinking: high, role: null, declared: null },
-    { agent: "seance", task: "fixture/task:medium", smol: "fixture/smol:medium", active: "fixture/active:low", model: "active", thinking: low, role: null, declared: null },
-    { agent: "seance", task: "fixture/task:medium", smol: "fixture/smol:medium", active: "fixture/active:high", model: "active", thinking: high, role: null, declared: null },
+    { agent: "reviewer", task: "fixture/task:medium", smol: "fixture/smol:medium", slow: "fixture/slow:low", active: "fixture/active:high", model: "slow", thinking: low, role: "slow", declared: null },
+    { agent: "reviewer", task: "fixture/task:medium", smol: "fixture/smol:medium", slow: "fixture/slow:medium", active: "fixture/active:low", model: "slow", thinking: medium, role: "slow", declared: null },
     { agent: "reviewer", task: "fixture/task:medium", smol: "fixture/smol:low", active: "fixture/active:low", model: "slow", thinking: high, role: "slow", declared: null },
   ];
   const bearer = `SYNTHETIC-NATIVE-PRECEDENCE-${randomUUID()}`;

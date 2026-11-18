@@ -20,8 +20,8 @@ export interface TuiChannel {
   listen(receive: (raw: unknown) => void): () => void;
 }
 
-const forwarded: Readonly<Record<string, true>> = { agent_start: true, agent_end: true, auto_compaction_start: true,
-  auto_compaction_end: true, auto_retry_start: true, auto_retry_end: true };
+const forwarded: Readonly<Record<string, true>> = { agent_start: true,
+  auto_compaction_start: true, auto_compaction_end: true, auto_retry_start: true, auto_retry_end: true };
 // Every operator dialog a tool can open in the stock TUI. `askDialog` is the rich `ask` selector.
 const dialogs: Readonly<Record<string, "select" | "confirm" | "input" | "editor">> =
   { select: "select", confirm: "confirm", input: "input", editor: "editor", askDialog: "select" };
@@ -67,9 +67,12 @@ export function attachTuiControl(session: TuiSession, setToolUIContext: SetToolU
   };
   const unsubscribe = session.subscribe(event => {
     if (event.type === "model_changed") serve();
-    if (!Object.hasOwn(forwarded, event.type)) return;
-    activity(event.type === "agent_end" ? { type: "agent_end", willContinue: event.isTerminal === false }
-      : { type: event.type as Exclude<TuiActivityFrame["type"], "agent_end" | "extension_ui_request"> });
+    // Session pauses are not terminal ends. Only outside-work waits idle the parent;
+    // queued input and the session's own continuations still count as working.
+    if (event.type === "agent_pause") activity({ type: "agent_pause", awaiting: event.awaiting });
+    else if (event.type === "agent_end") activity({ type: "agent_end" });
+    else if (Object.hasOwn(forwarded, event.type))
+      activity({ type: event.type as Exclude<TuiActivityFrame["type"], "agent_pause" | "agent_end" | "extension_ui_request"> });
   });
   const apply = async (command: TuiCommand): Promise<RunControlOutcome> => {
     if (command.type === "prompt") {
